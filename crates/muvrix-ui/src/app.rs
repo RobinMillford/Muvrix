@@ -4,44 +4,57 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Color32, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
 use glow::HasContext as _;
+use muvrix_core::browser::MediaBrowser;
+use muvrix_core::history::HistoryStore;
 use muvrix_player::{
-    Event, MpvHandle, MpvRenderContext, PlaybackController, PlaybackState, SeekMode, TrackInfo,
-    TrackType,
+    Event, MpvHandle, MpvRenderContext, PlaybackController, PlaybackState, SeekMode,
+    SubtitleStyling, TrackInfo, TrackType,
 };
 
 use crate::gl_loader;
 use crate::icons::{self, Icon};
 use crate::render_engine::RenderEngine;
+use crate::views::AppView;
 
 /// Main Muvrix desktop player application.
 pub struct MuvrixApp {
-    controller: PlaybackController,
-    render_engine: Arc<Mutex<RenderEngine>>,
-    gl: Arc<glow::Context>,
+    pub(crate) controller: PlaybackController,
+    pub(crate) render_engine: Arc<Mutex<RenderEngine>>,
+    pub(crate) gl: Arc<glow::Context>,
 
     // Hardware and OpenGL diagnostics
-    gpu_vendor: String,
-    gpu_renderer: String,
-    gl_version: String,
+    pub(crate) gpu_vendor: String,
+    pub(crate) gpu_renderer: String,
+    pub(crate) gl_version: String,
 
     // UI and interaction state
-    is_seeking: bool,
-    seek_target: f64,
-    status_message: String,
-    path_input: String,
-    is_fullscreen: bool,
-    show_shortcuts: bool,
-    show_diagnostics: bool,
-    screenshot_requested: bool,
+    pub(crate) is_seeking: bool,
+    pub(crate) seek_target: f64,
+    pub(crate) status_message: String,
+    pub(crate) path_input: String,
+    pub(crate) is_fullscreen: bool,
+    pub(crate) show_shortcuts: bool,
+    pub(crate) show_diagnostics: bool,
+    pub(crate) screenshot_requested: bool,
+
+    // Phase 0.7 navigation and feature state
+    pub(crate) current_view: AppView,
+    pub(crate) media_browser: MediaBrowser,
+    pub(crate) history_store: HistoryStore,
+    pub(crate) show_playlist_drawer: bool,
+    pub(crate) pending_resume_prompt: Option<(String, f64)>,
+    pub(crate) is_pip: bool,
+    pub(crate) last_history_save: Instant,
+    pub(crate) active_styling: SubtitleStyling,
 
     // Frame timing and UI responsiveness measurements
-    last_frame_instant: Instant,
-    frame_durations: VecDeque<Duration>,
-    fps_measured: f64,
-    frame_time_ms: f64,
-    spinner_angle: f32,
+    pub(crate) last_frame_instant: Instant,
+    pub(crate) frame_durations: VecDeque<Duration>,
+    pub(crate) fps_measured: f64,
+    pub(crate) frame_time_ms: f64,
+    pub(crate) spinner_angle: f32,
 }
 
 impl MuvrixApp {
@@ -103,7 +116,18 @@ impl MuvrixApp {
         // 6. Wrap in PlaybackController
         let controller = PlaybackController::new(mpv)?;
 
-        Ok(Self {
+        let current_view = match std::env::var("MUVRIX_INITIAL_VIEW").as_deref() {
+            Ok("browser") => AppView::Browser,
+            Ok("playlist") => AppView::Playlist,
+            Ok("history" | "recent") => AppView::Recent,
+            Ok("settings") => AppView::Settings,
+            _ => AppView::Player,
+        };
+        let show_playlist_drawer = std::env::var("MUVRIX_OPEN_DRAWER")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
+        let mut app = Self {
             controller,
             render_engine,
             gl,
@@ -123,7 +147,28 @@ impl MuvrixApp {
             show_shortcuts: false,
             show_diagnostics: false,
             screenshot_requested: false,
-        })
+            current_view,
+            media_browser: MediaBrowser::default(),
+            history_store: HistoryStore::load(None),
+            show_playlist_drawer,
+            pending_resume_prompt: None,
+            is_pip: false,
+            last_history_save: Instant::now(),
+            active_styling: SubtitleStyling::default(),
+        };
+
+        if let Ok(seed) = std::env::var("MUVRIX_INITIAL_MEDIA") {
+            app.load_file(&seed);
+        }
+        if let Ok(seed_queue) = std::env::var("MUVRIX_SEED_PLAYLIST") {
+            for item in seed_queue.split(';') {
+                if !item.trim().is_empty() {
+                    let _ = app.controller.playlist_append(item.trim());
+                }
+            }
+        }
+
+        Ok(app)
     }
 
     /// Loads a video file or URL into the playback controller, resolving relative paths,
@@ -140,9 +185,23 @@ impl MuvrixApp {
                 let path_str = resolved.to_string_lossy().to_string();
                 log::info!("Resolved media path -> {path_str}");
                 self.path_input = path_str.clone();
+
+                // Check for saved resume position before loading
+                let resume_pos = self.history_store.get_resume_position(&path_str);
+
                 match self.controller.load_file(&path_str) {
                     Ok(()) => {
                         self.status_message = format!("Loading: {path_str}");
+                        // Immediately record initial entry in history store
+                        self.history_store.record_playback(&path_str, 0.0, 0.0);
+                        let _ = self.history_store.save();
+
+                        // Offer resume prompt if saved position > 10s
+                        if let Some(pos) = resume_pos {
+                            self.pending_resume_prompt = Some((path_str, pos));
+                        } else {
+                            self.pending_resume_prompt = None;
+                        }
                     }
                     Err(e) => {
                         let err_msg = format!("Failed to initiate playback on '{path_str}': {e}");
@@ -253,6 +312,13 @@ impl MuvrixApp {
                         format!("Playback active: {vfmt} ({w}x{h}) | HWDEC: {hw} | AO: {ao}");
                 }
                 Event::EndFile { reason, error, .. } => {
+                    if let Some(path) = self.controller.current_file() {
+                        let time_pos = self.controller.time_pos();
+                        let duration = self.controller.duration();
+                        self.history_store.record_playback(path, time_pos, duration);
+                        let _ = self.history_store.save();
+                    }
+
                     if let Some(err) = error {
                         let path = self.controller.current_file().unwrap_or("<unknown>");
                         self.status_message = format!("Playback error on '{path}': {err}");
@@ -267,6 +333,41 @@ impl MuvrixApp {
                 }
                 _ => {}
             }
+        }
+
+        // Periodic history persistence every 3 seconds during playback
+        if *self.controller.state() == PlaybackState::Playing
+            && self.last_history_save.elapsed() > Duration::from_secs(3)
+        {
+            self.last_history_save = Instant::now();
+            if let Some(path) = self.controller.current_file() {
+                let time_pos = self.controller.time_pos();
+                let duration = self.controller.duration();
+                if duration > 0.0 && time_pos > 0.0 {
+                    self.history_store.record_playback(path, time_pos, duration);
+                    let _ = self.history_store.save();
+                }
+            }
+        }
+    }
+
+    /// Toggles compact mini-player floating mode (resizes main window to 480x270 and requests AlwaysOnTop).
+    pub fn toggle_pip(&mut self, ctx: &egui::Context) {
+        self.is_pip = !self.is_pip;
+        if self.is_pip {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(480.0, 270.0)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                egui::WindowLevel::AlwaysOnTop,
+            ));
+            self.status_message =
+                "Compact Mini-Player mode enabled (Always on Top is best-effort on Wayland)"
+                    .to_string();
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(1280.0, 720.0)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                egui::WindowLevel::Normal,
+            ));
+            self.status_message = "Exited Compact Mini-Player mode".to_string();
         }
     }
 
@@ -366,6 +467,25 @@ impl MuvrixApp {
             self.open_file_dialog();
         }
 
+        // P: Toggle Playlist drawer
+        if ctx.input(|i| i.key_pressed(egui::Key::P)) {
+            self.show_playlist_drawer = !self.show_playlist_drawer;
+        }
+
+        // B: Toggle Media Browser view
+        if ctx.input(|i| i.key_pressed(egui::Key::B)) {
+            self.current_view = if self.current_view == AppView::Browser {
+                AppView::Player
+            } else {
+                AppView::Browser
+            };
+        }
+
+        // I: Toggle Picture-in-Picture mode
+        if ctx.input(|i| i.key_pressed(egui::Key::I)) {
+            self.toggle_pip(ctx);
+        }
+
         // F1: Toggle shortcuts help dialog
         if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
             self.show_shortcuts = !self.show_shortcuts;
@@ -378,6 +498,25 @@ impl eframe::App for MuvrixApp {
         self.sync_playback_state();
         self.update_frame_timing();
         self.handle_keyboard_inputs(ctx);
+
+        // Handle drag and drop media files into the application
+        ctx.input(|i| {
+            if !i.raw.dropped_files.is_empty() {
+                for file in &i.raw.dropped_files {
+                    if let Some(ref path) = file.path {
+                        let path_str = path.to_string_lossy().to_string();
+                        if self.controller.playlist_count() == 0
+                            && *self.controller.state() == PlaybackState::Idle
+                        {
+                            self.load_file(&path_str);
+                        } else {
+                            let _ = self.controller.playlist_append(&path_str);
+                            self.status_message = format!("Appended to playlist: {path_str}");
+                        }
+                    }
+                }
+            }
+        });
 
         // Optional automated window screenshot capture for verification
         if let Ok(capture_path) = std::env::var("MUVRIX_CAPTURE_WINDOW_PNG") {
@@ -404,6 +543,9 @@ impl eframe::App for MuvrixApp {
                             log::error!("Failed to save window screenshot to {capture_path}: {e}");
                         } else {
                             log::info!("Successfully captured window screenshot to {capture_path}");
+                            if std::env::var("MUVRIX_CAPTURE_AND_EXIT").is_ok() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
                         }
                     }
                 }
@@ -421,7 +563,7 @@ impl eframe::App for MuvrixApp {
         ctx.set_visuals(visuals);
 
         // ---------------------------------------------------------------------
-        // 1. Top Identity & Player Header Panel
+        // 1. Top Identity, Navigation & Player Header Panel
         // ---------------------------------------------------------------------
         egui::TopBottomPanel::top("player_top_bar")
             .resizable(false)
@@ -442,8 +584,42 @@ impl eframe::App for MuvrixApp {
                     ui.separator();
                     ui.add_space(4.0);
 
+                    // Navigation View Tabs (Player, Browser, Playlist, History, Settings)
+                    for view in &[
+                        AppView::Player,
+                        AppView::Browser,
+                        AppView::Playlist,
+                        AppView::Recent,
+                        AppView::Settings,
+                    ] {
+                        let is_active = self.current_view == *view;
+                        let text = if *view == AppView::Playlist
+                            && self.controller.playlist_count() > 0
+                        {
+                            format!("Playlist ({})", self.controller.playlist_count())
+                        } else {
+                            view.label().to_string()
+                        };
+
+                        let rich = if is_active {
+                            RichText::new(&text)
+                                .strong()
+                                .color(Color32::from_rgb(95, 195, 255))
+                        } else {
+                            RichText::new(&text).color(Color32::from_gray(185))
+                        };
+
+                        if ui.selectable_label(is_active, rich).clicked() {
+                            self.current_view = *view;
+                        }
+                    }
+
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
                     // User file actions with clean vector icons
-                    let (open_text, subs_text) = if available_w > 720.0 {
+                    let (open_text, subs_text) = if available_w > 860.0 {
                         ("Open File...", "Add Subs...")
                     } else {
                         ("Open", "Subs")
@@ -500,14 +676,14 @@ impl eframe::App for MuvrixApp {
                     let vfmt = self.controller.video_format().to_string();
                     let afmt = self.controller.audio_codec().to_string();
                     let hw = self.controller.hwdec_current().to_string();
-                    let show_badge = (w > 0 || !vfmt.is_empty()) && available_w >= 850.0;
+                    let show_badge = (w > 0 || !vfmt.is_empty()) && available_w >= 920.0;
 
                     let right_reserved = if show_badge {
-                        440.0
+                        480.0
                     } else if available_w > 720.0 {
-                        240.0
+                        280.0
                     } else {
-                        180.0
+                        200.0
                     };
                     let max_title_w = (available_w - right_reserved).max(50.0);
 
@@ -529,6 +705,29 @@ impl eframe::App for MuvrixApp {
 
                     // Right-aligned toolbar section
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // In Player view, offer Drawer and PiP toggles
+                        if self.current_view == AppView::Player {
+                            let drawer_tip = if self.show_playlist_drawer {
+                                "Hide Queue Drawer (P)"
+                            } else {
+                                "Show Queue Drawer (P)"
+                            };
+                            if icons::icon_button(ui, Icon::Playlist, drawer_tip).clicked() {
+                                self.show_playlist_drawer = !self.show_playlist_drawer;
+                            }
+
+                            let pip_tip = if self.is_pip {
+                                "Exit Compact Mini-Player Mode (I)"
+                            } else {
+                                "Compact Mini-Player Mode (Always-on-Top, best-effort on Wayland) (I)"
+                            };
+                            if icons::icon_button(ui, Icon::Pip, pip_tip).clicked() {
+                                self.toggle_pip(ctx);
+                            }
+
+                            ui.separator();
+                        }
+
                         // Developer & Test Menu (moved out of user toolbar)
                         egui::ComboBox::from_id_salt("dev_menu_combo")
                             .selected_text("Developer")
@@ -649,793 +848,886 @@ impl eframe::App for MuvrixApp {
             });
 
         // ---------------------------------------------------------------------
-        // Optional Diagnostics Bar (when enabled via Developer menu)
+        // Active View Dispatch (Player, Browser, Playlist, History, Settings)
         // ---------------------------------------------------------------------
-        if self.show_diagnostics {
-            egui::TopBottomPanel::top("diagnostics_subpanel")
+        if self.current_view != AppView::Player {
+            self.render_mini_player_deck(ctx);
+            match self.current_view {
+                AppView::Browser => self.render_browser_view(ctx),
+                AppView::Playlist => self.render_playlist_view(ctx),
+                AppView::Recent => self.render_recent_view(ctx),
+                AppView::Settings => self.render_settings_view(ctx),
+                AppView::Player => unreachable!(),
+            }
+        } else {
+            self.render_playlist_drawer(ctx);
+
+            // -----------------------------------------------------------------
+            // Optional Diagnostics Bar (when enabled via Developer menu)
+            // -----------------------------------------------------------------
+            if self.show_diagnostics {
+                egui::TopBottomPanel::top("diagnostics_subpanel")
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        ui.add_space(2.0);
+                        ui.horizontal_wrapped(|ui| {
+                            icons::icon_label(
+                                ui,
+                                Icon::Diagnostics,
+                                14.0,
+                                Color32::from_rgb(255, 180, 50),
+                            );
+                            ui.label(
+                                RichText::new("Developer Diagnostics")
+                                    .strong()
+                                    .color(Color32::from_rgb(255, 180, 50)),
+                            );
+                            ui.separator();
+                            ui.label(
+                                RichText::new(format!(
+                                    "GL: {} | Renderer: {} | Vendor: {}",
+                                    self.gl_version, self.gpu_renderer, self.gpu_vendor
+                                ))
+                                .monospace()
+                                .color(Color32::from_gray(160)),
+                            );
+
+                            ui.separator();
+                            let source_fps = self
+                                .controller
+                                .container_fps()
+                                .or_else(|| self.controller.estimated_vf_fps())
+                                .unwrap_or(0.0);
+                            let drops = self.controller.frame_drop_count();
+                            ui.label(
+                                RichText::new(format!(
+                                    "UI: {:.1} FPS ({:.1} ms) | Video: {:.1} fps ({} drops)",
+                                    self.fps_measured, self.frame_time_ms, source_fps, drops
+                                ))
+                                .monospace()
+                                .color(Color32::from_rgb(0, 255, 128)),
+                            );
+
+                            ui.separator();
+                            ui.label("Path/URL:");
+                            let text_response = ui.add(
+                                egui::TextEdit::singleline(&mut self.path_input)
+                                    .hint_text("Enter media path or URL...")
+                                    .desired_width(180.0),
+                            );
+                            if (ui.button("Load").clicked()
+                                || (text_response.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter))))
+                                && !self.path_input.trim().is_empty()
+                            {
+                                let path = self.path_input.clone();
+                                self.load_file(&path);
+                            }
+
+                            if ui.button("Dismiss [x]").clicked() {
+                                self.show_diagnostics = false;
+                            }
+                        });
+                        ui.add_space(2.0);
+                    });
+            }
+
+            // ---------------------------------------------------------------------
+            // 2. Playback Controls Bottom Deck
+            // ---------------------------------------------------------------------
+            egui::TopBottomPanel::bottom("player_controls")
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.add_space(2.0);
-                    ui.horizontal_wrapped(|ui| {
-                        icons::icon_label(
-                            ui,
-                            Icon::Diagnostics,
-                            14.0,
-                            Color32::from_rgb(255, 180, 50),
-                        );
+                    ui.add_space(4.0);
+
+                    let deck_width = ui.available_width();
+
+                    // -------------------------------------------------------------
+                    // Row 1: Dedicated Timeline Row
+                    // -------------------------------------------------------------
+                    let time_pos = self.controller.time_pos();
+                    let duration = self.controller.duration();
+
+                    ui.horizontal(|ui| {
+                        let cur_str = format_timestamp(time_pos);
+                        let dur_str = format_timestamp(duration);
+                        let remaining_str = format_timestamp((duration - time_pos).max(0.0));
+
+                        // Current position timestamp
                         ui.label(
-                            RichText::new("Developer Diagnostics")
-                                .strong()
-                                .color(Color32::from_rgb(255, 180, 50)),
-                        );
-                        ui.separator();
-                        ui.label(
-                            RichText::new(format!(
-                                "GL: {} | Renderer: {} | Vendor: {}",
-                                self.gl_version, self.gpu_renderer, self.gpu_vendor
-                            ))
-                            .monospace()
-                            .color(Color32::from_gray(160)),
+                            RichText::new(&cur_str)
+                                .monospace()
+                                .size(12.0)
+                                .color(Color32::from_gray(215)),
                         );
 
-                        ui.separator();
-                        let source_fps = self
-                            .controller
-                            .container_fps()
-                            .or_else(|| self.controller.estimated_vf_fps())
-                            .unwrap_or(0.0);
-                        let drops = self.controller.frame_drop_count();
-                        ui.label(
-                            RichText::new(format!(
-                                "UI: {:.1} FPS ({:.1} ms) | Video: {:.1} fps ({} drops)",
-                                self.fps_measured, self.frame_time_ms, source_fps, drops
-                            ))
-                            .monospace()
-                            .color(Color32::from_rgb(0, 255, 128)),
-                        );
+                        // Full-width seeker slider with hover timestamp tooltip
+                        let max_dur = if duration > 0.0 { duration } else { 1.0 };
+                        let mut slider_val = if self.is_seeking {
+                            self.seek_target
+                        } else {
+                            time_pos
+                        };
 
-                        ui.separator();
-                        ui.label("Path/URL:");
-                        let text_response = ui.add(
-                            egui::TextEdit::singleline(&mut self.path_input)
-                                .hint_text("Enter media path or URL...")
-                                .desired_width(180.0),
-                        );
-                        if (ui.button("Load").clicked()
-                            || (text_response.lost_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter))))
-                            && !self.path_input.trim().is_empty()
-                        {
-                            let path = self.path_input.clone();
-                            self.load_file(&path);
+                        let slider_width = (ui.available_width() - 54.0).max(60.0);
+                        let slider = egui::Slider::new(&mut slider_val, 0.0..=max_dur)
+                            .show_value(false)
+                            .trailing_fill(true);
+
+                        let response = ui.add_sized([slider_width, 18.0], slider);
+                        let response = response
+                            .on_hover_text(format!("Seek to {}", format_timestamp(slider_val)));
+
+                        if response.drag_started() {
+                            self.is_seeking = true;
+                            self.seek_target = slider_val;
+                        }
+                        if response.dragged() {
+                            self.seek_target = slider_val;
+                        }
+                        if response.drag_stopped() {
+                            let _ = self.controller.seek(self.seek_target, SeekMode::Absolute);
+                            self.is_seeking = false;
                         }
 
-                        if ui.button("Dismiss [x]").clicked() {
-                            self.show_diagnostics = false;
-                        }
+                        // Duration timestamp
+                        ui.label(
+                            RichText::new(&dur_str)
+                                .monospace()
+                                .size(12.0)
+                                .color(Color32::from_gray(185)),
+                        )
+                        .on_hover_text(format!(
+                            "Duration: {} (Remaining: -{})",
+                            dur_str, remaining_str
+                        ));
                     });
-                    ui.add_space(2.0);
-                });
-        }
 
-        // ---------------------------------------------------------------------
-        // 2. Playback Controls Bottom Deck
-        // ---------------------------------------------------------------------
-        egui::TopBottomPanel::bottom("player_controls")
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.add_space(4.0);
+                    ui.add_space(3.0);
 
-                let deck_width = ui.available_width();
+                    // -------------------------------------------------------------
+                    // Row 2: Transport Buttons, Speed, Volume, Tracks, Fullscreen
+                    // -------------------------------------------------------------
+                    ui.horizontal(|ui| {
+                        // Group 1: Transport Controls (Primary Play/Pause, Stop, Seeks)
+                        let (play_icon, play_tip) = match self.controller.state() {
+                            PlaybackState::Playing => (Icon::Pause, "Pause (Space)"),
+                            _ => (Icon::Play, "Play (Space)"),
+                        };
 
-                // -------------------------------------------------------------
-                // Row 1: Dedicated Timeline Row
-                // -------------------------------------------------------------
-                let time_pos = self.controller.time_pos();
-                let duration = self.controller.duration();
-
-                ui.horizontal(|ui| {
-                    let cur_str = format_timestamp(time_pos);
-                    let dur_str = format_timestamp(duration);
-                    let remaining_str = format_timestamp((duration - time_pos).max(0.0));
-
-                    // Current position timestamp
-                    ui.label(
-                        RichText::new(&cur_str)
-                            .monospace()
-                            .size(12.0)
-                            .color(Color32::from_gray(215)),
-                    );
-
-                    // Full-width seeker slider with hover timestamp tooltip
-                    let max_dur = if duration > 0.0 { duration } else { 1.0 };
-                    let mut slider_val = if self.is_seeking {
-                        self.seek_target
-                    } else {
-                        time_pos
-                    };
-
-                    let slider_width = (ui.available_width() - 54.0).max(60.0);
-                    let slider = egui::Slider::new(&mut slider_val, 0.0..=max_dur)
-                        .show_value(false)
-                        .trailing_fill(true);
-
-                    let response = ui.add_sized([slider_width, 18.0], slider);
-                    let response =
-                        response.on_hover_text(format!("Seek to {}", format_timestamp(slider_val)));
-
-                    if response.drag_started() {
-                        self.is_seeking = true;
-                        self.seek_target = slider_val;
-                    }
-                    if response.dragged() {
-                        self.seek_target = slider_val;
-                    }
-                    if response.drag_stopped() {
-                        let _ = self.controller.seek(self.seek_target, SeekMode::Absolute);
-                        self.is_seeking = false;
-                    }
-
-                    // Duration timestamp
-                    ui.label(
-                        RichText::new(&dur_str)
-                            .monospace()
-                            .size(12.0)
-                            .color(Color32::from_gray(185)),
-                    )
-                    .on_hover_text(format!(
-                        "Duration: {} (Remaining: -{})",
-                        dur_str, remaining_str
-                    ));
-                });
-
-                ui.add_space(3.0);
-
-                // -------------------------------------------------------------
-                // Row 2: Transport Buttons, Speed, Volume, Tracks, Fullscreen
-                // -------------------------------------------------------------
-                ui.horizontal(|ui| {
-                    // Group 1: Transport Controls (Primary Play/Pause, Stop, Seeks)
-                    let (play_icon, play_tip) = match self.controller.state() {
-                        PlaybackState::Playing => (Icon::Pause, "Pause (Space)"),
-                        _ => (Icon::Play, "Play (Space)"),
-                    };
-
-                    // Primary Play/Pause button
-                    if icons::primary_icon_button(ui, play_icon, Vec2::new(34.0, 26.0), play_tip)
+                        // Primary Play/Pause button
+                        if icons::primary_icon_button(
+                            ui,
+                            play_icon,
+                            Vec2::new(34.0, 26.0),
+                            play_tip,
+                        )
                         .clicked()
+                        {
+                            self.toggle_pause();
+                        }
+
+                        ui.add_space(2.0);
+
+                        // Stop button
+                        if icons::icon_button_sized(
+                            ui,
+                            Icon::Stop,
+                            Vec2::new(26.0, 26.0),
+                            "Stop playback",
+                        )
+                        .clicked()
+                        {
+                            let _ = self.controller.stop();
+                        }
+
+                        ui.add_space(2.0);
+
+                        // Relative seek -5s / +5s
+                        if icons::icon_button_sized(
+                            ui,
+                            Icon::SeekBackward,
+                            Vec2::new(28.0, 26.0),
+                            "Seek backward 5s (Left Arrow)",
+                        )
+                        .clicked()
+                        {
+                            self.seek_relative(-5.0);
+                        }
+
+                        if icons::icon_button_sized(
+                            ui,
+                            Icon::SeekForward,
+                            Vec2::new(28.0, 26.0),
+                            "Seek forward 5s (Right Arrow)",
+                        )
+                        .clicked()
+                        {
+                            self.seek_relative(5.0);
+                        }
+
+                        // Chapter navigation if present
+                        let chapters = self.controller.chapters().to_vec();
+                        if !chapters.is_empty() {
+                            ui.add_space(2.0);
+                            if icons::icon_button(ui, Icon::SkipPrevious, "Previous Chapter")
+                                .clicked()
+                            {
+                                let _ = self.controller.prev_chapter();
+                            }
+                            if icons::icon_button(ui, Icon::SkipNext, "Next Chapter").clicked() {
+                                let _ = self.controller.next_chapter();
+                            }
+
+                            let cur_ch_idx = self.controller.current_chapter().unwrap_or(0);
+                            let selected_title = chapters
+                                .iter()
+                                .find(|c| c.index == cur_ch_idx)
+                                .map(|c| format!("Ch {}: {}", c.index + 1, c.title))
+                                .unwrap_or_else(|| "Chapters".to_string());
+
+                            egui::ComboBox::from_id_salt("chapters_combo")
+                                .selected_text(selected_title)
+                                .show_ui(ui, |ui| {
+                                    for ch in &chapters {
+                                        let label = format!(
+                                            "{}: {} ({})",
+                                            ch.index + 1,
+                                            ch.title,
+                                            format_timestamp(ch.time)
+                                        );
+                                        let is_selected =
+                                            Some(ch.index) == self.controller.current_chapter();
+                                        if ui.selectable_label(is_selected, label).clicked() {
+                                            let _ = self.controller.set_chapter(ch.index);
+                                        }
+                                    }
+                                });
+                        }
+
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        // Group 2: Volume & Mute Controls
+                        let (mute_icon, mute_tip) = if self.controller.is_muted() {
+                            (Icon::VolumeMuted, "Unmute Audio (M)")
+                        } else if self.controller.volume() < 40.0 {
+                            (Icon::VolumeLow, "Mute Audio (M)")
+                        } else {
+                            (Icon::VolumeHigh, "Mute Audio (M)")
+                        };
+
+                        if icons::icon_button_sized(ui, mute_icon, Vec2::new(26.0, 26.0), mute_tip)
+                            .clicked()
+                        {
+                            let _ = self.controller.toggle_mute();
+                        }
+
+                        let mut vol = self.controller.volume();
+                        let vol_label = format!("{:.0}%", vol);
+                        let vol_slider = egui::Slider::new(&mut vol, 0.0..=100.0)
+                            .show_value(false)
+                            .text(vol_label);
+                        let vol_w = if deck_width < 760.0 { 48.0 } else { 65.0 };
+                        let vol_res = ui
+                            .add_sized([vol_w, 18.0], vol_slider)
+                            .on_hover_text(format!("Volume: {:.0}% (Up/Down Arrow)", vol));
+                        if vol_res.changed() {
+                            let _ = self.controller.set_volume(vol);
+                        }
+
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        // Group 3: Playback Speed Selector
+                        let current_speed = self.controller.speed();
+                        let speed_label = if (current_speed - 1.0).abs() < 0.01 {
+                            "1.0x".to_string()
+                        } else {
+                            format!("{:.2}x", current_speed)
+                        };
+
+                        egui::ComboBox::from_id_salt("speed_combo")
+                            .selected_text(speed_label)
+                            .show_ui(ui, |ui| {
+                                for &preset in &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0] {
+                                    let label = format!(
+                                        "{preset}x{}",
+                                        if preset == 1.0 { " (Normal)" } else { "" }
+                                    );
+                                    let is_current = (current_speed - preset).abs() < 0.01;
+                                    if ui.selectable_label(is_current, label).clicked() {
+                                        let _ = self.controller.set_speed(preset);
+                                    }
+                                }
+                            });
+
+                        if (current_speed - 1.0).abs() > 0.01
+                            && ui
+                                .button("1.0x")
+                                .on_hover_text("Reset to normal speed (Backspace)")
+                                .clicked()
+                        {
+                            let _ = self.controller.reset_speed();
+                        }
+
+                        // Group 4: Right-aligned Controls (Fullscreen, Subs, Audio)
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Fullscreen toggle button
+                            let (fs_icon, fs_tip) = if self.is_fullscreen {
+                                (Icon::Windowed, "Exit Fullscreen (F / Esc)")
+                            } else {
+                                (Icon::Fullscreen, "Enter Fullscreen (F / F11)")
+                            };
+                            if icons::icon_button_sized(ui, fs_icon, Vec2::new(28.0, 26.0), fs_tip)
+                                .clicked()
+                            {
+                                self.toggle_fullscreen(ctx);
+                            }
+
+                            ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(4.0);
+
+                            let sub_tracks: Vec<TrackInfo> = self
+                                .controller
+                                .tracks_by_type(TrackType::Subtitle)
+                                .into_iter()
+                                .cloned()
+                                .collect();
+                            let selected_sub_id = self
+                                .controller
+                                .selected_track(TrackType::Subtitle)
+                                .map(|t| t.id);
+
+                            let audio_tracks: Vec<TrackInfo> = self
+                                .controller
+                                .tracks_by_type(TrackType::Audio)
+                                .into_iter()
+                                .cloned()
+                                .collect();
+                            let selected_audio_id = self
+                                .controller
+                                .selected_track(TrackType::Audio)
+                                .map(|t| t.id);
+
+                            // If width is constrained (<760px), consolidate into a single contextual "Tracks" menu
+                            if deck_width < 760.0 {
+                                egui::ComboBox::from_id_salt("tracks_combo_compact")
+                                    .selected_text("Tracks")
+                                    .show_ui(ui, |ui| {
+                                        ui.label(
+                                            RichText::new("Audio Track")
+                                                .strong()
+                                                .color(Color32::from_rgb(120, 200, 255)),
+                                        );
+                                        if ui
+                                            .selectable_label(
+                                                selected_audio_id.is_none(),
+                                                "None (Mute Stream)",
+                                            )
+                                            .clicked()
+                                        {
+                                            let _ = self.controller.set_audio_track(None);
+                                        }
+                                        for track in &audio_tracks {
+                                            let label = format_track_label(track);
+                                            let is_selected = selected_audio_id == Some(track.id);
+                                            if ui.selectable_label(is_selected, label).clicked() {
+                                                let _ =
+                                                    self.controller.set_audio_track(Some(track.id));
+                                            }
+                                        }
+
+                                        ui.separator();
+                                        ui.label(
+                                            RichText::new("Subtitle Track")
+                                                .strong()
+                                                .color(Color32::from_rgb(120, 200, 255)),
+                                        );
+                                        if ui
+                                            .selectable_label(
+                                                selected_sub_id.is_none(),
+                                                "Off (Disabled)",
+                                            )
+                                            .clicked()
+                                        {
+                                            let _ = self.controller.set_subtitle_track(None);
+                                        }
+                                        for track in &sub_tracks {
+                                            let label = format_track_label(track);
+                                            let is_selected = selected_sub_id == Some(track.id);
+                                            if ui.selectable_label(is_selected, label).clicked() {
+                                                let _ = self
+                                                    .controller
+                                                    .set_subtitle_track(Some(track.id));
+                                            }
+                                        }
+
+                                        ui.separator();
+                                        if icons::icon_text_button(
+                                            ui,
+                                            Icon::FolderOpen,
+                                            "Add Subtitle File...",
+                                            "Load external subtitle file",
+                                        )
+                                        .clicked()
+                                        {
+                                            self.add_subtitle_dialog();
+                                        }
+                                    });
+                            } else {
+                                // Subtitle track selector
+                                let sub_summary = if let Some(id) = selected_sub_id {
+                                    if let Some(t) = sub_tracks.iter().find(|t| t.id == id) {
+                                        let label = t
+                                            .lang
+                                            .as_deref()
+                                            .unwrap_or(t.title.as_deref().unwrap_or("On"));
+                                        if deck_width < 860.0 {
+                                            format!("Sub: {label}")
+                                        } else {
+                                            format!("Subtitles: {label}")
+                                        }
+                                    } else {
+                                        "Sub: On".to_string()
+                                    }
+                                } else if deck_width < 860.0 {
+                                    "Sub: Off".to_string()
+                                } else {
+                                    "Subtitles: Off".to_string()
+                                };
+
+                                egui::ComboBox::from_id_salt("sub_combo")
+                                    .selected_text(sub_summary)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(
+                                                selected_sub_id.is_none(),
+                                                "Off (Disabled)",
+                                            )
+                                            .clicked()
+                                        {
+                                            let _ = self.controller.set_subtitle_track(None);
+                                        }
+                                        for track in &sub_tracks {
+                                            let label = format_track_label(track);
+                                            let is_selected = selected_sub_id == Some(track.id);
+                                            if ui.selectable_label(is_selected, label).clicked() {
+                                                let _ = self
+                                                    .controller
+                                                    .set_subtitle_track(Some(track.id));
+                                            }
+                                        }
+
+                                        ui.separator();
+                                        if icons::icon_text_button(
+                                            ui,
+                                            Icon::FolderOpen,
+                                            "Add Subtitle File...",
+                                            "Load external subtitle file",
+                                        )
+                                        .clicked()
+                                        {
+                                            self.add_subtitle_dialog();
+                                        }
+
+                                        let cur_delay = self.controller.sub_delay();
+                                        ui.horizontal(|ui| {
+                                            ui.label(format!("Delay: {:.2}s", cur_delay));
+                                            if ui.button("-0.25s").clicked() {
+                                                let _ = self
+                                                    .controller
+                                                    .set_subtitle_delay(cur_delay - 0.25);
+                                            }
+                                            if ui.button("0s").clicked() {
+                                                let _ = self.controller.set_subtitle_delay(0.0);
+                                            }
+                                            if ui.button("+0.25s").clicked() {
+                                                let _ = self
+                                                    .controller
+                                                    .set_subtitle_delay(cur_delay + 0.25);
+                                            }
+                                        });
+
+                                        let mut vis = self.controller.sub_visibility();
+                                        if ui.checkbox(&mut vis, "Subtitle Visible").changed() {
+                                            let _ = self.controller.set_subtitle_visibility(vis);
+                                        }
+                                    });
+
+                                ui.add_space(4.0);
+
+                                // Audio track selector
+                                let audio_summary = if let Some(id) = selected_audio_id {
+                                    if let Some(t) = audio_tracks.iter().find(|t| t.id == id) {
+                                        let label = t
+                                            .lang
+                                            .as_deref()
+                                            .unwrap_or(t.title.as_deref().unwrap_or("On"));
+                                        format!("Audio: {label}")
+                                    } else {
+                                        "Audio: On".to_string()
+                                    }
+                                } else {
+                                    "Audio: None".to_string()
+                                };
+
+                                egui::ComboBox::from_id_salt("audio_combo")
+                                    .selected_text(audio_summary)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(
+                                                selected_audio_id.is_none(),
+                                                "None (Mute Stream)",
+                                            )
+                                            .clicked()
+                                        {
+                                            let _ = self.controller.set_audio_track(None);
+                                        }
+                                        for track in &audio_tracks {
+                                            let label = format_track_label(track);
+                                            let is_selected = selected_audio_id == Some(track.id);
+                                            if ui.selectable_label(is_selected, label).clicked() {
+                                                let _ =
+                                                    self.controller.set_audio_track(Some(track.id));
+                                            }
+                                        }
+                                    });
+                            }
+                        });
+                    });
+
+                    ui.add_space(3.0);
+                });
+
+            // ---------------------------------------------------------------------
+            // 3. Central Video Viewport with Interactive Overlay Cards
+            // ---------------------------------------------------------------------
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(Color32::BLACK))
+                .show(ctx, |ui| {
+                    let available_size = ui.available_size();
+                    if available_size.x <= 1.0 || available_size.y <= 1.0 {
+                        return;
+                    }
+
+                    // Sense both clicks (play/pause) and double-clicks (fullscreen)
+                    let (rect, response) = ui.allocate_exact_size(available_size, Sense::click());
+
+                    if response.double_clicked() {
+                        self.toggle_fullscreen(ctx);
+                    } else if response.clicked() && *self.controller.state() != PlaybackState::Idle
                     {
                         self.toggle_pause();
                     }
 
-                    ui.add_space(2.0);
-
-                    // Stop button
-                    if icons::icon_button_sized(
-                        ui,
-                        Icon::Stop,
-                        Vec2::new(26.0, 26.0),
-                        "Stop playback",
-                    )
-                    .clicked()
-                    {
-                        let _ = self.controller.stop();
-                    }
-
-                    ui.add_space(2.0);
-
-                    // Relative seek -5s / +5s
-                    if icons::icon_button_sized(
-                        ui,
-                        Icon::SeekBackward,
-                        Vec2::new(28.0, 26.0),
-                        "Seek backward 5s (Left Arrow)",
-                    )
-                    .clicked()
-                    {
-                        self.seek_relative(-5.0);
-                    }
-
-                    if icons::icon_button_sized(
-                        ui,
-                        Icon::SeekForward,
-                        Vec2::new(28.0, 26.0),
-                        "Seek forward 5s (Right Arrow)",
-                    )
-                    .clicked()
-                    {
-                        self.seek_relative(5.0);
-                    }
-
-                    // Chapter navigation if present
-                    let chapters = self.controller.chapters().to_vec();
-                    if !chapters.is_empty() {
-                        ui.add_space(2.0);
-                        if icons::icon_button(ui, Icon::SkipPrevious, "Previous Chapter").clicked()
-                        {
-                            let _ = self.controller.prev_chapter();
-                        }
-                        if icons::icon_button(ui, Icon::SkipNext, "Next Chapter").clicked() {
-                            let _ = self.controller.next_chapter();
-                        }
-
-                        let cur_ch_idx = self.controller.current_chapter().unwrap_or(0);
-                        let selected_title = chapters
-                            .iter()
-                            .find(|c| c.index == cur_ch_idx)
-                            .map(|c| format!("Ch {}: {}", c.index + 1, c.title))
-                            .unwrap_or_else(|| "Chapters".to_string());
-
-                        egui::ComboBox::from_id_salt("chapters_combo")
-                            .selected_text(selected_title)
-                            .show_ui(ui, |ui| {
-                                for ch in &chapters {
-                                    let label = format!(
-                                        "{}: {} ({})",
-                                        ch.index + 1,
-                                        ch.title,
-                                        format_timestamp(ch.time)
-                                    );
-                                    let is_selected =
-                                        Some(ch.index) == self.controller.current_chapter();
-                                    if ui.selectable_label(is_selected, label).clicked() {
-                                        let _ = self.controller.set_chapter(ch.index);
-                                    }
-                                }
-                            });
-                    }
-
-                    ui.add_space(4.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-
-                    // Group 2: Volume & Mute Controls
-                    let (mute_icon, mute_tip) = if self.controller.is_muted() {
-                        (Icon::VolumeMuted, "Unmute Audio (M)")
-                    } else if self.controller.volume() < 40.0 {
-                        (Icon::VolumeLow, "Mute Audio (M)")
-                    } else {
-                        (Icon::VolumeHigh, "Mute Audio (M)")
-                    };
-
-                    if icons::icon_button_sized(ui, mute_icon, Vec2::new(26.0, 26.0), mute_tip)
-                        .clicked()
-                    {
-                        let _ = self.controller.toggle_mute();
-                    }
-
-                    let mut vol = self.controller.volume();
-                    let vol_label = format!("{:.0}%", vol);
-                    let vol_slider = egui::Slider::new(&mut vol, 0.0..=100.0)
-                        .show_value(false)
-                        .text(vol_label);
-                    let vol_w = if deck_width < 760.0 { 48.0 } else { 65.0 };
-                    let vol_res = ui
-                        .add_sized([vol_w, 18.0], vol_slider)
-                        .on_hover_text(format!("Volume: {:.0}% (Up/Down Arrow)", vol));
-                    if vol_res.changed() {
-                        let _ = self.controller.set_volume(vol);
-                    }
-
-                    ui.add_space(4.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-
-                    // Group 3: Playback Speed Selector
-                    let current_speed = self.controller.speed();
-                    let speed_label = if (current_speed - 1.0).abs() < 0.01 {
-                        "1.0x".to_string()
-                    } else {
-                        format!("{:.2}x", current_speed)
-                    };
-
-                    egui::ComboBox::from_id_salt("speed_combo")
-                        .selected_text(speed_label)
-                        .show_ui(ui, |ui| {
-                            for &preset in &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0] {
-                                let label = format!(
-                                    "{preset}x{}",
-                                    if preset == 1.0 { " (Normal)" } else { "" }
-                                );
-                                let is_current = (current_speed - preset).abs() < 0.01;
-                                if ui.selectable_label(is_current, label).clicked() {
-                                    let _ = self.controller.set_speed(preset);
-                                }
-                            }
-                        });
-
-                    if (current_speed - 1.0).abs() > 0.01
-                        && ui
-                            .button("1.0x")
-                            .on_hover_text("Reset to normal speed (Backspace)")
-                            .clicked()
-                    {
-                        let _ = self.controller.reset_speed();
-                    }
-
-                    // Group 4: Right-aligned Controls (Fullscreen, Subs, Audio)
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Fullscreen toggle button
-                        let (fs_icon, fs_tip) = if self.is_fullscreen {
-                            (Icon::Windowed, "Exit Fullscreen (F / Esc)")
-                        } else {
-                            (Icon::Fullscreen, "Enter Fullscreen (F / F11)")
-                        };
-                        if icons::icon_button_sized(ui, fs_icon, Vec2::new(28.0, 26.0), fs_tip)
-                            .clicked()
-                        {
-                            self.toggle_fullscreen(ctx);
-                        }
-
-                        ui.add_space(4.0);
-                        ui.separator();
-                        ui.add_space(4.0);
-
-                        let sub_tracks: Vec<TrackInfo> = self
-                            .controller
-                            .tracks_by_type(TrackType::Subtitle)
-                            .into_iter()
-                            .cloned()
-                            .collect();
-                        let selected_sub_id = self
-                            .controller
-                            .selected_track(TrackType::Subtitle)
-                            .map(|t| t.id);
-
-                        let audio_tracks: Vec<TrackInfo> = self
-                            .controller
-                            .tracks_by_type(TrackType::Audio)
-                            .into_iter()
-                            .cloned()
-                            .collect();
-                        let selected_audio_id = self
-                            .controller
-                            .selected_track(TrackType::Audio)
-                            .map(|t| t.id);
-
-                        // If width is constrained (<760px), consolidate into a single contextual "Tracks" menu
-                        if deck_width < 760.0 {
-                            egui::ComboBox::from_id_salt("tracks_combo_compact")
-                                .selected_text("Tracks")
-                                .show_ui(ui, |ui| {
-                                    ui.label(
-                                        RichText::new("Audio Track")
-                                            .strong()
-                                            .color(Color32::from_rgb(120, 200, 255)),
-                                    );
-                                    if ui
-                                        .selectable_label(
-                                            selected_audio_id.is_none(),
-                                            "None (Mute Stream)",
-                                        )
-                                        .clicked()
-                                    {
-                                        let _ = self.controller.set_audio_track(None);
-                                    }
-                                    for track in &audio_tracks {
-                                        let label = format_track_label(track);
-                                        let is_selected = selected_audio_id == Some(track.id);
-                                        if ui.selectable_label(is_selected, label).clicked() {
-                                            let _ = self.controller.set_audio_track(Some(track.id));
-                                        }
-                                    }
-
-                                    ui.separator();
-                                    ui.label(
-                                        RichText::new("Subtitle Track")
-                                            .strong()
-                                            .color(Color32::from_rgb(120, 200, 255)),
-                                    );
-                                    if ui
-                                        .selectable_label(
-                                            selected_sub_id.is_none(),
-                                            "Off (Disabled)",
-                                        )
-                                        .clicked()
-                                    {
-                                        let _ = self.controller.set_subtitle_track(None);
-                                    }
-                                    for track in &sub_tracks {
-                                        let label = format_track_label(track);
-                                        let is_selected = selected_sub_id == Some(track.id);
-                                        if ui.selectable_label(is_selected, label).clicked() {
-                                            let _ =
-                                                self.controller.set_subtitle_track(Some(track.id));
-                                        }
-                                    }
-
-                                    ui.separator();
-                                    if icons::icon_text_button(
-                                        ui,
-                                        Icon::FolderOpen,
-                                        "Add Subtitle File...",
-                                        "Load external subtitle file",
-                                    )
-                                    .clicked()
-                                    {
-                                        self.add_subtitle_dialog();
-                                    }
-                                });
-                        } else {
-                            // Subtitle track selector
-                            let sub_summary = if let Some(id) = selected_sub_id {
-                                if let Some(t) = sub_tracks.iter().find(|t| t.id == id) {
-                                    let label = t
-                                        .lang
-                                        .as_deref()
-                                        .unwrap_or(t.title.as_deref().unwrap_or("On"));
-                                    if deck_width < 860.0 {
-                                        format!("Sub: {label}")
-                                    } else {
-                                        format!("Subtitles: {label}")
-                                    }
-                                } else {
-                                    "Sub: On".to_string()
-                                }
-                            } else if deck_width < 860.0 {
-                                "Sub: Off".to_string()
-                            } else {
-                                "Subtitles: Off".to_string()
-                            };
-
-                            egui::ComboBox::from_id_salt("sub_combo")
-                                .selected_text(sub_summary)
-                                .show_ui(ui, |ui| {
-                                    if ui
-                                        .selectable_label(
-                                            selected_sub_id.is_none(),
-                                            "Off (Disabled)",
-                                        )
-                                        .clicked()
-                                    {
-                                        let _ = self.controller.set_subtitle_track(None);
-                                    }
-                                    for track in &sub_tracks {
-                                        let label = format_track_label(track);
-                                        let is_selected = selected_sub_id == Some(track.id);
-                                        if ui.selectable_label(is_selected, label).clicked() {
-                                            let _ =
-                                                self.controller.set_subtitle_track(Some(track.id));
-                                        }
-                                    }
-
-                                    ui.separator();
-                                    if icons::icon_text_button(
-                                        ui,
-                                        Icon::FolderOpen,
-                                        "Add Subtitle File...",
-                                        "Load external subtitle file",
-                                    )
-                                    .clicked()
-                                    {
-                                        self.add_subtitle_dialog();
-                                    }
-
-                                    let cur_delay = self.controller.sub_delay();
-                                    ui.horizontal(|ui| {
-                                        ui.label(format!("Delay: {:.2}s", cur_delay));
-                                        if ui.button("-0.25s").clicked() {
-                                            let _ = self
-                                                .controller
-                                                .set_subtitle_delay(cur_delay - 0.25);
-                                        }
-                                        if ui.button("0s").clicked() {
-                                            let _ = self.controller.set_subtitle_delay(0.0);
-                                        }
-                                        if ui.button("+0.25s").clicked() {
-                                            let _ = self
-                                                .controller
-                                                .set_subtitle_delay(cur_delay + 0.25);
-                                        }
-                                    });
-
-                                    let mut vis = self.controller.sub_visibility();
-                                    if ui.checkbox(&mut vis, "Subtitle Visible").changed() {
-                                        let _ = self.controller.set_subtitle_visibility(vis);
-                                    }
-                                });
-
-                            ui.add_space(4.0);
-
-                            // Audio track selector
-                            let audio_summary = if let Some(id) = selected_audio_id {
-                                if let Some(t) = audio_tracks.iter().find(|t| t.id == id) {
-                                    let label = t
-                                        .lang
-                                        .as_deref()
-                                        .unwrap_or(t.title.as_deref().unwrap_or("On"));
-                                    format!("Audio: {label}")
-                                } else {
-                                    "Audio: On".to_string()
-                                }
-                            } else {
-                                "Audio: None".to_string()
-                            };
-
-                            egui::ComboBox::from_id_salt("audio_combo")
-                                .selected_text(audio_summary)
-                                .show_ui(ui, |ui| {
-                                    if ui
-                                        .selectable_label(
-                                            selected_audio_id.is_none(),
-                                            "None (Mute Stream)",
-                                        )
-                                        .clicked()
-                                    {
-                                        let _ = self.controller.set_audio_track(None);
-                                    }
-                                    for track in &audio_tracks {
-                                        let label = format_track_label(track);
-                                        let is_selected = selected_audio_id == Some(track.id);
-                                        if ui.selectable_label(is_selected, label).clicked() {
-                                            let _ = self.controller.set_audio_track(Some(track.id));
-                                        }
-                                    }
-                                });
+                    // Render video quad via libmpv OpenGL FBO
+                    let render_engine = self.render_engine.clone();
+                    let callback = egui_glow::CallbackFn::new(move |info, painter| {
+                        let mut engine = render_engine.lock().unwrap();
+                        let viewport_px = info.viewport_in_pixels();
+                        unsafe {
+                            engine.paint(
+                                painter.gl(),
+                                painter,
+                                [
+                                    viewport_px.left_px,
+                                    viewport_px.from_bottom_px,
+                                    viewport_px.width_px,
+                                    viewport_px.height_px,
+                                ],
+                            );
                         }
                     });
-                });
 
-                ui.add_space(3.0);
-            });
+                    ui.painter().add(egui::PaintCallback {
+                        rect,
+                        callback: Arc::new(callback),
+                    });
 
-        // ---------------------------------------------------------------------
-        // 3. Central Video Viewport with Interactive Overlay Cards
-        // ---------------------------------------------------------------------
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(Color32::BLACK))
-            .show(ctx, |ui| {
-                let available_size = ui.available_size();
-                if available_size.x <= 1.0 || available_size.y <= 1.0 {
-                    return;
-                }
+                    // Interactive Resume Playback Prompt Banner (Feature Group C)
+                    if let Some((_, pos)) = self.pending_resume_prompt {
+                        let time_str = format_timestamp(pos);
 
-                // Sense both clicks (play/pause) and double-clicks (fullscreen)
-                let (rect, response) = ui.allocate_exact_size(available_size, Sense::click());
+                        let banner_w = 460.0_f32.min(rect.width() - 32.0);
+                        let banner_rect = Rect::from_min_size(
+                            Pos2::new(rect.center().x - banner_w * 0.5, rect.min.y + 16.0),
+                            Vec2::new(banner_w, 42.0),
+                        );
 
-                if response.double_clicked() {
-                    self.toggle_fullscreen(ctx);
-                } else if response.clicked() && *self.controller.state() != PlaybackState::Idle {
-                    self.toggle_pause();
-                }
+                        ui.painter().rect(
+                            banner_rect,
+                            6.0_f32,
+                            Color32::from_rgba_premultiplied(18, 24, 38, 235),
+                            Stroke::new(1.0_f32, Color32::from_rgb(60, 140, 240)),
+                            StrokeKind::Inside,
+                        );
 
-                // Render video quad via libmpv OpenGL FBO
-                let render_engine = self.render_engine.clone();
-                let callback = egui_glow::CallbackFn::new(move |info, painter| {
-                    let mut engine = render_engine.lock().unwrap();
-                    let viewport_px = info.viewport_in_pixels();
-                    unsafe {
-                        engine.paint(
-                            painter.gl(),
-                            painter,
-                            [
-                                viewport_px.left_px,
-                                viewport_px.from_bottom_px,
-                                viewport_px.width_px,
-                                viewport_px.height_px,
-                            ],
+                        let mut banner_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(banner_rect.shrink(6.0))
+                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        );
+
+                        icons::icon_label(
+                            &mut banner_ui,
+                            Icon::History,
+                            16.0,
+                            Color32::from_rgb(85, 180, 255),
+                        );
+                        banner_ui.add_space(4.0);
+                        banner_ui.label(
+                            RichText::new(format!("Resume from {time_str}?"))
+                                .strong()
+                                .size(12.5)
+                                .color(Color32::WHITE),
+                        );
+
+                        banner_ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if ui.button("Dismiss [x]").clicked() {
+                                    self.pending_resume_prompt = None;
+                                }
+                                if ui.button("Start 00:00").clicked() {
+                                    let _ = self.controller.seek(0.0, SeekMode::Absolute);
+                                    self.pending_resume_prompt = None;
+                                }
+                                if ui
+                                    .button(
+                                        RichText::new("Resume")
+                                            .strong()
+                                            .color(Color32::from_rgb(90, 190, 255)),
+                                    )
+                                    .clicked()
+                                {
+                                    let _ = self.controller.seek(pos, SeekMode::Absolute);
+                                    let _ = self.controller.play();
+                                    self.pending_resume_prompt = None;
+                                }
+                            },
                         );
                     }
-                });
 
-                ui.painter().add(egui::PaintCallback {
-                    rect,
-                    callback: Arc::new(callback),
-                });
+                    // Contextual Overlays for player states
+                    match self.controller.state() {
+                        PlaybackState::Idle => {
+                            let center_pos = rect.center();
+                            let card_width = 410.0_f32.min(rect.width() - 32.0);
+                            let card_height = 205.0_f32.min(rect.height() - 32.0);
+                            let card_rect = egui::Rect::from_center_size(
+                                center_pos,
+                                Vec2::new(card_width, card_height),
+                            );
 
-                // Contextual Overlays for player states
-                match self.controller.state() {
-                    PlaybackState::Idle => {
-                        let center_pos = rect.center();
-                        let card_width = 410.0_f32.min(rect.width() - 32.0);
-                        let card_height = 205.0_f32.min(rect.height() - 32.0);
-                        let card_rect = egui::Rect::from_center_size(
-                            center_pos,
-                            Vec2::new(card_width, card_height),
-                        );
+                            // High contrast welcome card container
+                            ui.painter().rect(
+                                card_rect,
+                                8.0_f32,
+                                Color32::from_rgba_premultiplied(22, 25, 34, 235),
+                                Stroke::new(1.0_f32, Color32::from_rgb(55, 68, 92)),
+                                egui::StrokeKind::Inside,
+                            );
 
-                        // High contrast welcome card container
-                        ui.painter().rect(
-                            card_rect,
-                            8.0_f32,
-                            Color32::from_rgba_premultiplied(22, 25, 34, 235),
-                            Stroke::new(1.0_f32, Color32::from_rgb(55, 68, 92)),
-                            egui::StrokeKind::Inside,
-                        );
-
-                        let mut child_ui = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(card_rect.shrink(18.0))
-                                .layout(egui::Layout::top_down(egui::Align::Center)),
-                        );
-                        child_ui.add_space(6.0);
-                        child_ui.label(
-                            RichText::new("MUVRIX MEDIA PLAYER")
-                                .strong()
-                                .size(19.0)
-                                .color(Color32::from_rgb(96, 175, 255)),
-                        );
-                        child_ui.add_space(3.0);
-                        child_ui.label(
-                            RichText::new("Lightweight hardware-accelerated desktop media player")
+                            let mut child_ui = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(card_rect.shrink(18.0))
+                                    .layout(egui::Layout::top_down(egui::Align::Center)),
+                            );
+                            child_ui.add_space(6.0);
+                            child_ui.label(
+                                RichText::new("MUVRIX MEDIA PLAYER")
+                                    .strong()
+                                    .size(19.0)
+                                    .color(Color32::from_rgb(96, 175, 255)),
+                            );
+                            child_ui.add_space(3.0);
+                            child_ui.label(
+                                RichText::new(
+                                    "Lightweight hardware-accelerated desktop media player",
+                                )
                                 .size(12.5)
                                 .color(Color32::from_gray(190)),
-                        );
-                        child_ui.add_space(14.0);
-
-                        // Primary action button: Open Media File
-                        if icons::primary_icon_button_text(
-                            &mut child_ui,
-                            Icon::FolderOpen,
-                            "Open Media File",
-                            "Open video or audio file from disk (Ctrl+O)",
-                        )
-                        .clicked()
-                        {
-                            self.open_file_dialog();
-                        }
-
-                        child_ui.add_space(10.0);
-                        child_ui.label(
-                            RichText::new("MP4 · MKV · WebM · AVI · MOV · FLAC · MP3 · AAC")
-                                .size(11.5)
-                                .color(Color32::from_gray(165)),
-                        );
-                        child_ui.add_space(2.0);
-                        child_ui.label(
-                            RichText::new("Drag and drop media or press Ctrl+O")
-                                .size(10.5)
-                                .color(Color32::from_gray(135)),
-                        );
-                    }
-                    PlaybackState::Loading | PlaybackState::Buffering => {
-                        let center_pos = rect.center();
-                        let card_rect =
-                            egui::Rect::from_center_size(center_pos, Vec2::new(300.0, 115.0));
-                        ui.painter().rect(
-                            card_rect,
-                            6.0_f32,
-                            Color32::from_rgba_premultiplied(18, 20, 28, 225),
-                            Stroke::new(1.0_f32, Color32::from_rgb(60, 68, 85)),
-                            egui::StrokeKind::Inside,
-                        );
-                        let mut child_ui = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(card_rect.shrink(12.0))
-                                .layout(egui::Layout::top_down(egui::Align::Center)),
-                        );
-                        child_ui.add_space(8.0);
-
-                        let is_loading = *self.controller.state() == PlaybackState::Loading;
-                        child_ui.label(
-                            RichText::new(if is_loading {
-                                "Loading Media..."
-                            } else {
-                                "Buffering..."
-                            })
-                            .strong()
-                            .size(15.0)
-                            .color(Color32::from_rgb(255, 205, 60)),
-                        );
-                        child_ui.add_space(6.0);
-                        let file_hint = self
-                            .controller
-                            .current_file()
-                            .map(|f| {
-                                std::path::Path::new(f)
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or(f)
-                            })
-                            .unwrap_or("Please wait");
-                        child_ui.label(
-                            RichText::new(file_hint)
-                                .size(12.0)
-                                .color(Color32::from_gray(200)),
-                        );
-                    }
-                    PlaybackState::Error(err) => {
-                        let center_pos = rect.center();
-                        let card_rect =
-                            egui::Rect::from_center_size(center_pos, Vec2::new(460.0, 200.0));
-                        ui.painter().rect(
-                            card_rect,
-                            8.0_f32,
-                            Color32::from_rgba_premultiplied(35, 15, 15, 240),
-                            Stroke::new(1.5_f32, Color32::from_rgb(220, 60, 60)),
-                            egui::StrokeKind::Inside,
-                        );
-
-                        let mut child_ui = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(card_rect.shrink(16.0))
-                                .layout(egui::Layout::top_down(egui::Align::Center)),
-                        );
-                        child_ui.add_space(4.0);
-                        child_ui.horizontal(|ui| {
-                            icons::icon_label(
-                                ui,
-                                Icon::Warning,
-                                18.0,
-                                Color32::from_rgb(255, 80, 80),
                             );
-                            ui.label(
-                                RichText::new("Playback Error")
-                                    .strong()
-                                    .size(16.0)
-                                    .color(Color32::from_rgb(255, 80, 80)),
-                            );
-                        });
-                        child_ui.add_space(8.0);
-                        child_ui.label(
-                            RichText::new(err)
-                                .size(12.0)
-                                .color(Color32::from_rgb(240, 190, 190)),
-                        );
-                        child_ui.add_space(14.0);
-                        child_ui.horizontal(|ui| {
-                            if ui
-                                .button(RichText::new("Open Another File...").strong())
-                                .clicked()
+                            child_ui.add_space(14.0);
+
+                            // Primary action button: Open Media File
+                            if icons::primary_icon_button_text(
+                                &mut child_ui,
+                                Icon::FolderOpen,
+                                "Open Media File",
+                                "Open video or audio file from disk (Ctrl+O)",
+                            )
+                            .clicked()
                             {
                                 self.open_file_dialog();
                             }
-                            if ui.button("Dismiss").clicked() {
-                                let _ = self.controller.stop();
-                            }
-                        });
-                    }
-                    PlaybackState::Ended => {
-                        let center_pos = rect.center();
-                        let card_rect =
-                            egui::Rect::from_center_size(center_pos, Vec2::new(320.0, 135.0));
-                        ui.painter().rect(
-                            card_rect,
-                            8.0_f32,
-                            Color32::from_rgba_premultiplied(20, 22, 30, 230),
-                            Stroke::new(1.0_f32, Color32::from_rgb(55, 65, 85)),
-                            egui::StrokeKind::Inside,
-                        );
-                        let mut child_ui = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(card_rect.shrink(14.0))
-                                .layout(egui::Layout::top_down(egui::Align::Center)),
-                        );
-                        child_ui.add_space(6.0);
-                        child_ui.label(
-                            RichText::new("Playback Finished")
+
+                            child_ui.add_space(10.0);
+                            child_ui.label(
+                                RichText::new("MP4 · MKV · WebM · AVI · MOV · FLAC · MP3 · AAC")
+                                    .size(11.5)
+                                    .color(Color32::from_gray(165)),
+                            );
+                            child_ui.add_space(2.0);
+                            child_ui.label(
+                                RichText::new("Drag and drop media or press Ctrl+O")
+                                    .size(10.5)
+                                    .color(Color32::from_gray(135)),
+                            );
+                        }
+                        PlaybackState::Loading | PlaybackState::Buffering => {
+                            let center_pos = rect.center();
+                            let card_rect =
+                                egui::Rect::from_center_size(center_pos, Vec2::new(300.0, 115.0));
+                            ui.painter().rect(
+                                card_rect,
+                                6.0_f32,
+                                Color32::from_rgba_premultiplied(18, 20, 28, 225),
+                                Stroke::new(1.0_f32, Color32::from_rgb(60, 68, 85)),
+                                egui::StrokeKind::Inside,
+                            );
+                            let mut child_ui = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(card_rect.shrink(12.0))
+                                    .layout(egui::Layout::top_down(egui::Align::Center)),
+                            );
+                            child_ui.add_space(8.0);
+
+                            let is_loading = *self.controller.state() == PlaybackState::Loading;
+                            child_ui.label(
+                                RichText::new(if is_loading {
+                                    "Loading Media..."
+                                } else {
+                                    "Buffering..."
+                                })
                                 .strong()
                                 .size(15.0)
-                                .color(Color32::from_gray(230)),
-                        );
-                        child_ui.add_space(12.0);
-                        child_ui.horizontal(|ui| {
-                            if icons::icon_text_button(
-                                ui,
-                                Icon::Replay,
-                                "Replay",
-                                "Replay from start",
-                            )
-                            .clicked()
-                            {
-                                let _ = self.controller.seek(0.0, SeekMode::Absolute);
-                                let _ = self.controller.play();
-                            }
-                            if icons::icon_text_button(
-                                ui,
-                                Icon::FolderOpen,
-                                "Open File...",
-                                "Open another media file",
-                            )
-                            .clicked()
-                            {
-                                self.open_file_dialog();
-                            }
-                        });
+                                .color(Color32::from_rgb(255, 205, 60)),
+                            );
+                            child_ui.add_space(6.0);
+                            let file_hint = self
+                                .controller
+                                .current_file()
+                                .map(|f| {
+                                    std::path::Path::new(f)
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or(f)
+                                })
+                                .unwrap_or("Please wait");
+                            child_ui.label(
+                                RichText::new(file_hint)
+                                    .size(12.0)
+                                    .color(Color32::from_gray(200)),
+                            );
+                        }
+                        PlaybackState::Error(err) => {
+                            let center_pos = rect.center();
+                            let card_rect =
+                                egui::Rect::from_center_size(center_pos, Vec2::new(460.0, 200.0));
+                            ui.painter().rect(
+                                card_rect,
+                                8.0_f32,
+                                Color32::from_rgba_premultiplied(35, 15, 15, 240),
+                                Stroke::new(1.5_f32, Color32::from_rgb(220, 60, 60)),
+                                egui::StrokeKind::Inside,
+                            );
+
+                            let mut child_ui = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(card_rect.shrink(16.0))
+                                    .layout(egui::Layout::top_down(egui::Align::Center)),
+                            );
+                            child_ui.add_space(4.0);
+                            child_ui.horizontal(|ui| {
+                                icons::icon_label(
+                                    ui,
+                                    Icon::Warning,
+                                    18.0,
+                                    Color32::from_rgb(255, 80, 80),
+                                );
+                                ui.label(
+                                    RichText::new("Playback Error")
+                                        .strong()
+                                        .size(16.0)
+                                        .color(Color32::from_rgb(255, 80, 80)),
+                                );
+                            });
+                            child_ui.add_space(8.0);
+                            child_ui.label(
+                                RichText::new(err)
+                                    .size(12.0)
+                                    .color(Color32::from_rgb(240, 190, 190)),
+                            );
+                            child_ui.add_space(14.0);
+                            child_ui.horizontal(|ui| {
+                                if ui
+                                    .button(RichText::new("Open Another File...").strong())
+                                    .clicked()
+                                {
+                                    self.open_file_dialog();
+                                }
+                                if ui.button("Dismiss").clicked() {
+                                    let _ = self.controller.stop();
+                                }
+                            });
+                        }
+                        PlaybackState::Ended => {
+                            let center_pos = rect.center();
+                            let card_rect =
+                                egui::Rect::from_center_size(center_pos, Vec2::new(320.0, 135.0));
+                            ui.painter().rect(
+                                card_rect,
+                                8.0_f32,
+                                Color32::from_rgba_premultiplied(20, 22, 30, 230),
+                                Stroke::new(1.0_f32, Color32::from_rgb(55, 65, 85)),
+                                egui::StrokeKind::Inside,
+                            );
+                            let mut child_ui = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(card_rect.shrink(14.0))
+                                    .layout(egui::Layout::top_down(egui::Align::Center)),
+                            );
+                            child_ui.add_space(6.0);
+                            child_ui.label(
+                                RichText::new("Playback Finished")
+                                    .strong()
+                                    .size(15.0)
+                                    .color(Color32::from_gray(230)),
+                            );
+                            child_ui.add_space(12.0);
+                            child_ui.horizontal(|ui| {
+                                if icons::icon_text_button(
+                                    ui,
+                                    Icon::Replay,
+                                    "Replay",
+                                    "Replay from start",
+                                )
+                                .clicked()
+                                {
+                                    let _ = self.controller.seek(0.0, SeekMode::Absolute);
+                                    let _ = self.controller.play();
+                                }
+                                if icons::icon_text_button(
+                                    ui,
+                                    Icon::FolderOpen,
+                                    "Open File...",
+                                    "Open another media file",
+                                )
+                                .clicked()
+                                {
+                                    self.open_file_dialog();
+                                }
+                            });
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                }
-            });
+                });
+        }
 
         // ---------------------------------------------------------------------
         // 4. Modal Shortcuts Dialog
@@ -1449,7 +1741,7 @@ impl eframe::App for MuvrixApp {
                 .collapsible(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.set_width(360.0);
+                    ui.set_width(380.0);
                     egui::Grid::new("shortcuts_grid")
                         .striped(true)
                         .spacing([20.0, 6.0])
@@ -1490,6 +1782,18 @@ impl eframe::App for MuvrixApp {
                             ui.label("Open Media File");
                             ui.end_row();
 
+                            ui.label(RichText::new("P").strong().monospace());
+                            ui.label("Toggle Queue Drawer");
+                            ui.end_row();
+
+                            ui.label(RichText::new("B").strong().monospace());
+                            ui.label("Toggle Media Browser");
+                            ui.end_row();
+
+                            ui.label(RichText::new("I").strong().monospace());
+                            ui.label("Toggle Compact Mini-Player");
+                            ui.end_row();
+
                             ui.label(RichText::new("Double Click").strong().monospace());
                             ui.label("Toggle Fullscreen");
                             ui.end_row();
@@ -1509,6 +1813,16 @@ impl eframe::App for MuvrixApp {
 
     fn on_exit(&mut self, gl: Option<&glow::Context>) {
         log::info!("Initiating safe teardown of MuvrixApp");
+
+        // Persist final playback position in history store
+        if let Some(path) = self.controller.current_file() {
+            let time_pos = self.controller.time_pos();
+            let duration = self.controller.duration();
+            if time_pos > 0.0 && duration > 0.0 {
+                self.history_store.record_playback(path, time_pos, duration);
+                let _ = self.history_store.save();
+            }
+        }
         if let Ok(mut engine) = self.render_engine.lock() {
             if let Some(gl_ctx) = gl {
                 unsafe {

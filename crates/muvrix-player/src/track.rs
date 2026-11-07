@@ -167,4 +167,72 @@ impl MpvHandle {
     pub fn set_sub_visibility(&self, visible: bool) -> Result<(), MpvError> {
         self.set_property("sub-visibility", visible)
     }
+
+    /// Queries the currently active secondary subtitle track ID, if any.
+    pub fn get_secondary_sub_track(&self) -> Option<i64> {
+        self.get_property_string("secondary-sid")
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+    }
+
+    /// Applies subtitle styling preferences to the mpv core.
+    pub fn apply_subtitle_styling(&self, styling: &SubtitleStyling) -> Result<(), MpvError> {
+        if !styling.font.trim().is_empty() {
+            let _ = self.set_property_string("sub-font", &styling.font);
+        }
+        let _ = self.set_property("sub-font-size", styling.font_size);
+        if !styling.color.trim().is_empty() {
+            let _ = self.set_property_string("sub-color", &styling.color);
+        }
+        if !styling.border_color.trim().is_empty() {
+            let _ = self.set_property_string("sub-border-color", &styling.border_color);
+        }
+        let _ = self.set_property("sub-border-size", styling.border_size);
+        let _ = self.set_property("sub-pos", styling.pos);
+        let _ = self.set_property("sub-scale", styling.scale);
+        let override_val = if styling.ass_override { "force" } else { "no" };
+        let _ = self.set_property_string("sub-ass-override", override_val);
+        Ok(())
+    }
+
+    /// Resets all subtitle styling properties back to engine defaults.
+    pub fn reset_subtitle_styling(&self) -> Result<(), MpvError> {
+        self.apply_subtitle_styling(&SubtitleStyling::default())
+    }
+}
+
+/// User-configurable subtitle appearance settings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubtitleStyling {
+    /// Subtitle font family name.
+    pub font: String,
+    /// Font size in points (e.g. 20..90, default 45).
+    pub font_size: i64,
+    /// Primary font fill color (hex format `#RRGGBB` or `#AARRGGBB`).
+    pub color: String,
+    /// Border outline color.
+    pub border_color: String,
+    /// Border outline thickness in points (0.0..10.0).
+    pub border_size: f64,
+    /// Vertical placement position (0 = top, 100 = bottom).
+    pub pos: i64,
+    /// Scale multiplier factor (0.5..2.5).
+    pub scale: f64,
+    /// Whether to force these styles over embedded ASS script styles.
+    pub ass_override: bool,
+}
+
+impl Default for SubtitleStyling {
+    fn default() -> Self {
+        Self {
+            font: "sans-serif".to_string(),
+            font_size: 45,
+            color: "#FFFFFF".to_string(),
+            border_color: "#000000".to_string(),
+            border_size: 3.0,
+            pos: 100,
+            scale: 1.0,
+            ass_override: false,
+        }
+    }
 }
