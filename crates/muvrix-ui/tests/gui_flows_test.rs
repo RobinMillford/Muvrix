@@ -34,6 +34,7 @@ fn wait_for_state(
 
 /// FLOW A: Click H.264 preset
 #[test]
+#[ignore = "Requires extended media corpus in tests/MuvrixTestMedia/ for preset buttons; run with: cargo test -p muvrix-ui --test gui_flows_test -- --ignored"]
 fn test_flow_a_h264_preset() {
     let mut controller = create_test_controller();
     let candidates = [
@@ -68,6 +69,7 @@ fn test_flow_a_h264_preset() {
 
 /// FLOW B: Click HEVC preset
 #[test]
+#[ignore = "Requires extended media corpus in tests/MuvrixTestMedia/ for preset buttons; run with: cargo test -p muvrix-ui --test gui_flows_test -- --ignored"]
 fn test_flow_b_hevc_preset() {
     let mut controller = create_test_controller();
     let candidates = [
@@ -94,6 +96,7 @@ fn test_flow_b_hevc_preset() {
 
 /// FLOW C: Click VP9 preset
 #[test]
+#[ignore = "Requires extended media corpus in tests/MuvrixTestMedia/ for preset buttons; run with: cargo test -p muvrix-ui --test gui_flows_test -- --ignored"]
 fn test_flow_c_vp9_preset() {
     let mut controller = create_test_controller();
     let candidates = [
@@ -120,6 +123,7 @@ fn test_flow_c_vp9_preset() {
 
 /// FLOW D: Click AV1 1080p preset
 #[test]
+#[ignore = "Requires extended media corpus in tests/MuvrixTestMedia/ for preset buttons; run with: cargo test -p muvrix-ui --test gui_flows_test -- --ignored"]
 fn test_flow_d_av1_1080p_preset() {
     let mut controller = create_test_controller();
     let candidates = [
@@ -151,8 +155,7 @@ fn test_flow_e_open_file_manual_selection() {
     let mut controller = create_test_controller();
     // Simulate path returned from native file picker rfd::FileDialog
     let manual_selection =
-        resolve_media_path("tests/MuvrixTestMedia/phase-0.4/A-core/h264-aac.mp4")
-            .expect("Flow E: Fixture exists");
+        resolve_media_path("tests/fixtures/test_video.mp4").expect("Flow E: Fixture exists");
     let canonical = manual_selection.canonicalize().unwrap();
 
     controller.load_file(canonical.to_str().unwrap()).unwrap();
@@ -169,7 +172,7 @@ fn test_flow_e_open_file_manual_selection() {
 #[test]
 fn test_flow_f_absolute_path_load() {
     let mut controller = create_test_controller();
-    let abs_path = resolve_media_path("tests/MuvrixTestMedia/phase-0.4/A-core/vp9-opus.webm")
+    let abs_path = resolve_media_path("tests/fixtures/test_video.mp4")
         .unwrap()
         .canonicalize()
         .unwrap();
@@ -185,14 +188,14 @@ fn test_flow_f_absolute_path_load() {
         Duration::from_secs(3),
     );
     assert!(playing, "Flow F: Expected Playing state for absolute path");
-    assert_eq!(controller.video_format(), "vp9");
+    assert_eq!(controller.video_format(), "h264");
 }
 
 /// FLOW G: Load a file whose name contains spaces
 #[test]
 fn test_flow_g_path_with_spaces() {
     let mut controller = create_test_controller();
-    let spaced_file = "tests/MuvrixTestMedia/phase-0.4/C-audio/TrueHD Sample 1 (Final Fantasy VII Advent Children).mkv";
+    let spaced_file = "tests/fixtures/path-resolution/test video with spaces.mp4";
     let resolved = resolve_media_path(spaced_file).expect("Flow G: Spaced file must resolve");
     assert!(resolved.is_file());
 
@@ -244,10 +247,7 @@ fn test_flow_h_nonexistent_file() {
 #[test]
 fn test_flow_i_deliberately_corrupted_file() {
     let mut controller = create_test_controller();
-    let corrupted_path = resolve_media_path(
-        "tests/MuvrixTestMedia/phase-0.4/D-edge-cases/corrupted-webm-regression.webm",
-    )
-    .unwrap();
+    let corrupted_path = resolve_media_path("tests/fixtures/corrupted.mp4").unwrap();
 
     controller
         .load_file(corrupted_path.to_str().unwrap())
@@ -280,8 +280,7 @@ fn test_flow_j_recovery_after_failure() {
     assert!(error_state, "Must enter error state first");
 
     // 2. Immediately load valid file
-    let valid_path =
-        resolve_media_path("tests/MuvrixTestMedia/phase-0.4/A-core/h264-aac.mp4").unwrap();
+    let valid_path = resolve_media_path("tests/fixtures/test_video.mp4").unwrap();
     controller.load_file(valid_path.to_str().unwrap()).unwrap();
     assert_eq!(
         *controller.state(),

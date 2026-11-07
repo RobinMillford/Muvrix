@@ -35,6 +35,7 @@ fn wait_for_state(
 }
 
 #[test]
+#[ignore = "Requires extended media corpus in tests/MuvrixTestMedia/ for preset buttons; run with: cargo test -p muvrix-ui --test gui_path_test -- --ignored"]
 fn test_preset_path_resolution_all_buttons() {
     // 1. H.264
     let h264 = resolve_preset(&[
@@ -133,7 +134,7 @@ fn test_preset_path_resolution_all_buttons() {
 #[test]
 fn test_media_path_resolution_spaces_and_tilde() {
     // 1. Path with spaces
-    let space_rel = "tests/MuvrixTestMedia/phase-0.4/C-audio/TrueHD Sample 1 (Final Fantasy VII Advent Children).mkv";
+    let space_rel = "tests/fixtures/path-resolution/test video with spaces.mp4";
     let space_res = resolve_media_path(space_rel);
     assert!(
         space_res.is_ok(),
@@ -150,8 +151,7 @@ fn test_media_path_resolution_spaces_and_tilde() {
     }
 
     // 3. Absolute path resolution
-    let h264_resolved =
-        resolve_media_path("tests/MuvrixTestMedia/phase-0.4/A-core/h264-aac.mp4").unwrap();
+    let h264_resolved = resolve_media_path("tests/fixtures/test_video.mp4").unwrap();
     let abs_str = h264_resolved.to_str().unwrap();
     let abs_res = resolve_media_path(abs_str);
     assert!(abs_res.is_ok());
@@ -205,8 +205,7 @@ fn test_failed_load_followed_by_successful_load() {
     }
 
     // 2. Load valid file immediately following error
-    let valid_path =
-        resolve_media_path("tests/MuvrixTestMedia/phase-0.4/A-core/h264-aac.mp4").unwrap();
+    let valid_path = resolve_media_path("tests/fixtures/test_video.mp4").unwrap();
     controller.load_file(valid_path.to_str().unwrap()).unwrap();
     assert_eq!(*controller.state(), PlaybackState::Loading);
 
@@ -228,8 +227,9 @@ fn test_failed_load_followed_by_successful_load() {
 fn test_sequential_valid_file_replacement() {
     let mut controller = create_headless_controller();
 
-    let file1 = resolve_media_path("tests/MuvrixTestMedia/phase-0.4/A-core/h264-aac.mp4").unwrap();
-    let file2 = resolve_media_path("tests/MuvrixTestMedia/phase-0.4/A-core/vp9-opus.webm").unwrap();
+    let file1 = resolve_media_path("tests/fixtures/test_video.mp4").unwrap();
+    let file2 =
+        resolve_media_path("tests/fixtures/path-resolution/test video with spaces.mp4").unwrap();
 
     // Load file 1
     controller.load_file(file1.to_str().unwrap()).unwrap();
@@ -252,7 +252,7 @@ fn test_sequential_valid_file_replacement() {
         Duration::from_secs(3),
     );
     assert!(file2_ready);
-    assert_eq!(controller.video_format(), "vp9");
+    assert_eq!(controller.video_format(), "h264");
     assert!(controller.duration() > 0.0);
     log::info!("File 1 dur: {dur1}, File 2 dur: {}", controller.duration());
 }
@@ -261,10 +261,7 @@ fn test_sequential_valid_file_replacement() {
 fn test_event_ordering_and_corrupted_file() {
     let mut controller = create_headless_controller();
 
-    let corrupted_path = resolve_media_path(
-        "tests/MuvrixTestMedia/phase-0.4/D-edge-cases/corrupted-webm-regression.webm",
-    )
-    .unwrap();
+    let corrupted_path = resolve_media_path("tests/fixtures/corrupted.mp4").unwrap();
 
     controller
         .load_file(corrupted_path.to_str().unwrap())

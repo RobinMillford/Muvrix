@@ -3,21 +3,22 @@ use std::time::{Duration, Instant};
 
 use muvrix_player::{Event, HwdecMemoryPath, HwdecStatus, LoadFileMode, MpvHandle, SeekMode};
 
-fn find_media_path(relative: &str) -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from(relative),
-        PathBuf::from("../../").join(relative),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../")
-            .join(relative),
-    ];
+fn get_test_video_fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/test_video.mp4")
+        .canonicalize()
+        .expect("Tracked test fixture 'tests/fixtures/test_video.mp4' must exist")
+}
 
-    for path in &candidates {
-        if path.exists() {
-            return Some(path.canonicalize().unwrap_or_else(|_| path.clone()));
-        }
+fn find_media_path(relative: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../")
+        .join(relative);
+    if path.exists() {
+        Some(path.canonicalize().unwrap_or(path))
+    } else {
+        None
     }
-    None
 }
 
 fn create_perf_player(hwdec: &str) -> MpvHandle {
@@ -31,6 +32,30 @@ fn create_perf_player(hwdec: &str) -> MpvHandle {
 }
 
 #[test]
+fn test_perf_playback_baseline() {
+    let path = get_test_video_fixture();
+    let player = create_perf_player("no");
+    let start = Instant::now();
+    player
+        .load_file(path.to_str().unwrap(), LoadFileMode::Replace)
+        .unwrap();
+
+    std::thread::sleep(Duration::from_millis(200));
+    let diag = player.query_playback_diagnostics("no").unwrap();
+    let elapsed = start.elapsed();
+
+    println!("Baseline Performance: Init+Decode in {:?}", elapsed);
+    println!(" - HWDEC: {:?}", diag.hwdec_status);
+    println!(" - Video Codec: {}", diag.video_codec);
+    println!(" - Container FPS: {}", diag.container_fps);
+
+    assert_eq!(diag.video_codec, "h264");
+    assert_eq!(diag.hwdec_status, HwdecStatus::Disabled);
+    assert!(diag.container_fps > 0.0);
+}
+
+#[test]
+#[ignore = "Requires extended performance media corpus in tests/MuvrixTestMedia/; run with: cargo test -p muvrix-player --test performance_validation_test -- --ignored"]
 fn test_perf_1080p_source_playback() {
     let path = find_media_path("tests/MuvrixTestMedia/phase-0.4/A-core/h264-aac.mp4")
         .or_else(|| find_media_path("tests/MuvrixTestMedia/baseline/h264-aac.mp4"))
@@ -56,6 +81,7 @@ fn test_perf_1080p_source_playback() {
 }
 
 #[test]
+#[ignore = "Requires extended performance media corpus in tests/MuvrixTestMedia/; run with: cargo test -p muvrix-player --test performance_validation_test -- --ignored"]
 fn test_perf_4k_source_playback() {
     let path = find_media_path("tests/MuvrixTestMedia/phase-0.4/B-performance/h264-4k-2160p.mp4")
         .expect("4K sample missing");
@@ -88,6 +114,7 @@ fn test_perf_4k_source_playback() {
 }
 
 #[test]
+#[ignore = "Requires extended performance media corpus in tests/MuvrixTestMedia/; run with: cargo test -p muvrix-player --test performance_validation_test -- --ignored"]
 fn test_perf_4k60_source_playback() {
     let path = find_media_path("tests/MuvrixTestMedia/phase-0.4/generated/h264-4k-60fps.mp4")
         .or_else(|| find_media_path("tests/MuvrixTestMedia/phase-0.4/A-core/av1-4k-cityhall.webm"))
@@ -115,6 +142,7 @@ fn test_perf_4k60_source_playback() {
 }
 
 #[test]
+#[ignore = "Requires extended performance media corpus in tests/MuvrixTestMedia/; run with: cargo test -p muvrix-player --test performance_validation_test -- --ignored"]
 fn test_perf_120fps_high_frame_rate() {
     let path = find_media_path("tests/MuvrixTestMedia/phase-0.4/B-performance/h264-120fps.mp4")
         .expect("120fps sample missing");
@@ -137,6 +165,7 @@ fn test_perf_120fps_high_frame_rate() {
 }
 
 #[test]
+#[ignore = "Requires extended performance media corpus in tests/MuvrixTestMedia/; run with: cargo test -p muvrix-player --test performance_validation_test -- --ignored"]
 fn test_perf_240fps_high_frame_rate() {
     let path = find_media_path("tests/MuvrixTestMedia/phase-0.4/B-performance/h264-240fps.mp4")
         .expect("240fps sample missing");
@@ -159,6 +188,7 @@ fn test_perf_240fps_high_frame_rate() {
 }
 
 #[test]
+#[ignore = "Requires extended performance media corpus in tests/MuvrixTestMedia/; run with: cargo test -p muvrix-player --test performance_validation_test -- --ignored"]
 fn test_perf_sustained_playback_and_timeline_scrubbing() {
     let path =
         find_media_path("tests/MuvrixTestMedia/phase-0.4/B-performance/h264-5min-sustained.mp4")
@@ -203,6 +233,7 @@ fn test_perf_sustained_playback_and_timeline_scrubbing() {
 }
 
 #[test]
+#[ignore = "Requires extended performance media corpus in tests/MuvrixTestMedia/; run with: cargo test -p muvrix-player --test performance_validation_test -- --ignored"]
 fn test_perf_high_bitrate_prores() {
     let path = find_media_path("tests/MuvrixTestMedia/phase-0.4/D-professional/prores.mov")
         .expect("ProRes sample missing");

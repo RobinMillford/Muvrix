@@ -4,21 +4,22 @@ use std::time::Duration;
 use muvrix_core::platform::PlatformInfo;
 use muvrix_player::{HdrPresentationMode, HwdecMemoryPath, HwdecStatus, LoadFileMode, MpvHandle};
 
-fn find_media_path(relative: &str) -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from(relative),
-        PathBuf::from("../../").join(relative),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../")
-            .join(relative),
-    ];
+fn get_test_video_fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/test_video.mp4")
+        .canonicalize()
+        .expect("Tracked test fixture 'tests/fixtures/test_video.mp4' must exist")
+}
 
-    for path in &candidates {
-        if path.exists() {
-            return Some(path.canonicalize().unwrap_or_else(|_| path.clone()));
-        }
+fn find_corpus_media_path(relative: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../")
+        .join(relative);
+    if path.exists() {
+        Some(path.canonicalize().unwrap_or(path))
+    } else {
+        None
     }
-    None
 }
 
 fn create_player(hwdec: &str) -> MpvHandle {
@@ -123,16 +124,20 @@ fn test_engine_capabilities_detection() {
     println!(" - mpv Version:     {}", caps.mpv_version);
     println!(" - FFmpeg Version:  {}", caps.ffmpeg_version);
 
-    assert_eq!(caps.platform.os, "linux");
+    assert_eq!(caps.platform.os, std::env::consts::OS);
+    #[cfg(target_os = "linux")]
+    {
+        assert!(caps.platform.kernel_version != "Unknown");
+    }
     assert!(caps.api_version.is_gl_compatible());
     assert!(!caps.mpv_version.is_empty());
     assert!(!caps.ffmpeg_version.is_empty());
 }
 
 #[test]
+#[ignore = "Requires physical GPU hardware decoder (e.g. VA-API /dev/dri/renderD128, VideoToolbox, D3D11VA); run with: cargo test -p muvrix-player --test capability_test -- test_hwdec_active_copyback --ignored --nocapture"]
 fn test_hwdec_active_copyback() {
-    let path = find_media_path("tests/MuvrixTestMedia/baseline/h264-aac.mp4")
-        .expect("h264-aac.mp4 missing");
+    let path = get_test_video_fixture();
     let player = create_player("auto-safe");
 
     player
@@ -150,7 +155,11 @@ fn test_hwdec_active_copyback() {
         } => {
             println!("Active decoder: {decoder}");
             assert_eq!(memory_path, HwdecMemoryPath::CopyBack);
-            assert!(decoder.contains("vaapi"));
+            assert!(
+                decoder.contains("vaapi")
+                    || decoder.contains("videotoolbox")
+                    || decoder.contains("d3d11va")
+            );
         }
         other => panic!("Expected HwdecStatus::Active, got: {:?}", other),
     }
@@ -160,9 +169,8 @@ fn test_hwdec_active_copyback() {
 
 #[test]
 fn test_hwdec_software_fallback() {
-    // Requesting nvdec on Intel hardware must gracefully fall back to software
-    let path = find_media_path("tests/MuvrixTestMedia/baseline/h264-aac.mp4")
-        .expect("h264-aac.mp4 missing");
+    // Requesting nvdec on non-NVIDIA hardware gracefully falls back to software decoding
+    let path = get_test_video_fixture();
     let player = create_player("nvdec");
 
     player
@@ -188,8 +196,7 @@ fn test_hwdec_software_fallback() {
 
 #[test]
 fn test_hwdec_explicitly_disabled() {
-    let path = find_media_path("tests/MuvrixTestMedia/baseline/h264-aac.mp4")
-        .expect("h264-aac.mp4 missing");
+    let path = get_test_video_fixture();
     let player = create_player("no");
 
     player
@@ -202,12 +209,30 @@ fn test_hwdec_explicitly_disabled() {
 }
 
 #[test]
+fn test_sdr_detection_and_presentation_mode() {
+    let path = get_test_video_fixture();
+    let player = create_player("auto-safe");
+
+    player
+        .load_file(path.to_str().unwrap(), LoadFileMode::Replace)
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+
+    let diag = player.query_playback_diagnostics("auto-safe").unwrap();
+    println!("SDR Diagnostic: {:?}", diag.hdr_mode);
+    assert_eq!(diag.hdr_mode, HdrPresentationMode::SdrOnly);
+}
+
+#[test]
+#[ignore = "Requires HDR test media from extended corpus (hevc-main10-hdr10); run with: cargo test -p muvrix-player --test capability_test -- test_hdr_detection_and_tonemapping_status --ignored --nocapture"]
 fn test_hdr_detection_and_tonemapping_status() {
-    let path = find_media_path(
+    let path = find_corpus_media_path(
         "tests/MuvrixTestMedia/phase-0.4/generated/hevc-main10-hdr10-synthetic.mp4",
     )
-    .or_else(|| find_media_path("tests/MuvrixTestMedia/phase-0.4/A-core/hevc-main10-hdr10.mp4"))
-    .expect("HDR test fixture missing");
+    .or_else(|| {
+        find_corpus_media_path("tests/MuvrixTestMedia/phase-0.4/A-core/hevc-main10-hdr10.mp4")
+    })
+    .expect("HDR test fixture missing from tests/MuvrixTestMedia/");
 
     let player = create_player("auto-safe");
     player

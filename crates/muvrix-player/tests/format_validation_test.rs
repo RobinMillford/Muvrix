@@ -4,21 +4,22 @@ use std::time::{Duration, Instant};
 
 use muvrix_player::{MpvHandle, PlaybackController, PlaybackState, SeekMode, TrackType};
 
-fn find_media_path(relative: &str) -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from(relative),
-        PathBuf::from("../../").join(relative),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../")
-            .join(relative),
-    ];
+fn get_test_video_fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/test_video.mp4")
+        .canonicalize()
+        .expect("Tracked test fixture 'tests/fixtures/test_video.mp4' must exist")
+}
 
-    for path in &candidates {
-        if path.exists() {
-            return Some(path.canonicalize().unwrap_or_else(|_| path.clone()));
-        }
+fn find_media_path(relative: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../")
+        .join(relative);
+    if path.exists() {
+        Some(path.canonicalize().unwrap_or(path))
+    } else {
+        None
     }
-    None
 }
 
 fn create_format_test_controller(hwdec: &str) -> PlaybackController {
@@ -59,8 +60,7 @@ fn wait_for_state(
 
 #[test]
 fn test_format_h264_aac_mp4() {
-    let path = find_media_path("tests/MuvrixTestMedia/baseline/h264-aac.mp4")
-        .expect("h264-aac.mp4 missing");
+    let path = get_test_video_fixture();
     let mut controller = create_format_test_controller("auto-safe");
 
     controller.load_file(path.to_str().unwrap()).unwrap();
@@ -80,12 +80,13 @@ fn test_format_h264_aac_mp4() {
 
     assert_eq!(controller.video_format(), "h264");
     assert_eq!(controller.audio_codec(), "aac");
-    assert!((controller.duration() - 10.0).abs() < 1.0);
+    assert!((controller.duration() - 3.0).abs() < 1.0);
     let (w, h) = controller.video_dimensions();
-    assert!(w > 0 && h > 0);
+    assert_eq!((w, h), (640, 360));
 }
 
 #[test]
+#[ignore = "Requires extended media corpus in tests/MuvrixTestMedia/; run with: cargo test -p muvrix-player --test format_validation_test -- --ignored"]
 fn test_format_hevc_aac_mp4() {
     let path =
         find_media_path("tests/MuvrixTestMedia/codecs/hevc-aac.mp4").expect("hevc-aac.mp4 missing");
@@ -110,6 +111,7 @@ fn test_format_hevc_aac_mp4() {
 }
 
 #[test]
+#[ignore = "Requires extended media corpus in tests/MuvrixTestMedia/; run with: cargo test -p muvrix-player --test format_validation_test -- --ignored"]
 fn test_format_vp9_opus_webm() {
     let path = find_media_path("tests/MuvrixTestMedia/codecs/vp9-opus.webm")
         .expect("vp9-opus.webm missing");
@@ -134,6 +136,7 @@ fn test_format_vp9_opus_webm() {
 }
 
 #[test]
+#[ignore = "Requires extended media corpus in tests/MuvrixTestMedia/; run with: cargo test -p muvrix-player --test format_validation_test -- --ignored"]
 fn test_format_av1_1080p_webm() {
     let path = find_media_path("tests/MuvrixTestMedia/codecs/av1-1080p.webm")
         .expect("av1-1080p.webm missing");
@@ -158,6 +161,7 @@ fn test_format_av1_1080p_webm() {
 }
 
 #[test]
+#[ignore = "Requires extended media corpus in tests/MuvrixTestMedia/; run with: cargo test -p muvrix-player --test format_validation_test -- --ignored"]
 fn test_format_multiple_audio_streams_mov() {
     let path = find_media_path("tests/MuvrixTestMedia/tracks/multiple-audio-streams.mov")
         .expect("multiple-audio-streams.mov missing");
@@ -196,6 +200,7 @@ fn test_format_multiple_audio_streams_mov() {
 }
 
 #[test]
+#[ignore = "Requires extended media corpus in tests/MuvrixTestMedia/; run with: cargo test -p muvrix-player --test format_validation_test -- --ignored"]
 fn test_format_video_only_mp4() {
     let path = find_media_path("tests/MuvrixTestMedia/tracks/video-only.mp4")
         .expect("video-only.mp4 missing");
@@ -219,6 +224,7 @@ fn test_format_video_only_mp4() {
 }
 
 #[test]
+#[ignore = "Requires extended media corpus in tests/MuvrixTestMedia/; run with: cargo test -p muvrix-player --test format_validation_test -- --ignored"]
 fn test_format_audio_only_flac() {
     let path =
         find_media_path("tests/MuvrixTestMedia/audio/audio.flac").expect("audio.flac missing");
@@ -242,6 +248,7 @@ fn test_format_audio_only_flac() {
 }
 
 #[test]
+#[ignore = "Requires external BluRay MKV sample; run with: cargo test -p muvrix-player --test format_validation_test -- --ignored"]
 fn test_format_eac3_7_1_sample() {
     let sample_path =
         Path::new("/home/itsyamin/Videos/Colony.2026.1080p.BluRay.DUAL.DDP7.1.x264-PRiME.mkv");
