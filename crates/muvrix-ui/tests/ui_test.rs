@@ -1,6 +1,10 @@
 //! Unit and integration tests for UI helpers, progress calculations, and formatting.
 
-use muvrix_ui::app::{calculate_progress, format_speed, format_timestamp, format_volume};
+use muvrix_ui::app::{
+    calculate_progress, format_codec_name, format_speed, format_timestamp, format_track_label,
+    format_volume,
+};
+use muvrix_ui::views::{format_file_size, format_timestamp_relative, AppView};
 
 #[test]
 fn test_timestamp_formatting() {
@@ -80,4 +84,79 @@ fn test_speed_adjustment_logic() {
     assert_eq!(adjust_spd(1.0, -0.25), 0.75);
     assert_eq!(adjust_spd(0.25, -0.25), 0.25); // Clamped minimum
     assert_eq!(adjust_spd(4.0, 0.5), 4.0); // Clamped maximum
+}
+
+#[test]
+fn test_format_file_size() {
+    assert_eq!(format_file_size(0), "-");
+    assert_eq!(format_file_size(512), "512 B");
+    assert_eq!(format_file_size(1024), "1.0 KB");
+    assert_eq!(format_file_size(1536), "1.5 KB");
+    assert_eq!(format_file_size(1024 * 1024), "1.0 MB");
+    assert_eq!(format_file_size(25 * 1024 * 1024), "25.0 MB");
+    assert_eq!(format_file_size(1024 * 1024 * 1024), "1.0 GB");
+    assert_eq!(format_file_size(2684354560), "2.5 GB");
+}
+
+#[test]
+fn test_format_timestamp_relative() {
+    assert_eq!(format_timestamp_relative(0), "Recently");
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    assert_eq!(format_timestamp_relative(now), "Just now");
+    assert_eq!(format_timestamp_relative(now - 30), "Just now");
+    assert_eq!(format_timestamp_relative(now - 120), "2m ago");
+    assert_eq!(format_timestamp_relative(now - 7200), "2h ago");
+    assert_eq!(format_timestamp_relative(now - 172800), "2d ago");
+}
+
+#[test]
+fn test_app_view_labels_and_icons() {
+    assert_eq!(AppView::Player.label(), "Player");
+    assert_eq!(AppView::Browser.label(), "Browser");
+    assert_eq!(AppView::Playlist.label(), "Playlist");
+    assert_eq!(AppView::Recent.label(), "History");
+    assert_eq!(AppView::Settings.label(), "Settings");
+
+    // All views must provide distinct vector icons
+    let views = [
+        AppView::Player,
+        AppView::Browser,
+        AppView::Playlist,
+        AppView::Recent,
+        AppView::Settings,
+    ];
+    for i in 0..views.len() {
+        for j in (i + 1)..views.len() {
+            assert_ne!(views[i].icon(), views[j].icon());
+        }
+    }
+}
+
+#[test]
+fn test_codec_and_track_formatting() {
+    assert_eq!(format_codec_name("h264"), "H.264");
+    assert_eq!(format_codec_name("hevc"), "HEVC");
+    assert_eq!(format_codec_name("vp9"), "VP9");
+    assert_eq!(format_codec_name("av1"), "AV1");
+    assert_eq!(format_codec_name("flac"), "FLAC");
+    assert_eq!(format_codec_name("opus"), "Opus");
+
+    let track = muvrix_player::TrackInfo {
+        id: 1,
+        track_type: muvrix_player::TrackType::Audio,
+        title: Some("Surround Sound".to_string()),
+        lang: Some("eng".to_string()),
+        selected: true,
+        external: false,
+        codec: Some("aac".to_string()),
+    };
+    let formatted = format_track_label(&track);
+    assert!(formatted.contains("Surround Sound"));
+    assert!(formatted.contains("English"));
+    assert!(formatted.contains("[AAC]"));
 }

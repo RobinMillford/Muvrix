@@ -6,8 +6,9 @@ use crate::command::{LoadFileMode, SeekMode};
 use crate::error::MpvError;
 use crate::event::{EndFileReason, Event};
 use crate::handle::MpvHandle;
+use crate::playlist::PlaylistItem;
 use crate::property::PropertyFormat;
-use crate::track::{ChapterInfo, TrackInfo, TrackType};
+use crate::track::{ChapterInfo, SubtitleStyling, TrackInfo, TrackType};
 
 pub const PROP_TIME_POS: u64 = 1;
 pub const PROP_DURATION: u64 = 2;
@@ -24,6 +25,10 @@ pub const PROP_EOF_REACHED: u64 = 12;
 pub const PROP_SUB_DELAY: u64 = 13;
 pub const PROP_SUB_VISIBILITY: u64 = 14;
 pub const PROP_CHAPTER: u64 = 15;
+pub const PROP_PLAYLIST: u64 = 16;
+pub const PROP_PLAYLIST_POS: u64 = 17;
+pub const PROP_PLAYLIST_COUNT: u64 = 18;
+pub const PROP_SECONDARY_SID: u64 = 19;
 
 /// Lifecycle state of the media player.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +73,10 @@ pub struct PlaybackController {
     tracks: Vec<TrackInfo>,
     chapters: Vec<ChapterInfo>,
     current_chapter: Option<i64>,
+    playlist: Vec<PlaylistItem>,
+    playlist_pos: Option<usize>,
+    secondary_sub_track_id: Option<i64>,
+    subtitle_styling: SubtitleStyling,
     next_async_id: u64,
 }
 
@@ -94,6 +103,10 @@ impl PlaybackController {
         handle.observe_property(PROP_SUB_DELAY, "sub-delay", PropertyFormat::None)?;
         handle.observe_property(PROP_SUB_VISIBILITY, "sub-visibility", PropertyFormat::None)?;
         handle.observe_property(PROP_CHAPTER, "chapter", PropertyFormat::None)?;
+        handle.observe_property(PROP_PLAYLIST, "playlist", PropertyFormat::None)?;
+        handle.observe_property(PROP_PLAYLIST_POS, "playlist-pos", PropertyFormat::None)?;
+        handle.observe_property(PROP_PLAYLIST_COUNT, "playlist-count", PropertyFormat::None)?;
+        handle.observe_property(PROP_SECONDARY_SID, "secondary-sid", PropertyFormat::None)?;
 
         let mut controller = Self {
             handle,
@@ -118,10 +131,15 @@ impl PlaybackController {
             tracks: Vec::new(),
             chapters: Vec::new(),
             current_chapter: None,
+            playlist: Vec::new(),
+            playlist_pos: None,
+            secondary_sub_track_id: None,
+            subtitle_styling: SubtitleStyling::default(),
             next_async_id: 1000,
         };
 
         controller.refresh_metadata();
+        controller.refresh_playlist();
         Ok(controller)
     }
 
@@ -279,6 +297,131 @@ impl PlaybackController {
             .iter()
             .filter(|t| t.track_type == track_type)
             .collect()
+    }
+
+    // -------------------------------------------------------------------------
+    // Playlist & Queue
+    // -------------------------------------------------------------------------
+
+    /// Returns the cached list of entries in the playback queue.
+    pub fn playlist(&self) -> &[PlaylistItem] {
+        &self.playlist
+    }
+
+    /// Returns the 0-based index of the currently active playlist item.
+    pub fn playlist_pos(&self) -> Option<usize> {
+        self.playlist_pos
+    }
+
+    /// Returns the total count of items in the playlist queue.
+    pub fn playlist_count(&self) -> usize {
+        self.playlist.len()
+    }
+
+    /// Re-queries the full playlist from the native mpv core.
+    pub fn refresh_playlist(&mut self) {
+        if let Ok(list) = self.handle.get_playlist() {
+            self.playlist = list;
+        }
+        self.playlist_pos = self
+            .handle
+            .get_property::<i64>("playlist-pos")
+            .ok()
+            .and_then(|p| if p >= 0 { Some(p as usize) } else { None });
+    }
+
+    /// Appends a media file to the playlist without interrupting active playback.
+    pub fn playlist_append(&mut self, path: &str) -> Result<(), MpvError> {
+        self.handle.playlist_append(path)?;
+        self.refresh_playlist();
+        Ok(())
+    }
+
+    /// Appends a media file and immediately starts playing it if currently idle.
+    pub fn playlist_append_play(&mut self, path: &str) -> Result<(), MpvError> {
+        self.handle.playlist_append_play(path)?;
+        self.refresh_playlist();
+        Ok(())
+    }
+
+    /// Immediately jumps to and plays the queued item at `index`.
+    pub fn playlist_play_index(&mut self, index: usize) -> Result<(), MpvError> {
+        self.handle.playlist_play_index(index)?;
+        self.refresh_playlist();
+        Ok(())
+    }
+
+    /// Advances to the next item in the playlist.
+    pub fn playlist_next(&mut self) -> Result<(), MpvError> {
+        self.handle.playlist_next()?;
+        self.refresh_playlist();
+        Ok(())
+    }
+
+    /// Returns to the previous item in the playlist.
+    pub fn playlist_prev(&mut self) -> Result<(), MpvError> {
+        self.handle.playlist_prev()?;
+        self.refresh_playlist();
+        Ok(())
+    }
+
+    /// Removes the item at `index` from the playlist queue.
+    pub fn playlist_remove(&mut self, index: usize) -> Result<(), MpvError> {
+        self.handle.playlist_remove(index)?;
+        self.refresh_playlist();
+        Ok(())
+    }
+
+    /// Moves a playlist entry from `from_index` to `to_index`.
+    pub fn playlist_move(&mut self, from_index: usize, to_index: usize) -> Result<(), MpvError> {
+        self.handle.playlist_move(from_index, to_index)?;
+        self.refresh_playlist();
+        Ok(())
+    }
+
+    /// Clears all items from the playlist queue.
+    pub fn playlist_clear(&mut self) -> Result<(), MpvError> {
+        self.handle.playlist_clear()?;
+        self.refresh_playlist();
+        Ok(())
+    }
+
+    /// Randomizes the playback queue order.
+    pub fn playlist_shuffle(&mut self) -> Result<(), MpvError> {
+        self.handle.playlist_shuffle()?;
+        self.refresh_playlist();
+        Ok(())
+    }
+
+    /// Returns the currently active secondary subtitle track ID, if any.
+    pub fn secondary_sub_track_id(&self) -> Option<i64> {
+        self.secondary_sub_track_id
+    }
+
+    /// Sets the secondary subtitle track by ID, or disables secondary subtitles if `None`.
+    pub fn set_secondary_sub_track(&mut self, track_id: Option<i64>) -> Result<(), MpvError> {
+        self.handle.set_secondary_sub_track(track_id)?;
+        self.secondary_sub_track_id = track_id;
+        Ok(())
+    }
+
+    /// Returns the active subtitle styling configuration.
+    pub fn subtitle_styling(&self) -> &SubtitleStyling {
+        &self.subtitle_styling
+    }
+
+    /// Applies custom subtitle styling properties to the mpv core.
+    pub fn set_subtitle_styling(&mut self, styling: SubtitleStyling) -> Result<(), MpvError> {
+        self.handle.apply_subtitle_styling(&styling)?;
+        self.subtitle_styling = styling;
+        Ok(())
+    }
+
+    /// Resets all subtitle styling properties back to defaults.
+    pub fn reset_subtitle_styling(&mut self) -> Result<(), MpvError> {
+        self.handle.reset_subtitle_styling()?;
+        self.subtitle_styling = SubtitleStyling::default();
+        Ok(())
     }
 
     // -------------------------------------------------------------------------
@@ -531,6 +674,13 @@ impl PlaybackController {
             }
             Event::FileLoaded => {
                 self.refresh_metadata();
+                self.refresh_playlist();
+                self.secondary_sub_track_id = self.handle.get_secondary_sub_track();
+                if let Ok(p) = self.handle.get_property_string("path") {
+                    if !p.is_empty() {
+                        self.current_file = Some(p);
+                    }
+                }
                 if self.is_paused {
                     self.state = PlaybackState::Paused;
                 } else {
@@ -705,12 +855,22 @@ impl PlaybackController {
                     }
                 }
             }
+            PROP_PLAYLIST | PROP_PLAYLIST_POS | PROP_PLAYLIST_COUNT => {
+                self.refresh_playlist();
+            }
+            PROP_SECONDARY_SID => {
+                self.secondary_sub_track_id = self.handle.get_secondary_sub_track();
+            }
             _ => {
                 // Fallback by name if matched outside userdata
                 if name == "time-pos" {
                     if let Ok(pos) = self.handle.get_property::<f64>("time-pos") {
                         self.time_pos = pos;
                     }
+                } else if name == "playlist" || name == "playlist-pos" || name == "playlist-count" {
+                    self.refresh_playlist();
+                } else if name == "secondary-sid" {
+                    self.secondary_sub_track_id = self.handle.get_secondary_sub_track();
                 }
             }
         }

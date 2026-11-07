@@ -21,6 +21,7 @@ pub enum Icon {
     Fullscreen,
     Windowed,
     FolderOpen,
+    Folder,
     Subtitles,
     AudioTrack,
     Shortcuts,
@@ -28,6 +29,17 @@ pub enum Icon {
     Diagnostics,
     Replay,
     Warning,
+    Playlist,
+    History,
+    Settings,
+    Search,
+    ArrowBack,
+    ArrowForward,
+    ArrowUp,
+    Close,
+    Shuffle,
+    Plus,
+    Pip,
 }
 
 /// Paints a vector icon into the designated bounding rectangle.
@@ -270,6 +282,106 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
             let dark_stroke = Stroke::new(1.6_f32, Color32::from_rgb(20, 22, 28));
             painter.line_segment([at(0.50, 0.38), at(0.50, 0.62)], dark_stroke);
             painter.circle_filled(at(0.50, 0.72), 1.2_f32, Color32::from_rgb(20, 22, 28));
+        }
+
+        Icon::Folder => {
+            let tab = Rect::from_min_max(at(0.12, 0.22), at(0.46, 0.36));
+            painter.rect_filled(tab, 1.5_f32, color);
+            let body = Rect::from_min_max(at(0.12, 0.34), at(0.88, 0.80));
+            painter.rect_filled(body, 2.0_f32, color);
+        }
+
+        Icon::Playlist => {
+            let stroke = Stroke::new(1.6_f32, color);
+            painter.line_segment([at(0.30, 0.30), at(0.85, 0.30)], stroke);
+            painter.line_segment([at(0.30, 0.50), at(0.85, 0.50)], stroke);
+            painter.line_segment([at(0.30, 0.70), at(0.85, 0.70)], stroke);
+            // Bullets
+            painter.circle_filled(at(0.18, 0.30), 1.8_f32, color);
+            painter.circle_filled(at(0.18, 0.50), 1.8_f32, color);
+            painter.circle_filled(at(0.18, 0.70), 1.8_f32, color);
+        }
+
+        Icon::History => {
+            let stroke = Stroke::new(1.5_f32, color);
+            painter.circle_stroke(at(0.50, 0.50), w * 0.35, stroke);
+            // Clock hands
+            painter.line_segment([at(0.50, 0.50), at(0.50, 0.26)], stroke);
+            painter.line_segment([at(0.50, 0.50), at(0.70, 0.50)], stroke);
+        }
+
+        Icon::Settings => {
+            let stroke = Stroke::new(1.5_f32, color);
+            // Sliders
+            painter.line_segment([at(0.15, 0.28), at(0.85, 0.28)], stroke);
+            painter.line_segment([at(0.15, 0.50), at(0.85, 0.50)], stroke);
+            painter.line_segment([at(0.15, 0.72), at(0.85, 0.72)], stroke);
+            // Knobs
+            painter.circle_filled(at(0.38, 0.28), 2.2_f32, color);
+            painter.circle_filled(at(0.64, 0.50), 2.2_f32, color);
+            painter.circle_filled(at(0.30, 0.72), 2.2_f32, color);
+        }
+
+        Icon::Search => {
+            let stroke = Stroke::new(1.5_f32, color);
+            painter.circle_stroke(at(0.42, 0.42), w * 0.24, stroke);
+            let handle_stroke = Stroke::new(1.8_f32, color);
+            painter.line_segment([at(0.59, 0.59), at(0.84, 0.84)], handle_stroke);
+        }
+
+        Icon::ArrowBack => {
+            let stroke = Stroke::new(1.6_f32, color);
+            painter.line_segment([at(0.80, 0.50), at(0.22, 0.50)], stroke);
+            painter.line_segment([at(0.44, 0.28), at(0.22, 0.50)], stroke);
+            painter.line_segment([at(0.44, 0.72), at(0.22, 0.50)], stroke);
+        }
+
+        Icon::ArrowForward => {
+            let stroke = Stroke::new(1.6_f32, color);
+            painter.line_segment([at(0.20, 0.50), at(0.78, 0.50)], stroke);
+            painter.line_segment([at(0.56, 0.28), at(0.78, 0.50)], stroke);
+            painter.line_segment([at(0.56, 0.72), at(0.78, 0.50)], stroke);
+        }
+
+        Icon::ArrowUp => {
+            let stroke = Stroke::new(1.6_f32, color);
+            painter.line_segment([at(0.50, 0.80), at(0.50, 0.22)], stroke);
+            painter.line_segment([at(0.28, 0.44), at(0.50, 0.22)], stroke);
+            painter.line_segment([at(0.72, 0.44), at(0.50, 0.22)], stroke);
+        }
+
+        Icon::Close => {
+            let stroke = Stroke::new(1.6_f32, color);
+            painter.line_segment([at(0.25, 0.25), at(0.75, 0.75)], stroke);
+            painter.line_segment([at(0.75, 0.25), at(0.25, 0.75)], stroke);
+        }
+
+        Icon::Shuffle => {
+            let stroke = Stroke::new(1.5_f32, color);
+            painter.line_segment([at(0.18, 0.32), at(0.42, 0.32)], stroke);
+            painter.line_segment([at(0.42, 0.32), at(0.68, 0.68)], stroke);
+            painter.line_segment([at(0.68, 0.68), at(0.82, 0.68)], stroke);
+
+            painter.line_segment([at(0.18, 0.68), at(0.42, 0.68)], stroke);
+            painter.line_segment([at(0.42, 0.68), at(0.68, 0.32)], stroke);
+            painter.line_segment([at(0.68, 0.32), at(0.82, 0.32)], stroke);
+            // Arrows
+            painter.line_segment([at(0.72, 0.24), at(0.82, 0.32)], stroke);
+            painter.line_segment([at(0.72, 0.76), at(0.82, 0.68)], stroke);
+        }
+
+        Icon::Plus => {
+            let stroke = Stroke::new(1.6_f32, color);
+            painter.line_segment([at(0.50, 0.22), at(0.50, 0.78)], stroke);
+            painter.line_segment([at(0.22, 0.50), at(0.78, 0.50)], stroke);
+        }
+
+        Icon::Pip => {
+            let stroke = Stroke::new(1.4_f32, color);
+            let outer = Rect::from_min_max(at(0.12, 0.18), at(0.88, 0.82));
+            painter.rect_stroke(outer, 1.5_f32, stroke, StrokeKind::Inside);
+            let pip_rect = Rect::from_min_max(at(0.50, 0.48), at(0.82, 0.76));
+            painter.rect_filled(pip_rect, 1.0_f32, color);
         }
     }
 }
