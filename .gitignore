@@ -1,0 +1,16 @@
+/target/
+**/*.rs.bk
+*.swp
+*~
+.DS_Store
+
+# Large media files and test media collections
+test/
+tests/*.mkv
+tests/*.mp4
+tests/fixtures/*.mp4
+tests/fixtures/*.txt
+tests/The.Dog.Stars.*
+tests/MuvrixTestMedia/
+tests/fixtures/*.png
+docs/

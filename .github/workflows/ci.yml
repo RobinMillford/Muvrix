@@ -1,0 +1,225 @@
+name: Muvrix Cross-Platform CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # =========================================================================
+  # 1. Linux Ubuntu Job (Native Host Runner)
+  # =========================================================================
+  linux-ubuntu:
+    name: Linux (Ubuntu x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install system dependencies & libmpv-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libmpv-dev \
+            libasound2-dev \
+            libx11-xcb-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libgl1-mesa-dev \
+            pkg-config
+
+      - name: Verify libmpv pkg-config
+        run: |
+          pkg-config --modversion mpv
+          pkg-config --cflags --libs mpv
+
+      - name: Format Check
+        run: cargo fmt --check
+
+      - name: Workspace Compilation Check
+        run: cargo check --workspace --all-targets
+
+      - name: Workspace Clippy Linter
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run Test Suite (Headless Runtime)
+        run: cargo test --workspace --all-targets
+
+  # =========================================================================
+  # 2. Linux Fedora Job (Containerized Distribution Matrix)
+  # =========================================================================
+  linux-fedora:
+    name: Linux (Fedora 45 Container)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:45
+    steps:
+      - name: Install distribution packages
+        run: |
+          dnf install -y \
+            git \
+            gcc \
+            rust \
+            cargo \
+            clippy \
+            rustfmt \
+            pkgconf-pkg-config \
+            mpv-libs-devel \
+            mesa-libGL-devel \
+            libX11-devel \
+            libxkbcommon-devel \
+            wayland-devel
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Format Check
+        run: cargo fmt --check
+
+      - name: Workspace Compilation Check
+        run: cargo check --workspace --all-targets
+
+      - name: Workspace Clippy Linter
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run Test Suite (Headless Runtime)
+        run: cargo test --workspace --all-targets
+
+  # =========================================================================
+  # 3. macOS Apple Silicon Job (Native Host Runner)
+  # =========================================================================
+  macos-apple-silicon:
+    name: macOS (Apple Silicon ARM64 - macos-15)
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Homebrew dependencies
+        run: |
+          brew install mpv pkg-config
+          echo "PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+
+      - name: Verify libmpv linkage
+        run: |
+          pkg-config --modversion mpv
+          pkg-config --cflags --libs mpv
+
+      - name: Format Check
+        run: cargo fmt --check
+
+      - name: Workspace Compilation Check
+        run: cargo check --workspace --all-targets
+
+      - name: Workspace Clippy Linter
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run Test Suite (Headless Runtime)
+        run: cargo test --workspace --all-targets
+
+  # =========================================================================
+  # 4. Windows x86-64 Job (Native Host Runner)
+  # =========================================================================
+  windows-x86_64:
+    name: Windows (MSVC x86_64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable (MSVC target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: Set up MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up libmpv Windows MSVC Dev Kit
+        shell: pwsh
+        run: |
+          $destDir = "C:\mpv-dev"
+          $archivePath = "C:\mpv-dev.7z"
+          $url = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261107/mpv-dev-x86_64-20261107-git-9028187538.7z"
+          $expectedSha256 = "df7c433a2d481fdaf6163b201f26abbb0eff0c215c51368397088c6d8f7a001b"
+
+          New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+          Write-Host "Downloading pinned libmpv development archive from $url..."
+          Invoke-WebRequest -Uri $url -OutFile $archivePath
+
+          Write-Host "Verifying SHA-256 checksum..."
+          $actualSha256 = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToLower()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "SHA-256 mismatch! Expected: $expectedSha256, Got: $actualSha256"
+          }
+          Write-Host "SHA-256 checksum verified successfully: $actualSha256"
+
+          Write-Host "Extracting development archive..."
+          7z x $archivePath -o"$destDir" -y | Out-Null
+
+          # Verify required development headers and runtime DLL
+          $requiredFiles = @(
+            "$destDir\include\mpv\client.h",
+            "$destDir\include\mpv\render.h",
+            "$destDir\include\mpv\render_gl.h",
+            "$destDir\libmpv-2.dll"
+          )
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path $file)) {
+              throw "Verification failed: required artifact missing after extraction: $file"
+            }
+          }
+
+          # Copy verified module definition file (.def) from repository
+          $defFile = "$destDir\libmpv-2.def"
+          Copy-Item "crates\libmpv-sys\windows\libmpv-2.def" -Destination $defFile
+          Write-Host "Staged module definition file: $defFile"
+
+          # Upstream mpv documentation:
+          # https://github.com/mpv-player/mpv/blob/master/DOCS/compile-windows.md#linking-libmpv-with-msvc-programs
+          # lib /def:libmpv-2.def /name:libmpv-2.dll /out:mpv.lib /machine:x64
+          Write-Host "Generating genuine MSVC import library (mpv.lib) from exports using Microsoft lib.exe..."
+          & lib /def:"$defFile" /name:libmpv-2.dll /out:"$destDir\mpv.lib" /machine:x64
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$destDir\mpv.lib")) {
+            throw "Failed to generate MSVC import library (mpv.lib) with lib.exe"
+          }
+          Write-Host "Verified generation of MSVC import library: $destDir\mpv.lib"
+
+          # Configure environment paths for compiler, MSVC linker, and OS runtime loader
+          # Adding $destDir to PATH ensures Windows LoadLibraryExW finds libmpv-2.dll during test runs
+          Add-Content -Path $env:GITHUB_PATH -Value "$destDir"
+          Add-Content -Path $env:GITHUB_ENV -Value "MPV_DIR=$destDir"
+          Add-Content -Path $env:GITHUB_ENV -Value "LIB=$destDir;$destDir\lib;$env:LIB"
+
+      - name: Format Check
+        run: cargo fmt --check
+
+      - name: Workspace Compilation Check
+        run: cargo check --workspace --all-targets
+
+      - name: Workspace Clippy Linter
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Native Link Smoke Test (libmpv C API Symbol Resolution)
+        run: cargo test -p libmpv-sys --test link_smoke_test -- --nocapture
+
+      - name: Run Full Test Suite (Headless Runtime)
+        run: cargo test --workspace --all-targets

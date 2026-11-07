@@ -1,0 +1,11 @@
+[package]
+name = "muvrix-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Core types, utilities and error primitives for Muvrix"
+
+[dependencies]
+thiserror = { workspace = true }
+log = { workspace = true }

@@ -1,0 +1,22 @@
+[package]
+name = "muvrix-ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Desktop presentation layer for Muvrix"
+
+[dependencies]
+muvrix-core = { path = "../muvrix-core" }
+muvrix-player = { path = "../muvrix-player" }
+libmpv-sys = { path = "../libmpv-sys" }
+egui = { workspace = true }
+eframe = { workspace = true }
+egui_glow = { workspace = true }
+glow = { workspace = true }
+libc = { workspace = true }
+bytemuck = "1.25"
+image = { version = "0.25", default-features = false, features = ["png"] }
+rfd = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
