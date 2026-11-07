@@ -1,0 +1,1 @@
+Muvrix project-relative path resolution test fixture.

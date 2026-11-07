@@ -52,6 +52,9 @@ jobs:
       - name: Workspace Clippy Linter
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Core Path Resolution Test Suite
+        run: cargo test -p muvrix-core
+
       - name: Run Test Suite (Headless Runtime)
         run: cargo test --workspace --all-targets
 
@@ -92,6 +95,9 @@ jobs:
       - name: Workspace Clippy Linter
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Core Path Resolution Test Suite
+        run: cargo test -p muvrix-core
+
       - name: Run Test Suite (Headless Runtime)
         run: cargo test --workspace --all-targets
 
@@ -128,6 +134,9 @@ jobs:
 
       - name: Workspace Clippy Linter
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Core Path Resolution Test Suite
+        run: cargo test -p muvrix-core
 
       - name: Run Test Suite (Headless Runtime)
         run: cargo test --workspace --all-targets
@@ -220,6 +229,9 @@ jobs:
 
       - name: Native Link Smoke Test (libmpv C API Symbol Resolution)
         run: cargo test -p libmpv-sys --test link_smoke_test -- --nocapture
+
+      - name: Core Path Resolution Test Suite
+        run: cargo test -p muvrix-core
 
       - name: Run Full Test Suite (Headless Runtime)
         run: cargo test --workspace --all-targets

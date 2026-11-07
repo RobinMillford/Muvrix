@@ -307,10 +307,11 @@ mod tests {
 
     #[test]
     fn test_resolve_project_relative_fixture() {
-        let resolved = resolve_media_path("tests/MuvrixTestMedia/phase-0.4/A-core/h264-aac.mp4");
+        let resolved =
+            resolve_media_path("tests/fixtures/path-resolution/project-relative-fixture.txt");
         assert!(
             resolved.is_ok(),
-            "Expected h264-aac.mp4 to resolve: {:?}",
+            "Expected project-relative fixture to resolve: {:?}",
             resolved
         );
         assert!(resolved.unwrap().exists());
@@ -319,8 +320,8 @@ mod tests {
     #[test]
     fn test_resolve_preset_fallback() {
         let candidates = [
-            "tests/MuvrixTestMedia/non_existent_fixture_9999.mp4",
-            "tests/MuvrixTestMedia/phase-0.4/A-core/h264-aac.mp4",
+            "tests/fixtures/path-resolution/non_existent_fixture_9999.txt",
+            "tests/fixtures/path-resolution/preset-fallback-fixture.txt",
         ];
         let resolved = resolve_preset(&candidates);
         assert!(
@@ -333,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_resolve_spaces_in_filename() {
-        let space_file = "tests/MuvrixTestMedia/phase-0.4/C-audio/TrueHD Sample 1 (Final Fantasy VII Advent Children).mkv";
+        let space_file = "tests/fixtures/path-resolution/fixture with spaces.txt";
         let resolved = resolve_media_path(space_file);
         assert!(
             resolved.is_ok(),
