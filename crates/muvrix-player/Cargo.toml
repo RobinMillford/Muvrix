@@ -11,6 +11,9 @@ libmpv-sys = { path = "../libmpv-sys" }
 muvrix-core = { path = "../muvrix-core" }
 thiserror = { workspace = true }
 log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 env_logger = { workspace = true }
+tempfile = { workspace = true }

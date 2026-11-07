@@ -1,13 +1,24 @@
 //! Desktop application window and playback UI implemented with eframe and egui_glow.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
 use glow::HasContext as _;
 use muvrix_core::browser::MediaBrowser;
+use muvrix_core::database::{
+    DatabaseManager, LibraryFilter, LibraryItemView, LibrarySortField, Pagination, SortDirection,
+};
 use muvrix_core::history::HistoryStore;
+use muvrix_core::network::CredentialVault;
+use muvrix_core::scanner::{ScanOptions, ScanProgress, ScannerService};
+use muvrix_core::thumbnails::ThumbnailCache;
+use muvrix_player::equalizer::{
+    AudioDeviceInfo, EqualizerManager, EqualizerPreset, EqualizerSettings,
+};
+use muvrix_player::shader::{Anime4KPreset, ShaderManager, VideoAdjustmentSettings};
 use muvrix_player::{
     Event, MpvHandle, MpvRenderContext, PlaybackController, PlaybackState, SeekMode,
     SubtitleStyling, TrackInfo, TrackType,
@@ -16,7 +27,7 @@ use muvrix_player::{
 use crate::gl_loader;
 use crate::icons::{self, Icon};
 use crate::render_engine::RenderEngine;
-use crate::views::AppView;
+use crate::views::{AppView, SettingsTab};
 
 /// Main Muvrix desktop player application.
 pub struct MuvrixApp {
@@ -48,6 +59,41 @@ pub struct MuvrixApp {
     pub(crate) is_pip: bool,
     pub(crate) last_history_save: Instant,
     pub(crate) active_styling: SubtitleStyling,
+
+    // Phase 0.8 Media Library & Enhancement state
+    pub(crate) db: DatabaseManager,
+    #[allow(dead_code)]
+    pub(crate) thumbnail_cache: ThumbnailCache,
+    pub(crate) library_filter: LibraryFilter,
+    pub(crate) library_sort_field: LibrarySortField,
+    pub(crate) library_sort_dir: SortDirection,
+    pub(crate) library_page: u64,
+    pub(crate) library_items: Vec<LibraryItemView>,
+    pub(crate) library_total_count: u64,
+    pub(crate) library_is_grid: bool,
+    pub(crate) selected_library_item: Option<LibraryItemView>,
+    pub(crate) add_root_dialog_open: bool,
+    pub(crate) add_root_path_input: String,
+    pub(crate) thumbnail_textures: std::collections::HashMap<String, egui::TextureHandle>,
+    pub(crate) active_scan_cancel: Option<Arc<AtomicBool>>,
+    pub(crate) active_scan_rx: Option<mpsc::Receiver<ScanProgress>>,
+    pub(crate) scan_progress: Option<ScanProgress>,
+    pub(crate) video_settings: VideoAdjustmentSettings,
+    pub(crate) anime4k_preset: Anime4KPreset,
+    pub(crate) equalizer_settings: EqualizerSettings,
+    pub(crate) audio_devices: Vec<AudioDeviceInfo>,
+    pub(crate) selected_audio_device: String,
+    pub(crate) network_vault: CredentialVault,
+    pub(crate) add_network_open: bool,
+    pub(crate) network_name_input: String,
+    pub(crate) network_host_input: String,
+    pub(crate) network_port_input: u16,
+    pub(crate) network_path_input: String,
+    pub(crate) network_user_input: String,
+    pub(crate) network_pass_input: String,
+    pub(crate) network_https_input: bool,
+    pub(crate) network_status_msg: Option<String>,
+    pub(crate) settings_tab: SettingsTab,
 
     // Frame timing and UI responsiveness measurements
     pub(crate) last_frame_instant: Instant,
@@ -116,7 +162,31 @@ impl MuvrixApp {
         // 6. Wrap in PlaybackController
         let controller = PlaybackController::new(mpv)?;
 
+        let db_path = if let Ok(custom) = std::env::var("MUVRIX_DATABASE_PATH") {
+            std::path::PathBuf::from(custom)
+        } else if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+            std::path::PathBuf::from(xdg)
+                .join("muvrix")
+                .join("muvrix_library.db")
+        } else if let Ok(home) = std::env::var("HOME") {
+            std::path::PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("muvrix")
+                .join("muvrix_library.db")
+        } else {
+            std::env::temp_dir()
+                .join("muvrix")
+                .join("muvrix_library.db")
+        };
+        let db = DatabaseManager::open(&db_path).unwrap_or_else(|_| {
+            DatabaseManager::open_in_memory().expect("In-memory database initialization failed")
+        });
+        let thumbnail_cache =
+            ThumbnailCache::new(ThumbnailCache::default_cache_dir(), 500 * 1024 * 1024);
+
         let current_view = match std::env::var("MUVRIX_INITIAL_VIEW").as_deref() {
+            Ok("library") => AppView::Library,
             Ok("browser") => AppView::Browser,
             Ok("playlist") => AppView::Playlist,
             Ok("history" | "recent") => AppView::Recent,
@@ -155,7 +225,121 @@ impl MuvrixApp {
             is_pip: false,
             last_history_save: Instant::now(),
             active_styling: SubtitleStyling::default(),
+            db,
+            thumbnail_cache,
+            library_filter: LibraryFilter::default(),
+            library_sort_field: LibrarySortField::Title,
+            library_sort_dir: SortDirection::Ascending,
+            library_page: 0,
+            library_items: Vec::new(),
+            library_total_count: 0,
+            library_is_grid: true,
+            selected_library_item: None,
+            add_root_dialog_open: false,
+            add_root_path_input: String::new(),
+            thumbnail_textures: std::collections::HashMap::new(),
+            active_scan_cancel: None,
+            active_scan_rx: None,
+            scan_progress: None,
+            video_settings: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("enhancement")
+            {
+                VideoAdjustmentSettings {
+                    brightness: 4,
+                    contrast: 8,
+                    saturation: 12,
+                    gamma: 0,
+                    hue: 0,
+                    sharpen: 1.2,
+                    deband: true,
+                    active_shaders: Vec::new(),
+                }
+            } else {
+                VideoAdjustmentSettings::default()
+            },
+            anime4k_preset: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("enhancement")
+            {
+                Anime4KPreset::ModeA
+            } else {
+                Anime4KPreset::Disabled
+            },
+            equalizer_settings: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref()
+                == Ok("equalizer")
+            {
+                EqualizerSettings {
+                    is_enabled: true,
+                    preamp_db: 0.0,
+                    gains: [0.0; 10],
+                    dynaudnorm: false,
+                    active_preset: EqualizerPreset::Flat,
+                }
+            } else {
+                EqualizerSettings::default()
+            },
+            audio_devices: vec![
+                AudioDeviceInfo {
+                    name: "auto".to_string(),
+                    description: "Auto-select device".to_string(),
+                },
+                AudioDeviceInfo {
+                    name: "alsa/default".to_string(),
+                    description: "ALSA Default PCM Audio Sink".to_string(),
+                },
+                AudioDeviceInfo {
+                    name: "pulse/alsa_output.pci-0000_00_1f.3.analog-stereo".to_string(),
+                    description: "Built-in Audio Analog Stereo (PipeWire-Pulse)".to_string(),
+                },
+            ],
+            selected_audio_device: "pulse/alsa_output.pci-0000_00_1f.3.analog-stereo".to_string(),
+            network_vault: CredentialVault::new(),
+            add_network_open: std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network")
+                || std::env::var("MUVRIX_OPEN_NETWORK_FORM").is_ok(),
+            network_name_input: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network")
+            {
+                "Demo WebDAV Share (Example)".to_string()
+            } else {
+                String::new()
+            },
+            network_host_input: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network")
+            {
+                "dav.example.com".to_string()
+            } else {
+                String::new()
+            },
+            network_port_input: 8443,
+            network_path_input: "/remote.php/webdav/Media/".to_string(),
+            network_user_input: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network")
+            {
+                "media_streamer".to_string()
+            } else {
+                String::new()
+            },
+            network_pass_input: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network")
+            {
+                "VaultSuperSecretPassword123!".to_string()
+            } else {
+                String::new()
+            },
+            network_https_input: true,
+            network_status_msg: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network")
+            {
+                Some(
+                    "Credentials are held in application memory for this session and are not persisted by Muvrix."
+                        .to_string(),
+                )
+            } else {
+                None
+            },
+            settings_tab: match std::env::var("MUVRIX_SETTINGS_TAB").as_deref() {
+                Ok("enhancement" | "video") => SettingsTab::VideoEnhancement,
+                Ok("equalizer" | "audio") => SettingsTab::EqualizerAudio,
+                Ok("network" | "webdav") => SettingsTab::NetworkMedia,
+                Ok("preferences" | "privacy" | "window") => SettingsTab::Preferences,
+                _ => SettingsTab::Subtitles,
+            },
         };
+
+        app.refresh_library();
+        app.refresh_audio_devices();
 
         if let Ok(seed) = std::env::var("MUVRIX_INITIAL_MEDIA") {
             app.load_file(&seed);
@@ -491,10 +675,84 @@ impl MuvrixApp {
             self.show_shortcuts = !self.show_shortcuts;
         }
     }
+
+    pub fn refresh_library(&mut self) {
+        let pagination = Pagination {
+            offset: self.library_page * 24,
+            limit: 24,
+        };
+        if let Ok((items, total)) = self.db.query_library(
+            &self.library_filter,
+            self.library_sort_field,
+            self.library_sort_dir,
+            pagination,
+        ) {
+            self.library_items = items;
+            self.library_total_count = total;
+        }
+    }
+
+    pub fn refresh_audio_devices(&mut self) {
+        if let Ok(devs) = EqualizerManager::query_audio_devices(self.controller.handle()) {
+            self.audio_devices = devs;
+        }
+    }
+
+    pub fn start_library_scan(&mut self, root_id: i64) {
+        if self.active_scan_cancel.is_some() {
+            return;
+        }
+        let root = match self.db.get_root_by_id(root_id) {
+            Ok(Some(r)) => r,
+            _ => return,
+        };
+
+        let cancel_token = Arc::new(AtomicBool::new(false));
+        self.active_scan_cancel = Some(cancel_token.clone());
+
+        let (tx, rx) = mpsc::channel();
+        self.active_scan_rx = Some(rx);
+        let db_clone = self.db.clone();
+
+        std::thread::spawn(move || {
+            let options = ScanOptions::default();
+            let _ = ScannerService::scan_root(&db_clone, &root, &options, cancel_token, Some(&tx));
+        });
+    }
+
+    pub fn cancel_library_scan(&mut self) {
+        if let Some(ref token) = self.active_scan_cancel {
+            token.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub fn apply_video_enhancements(&mut self) {
+        let _ = ShaderManager::apply_adjustments(self.controller.handle(), &self.video_settings);
+    }
+
+    pub fn apply_equalizer_settings(&mut self) {
+        let _ =
+            EqualizerManager::apply_to_handle(self.controller.handle(), &self.equalizer_settings);
+    }
 }
 
 impl eframe::App for MuvrixApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll background scanner channel
+        let mut scan_finished = false;
+        if let Some(ref rx) = self.active_scan_rx {
+            while let Ok(progress) = rx.try_recv() {
+                if progress.is_finished {
+                    scan_finished = true;
+                }
+                self.scan_progress = Some(progress);
+            }
+        }
+        if scan_finished {
+            self.active_scan_cancel = None;
+            self.refresh_library();
+        }
+
         self.sync_playback_state();
         self.update_frame_timing();
         self.handle_keyboard_inputs(ctx);
@@ -584,9 +842,10 @@ impl eframe::App for MuvrixApp {
                     ui.separator();
                     ui.add_space(4.0);
 
-                    // Navigation View Tabs (Player, Browser, Playlist, History, Settings)
+                    // Navigation View Tabs (Player, Library, Browser, Playlist, History, Settings)
                     for view in &[
                         AppView::Player,
+                        AppView::Library,
                         AppView::Browser,
                         AppView::Playlist,
                         AppView::Recent,
@@ -853,6 +1112,7 @@ impl eframe::App for MuvrixApp {
         if self.current_view != AppView::Player {
             self.render_mini_player_deck(ctx);
             match self.current_view {
+                AppView::Library => self.render_library_view(ctx),
                 AppView::Browser => self.render_browser_view(ctx),
                 AppView::Playlist => self.render_playlist_view(ctx),
                 AppView::Recent => self.render_recent_view(ctx),

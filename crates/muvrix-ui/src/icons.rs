@@ -40,6 +40,8 @@ pub enum Icon {
     Shuffle,
     Plus,
     Pip,
+    Library,
+    Sliders,
 }
 
 /// Paints a vector icon into the designated bounding rectangle.
@@ -382,6 +384,29 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
             painter.rect_stroke(outer, 1.5_f32, stroke, StrokeKind::Inside);
             let pip_rect = Rect::from_min_max(at(0.50, 0.48), at(0.82, 0.76));
             painter.rect_filled(pip_rect, 1.0_f32, color);
+        }
+
+        Icon::Library => {
+            let stroke = Stroke::new(1.3_f32, color);
+            let b1 = Rect::from_min_max(at(0.15, 0.20), at(0.32, 0.85));
+            let b2 = Rect::from_min_max(at(0.38, 0.20), at(0.55, 0.85));
+            let b3 = Rect::from_min_max(at(0.61, 0.20), at(0.78, 0.85));
+            painter.rect_stroke(b1, 1.0_f32, stroke, StrokeKind::Inside);
+            painter.rect_stroke(b2, 1.0_f32, stroke, StrokeKind::Inside);
+            painter.rect_stroke(b3, 1.0_f32, stroke, StrokeKind::Inside);
+            painter.line_segment([at(0.12, 0.88), at(0.88, 0.88)], stroke);
+        }
+
+        Icon::Sliders => {
+            let stroke = Stroke::new(1.3_f32, color);
+            painter.line_segment([at(0.25, 0.15), at(0.25, 0.85)], stroke);
+            painter.circle_filled(at(0.25, 0.40), 2.5_f32, color);
+
+            painter.line_segment([at(0.50, 0.15), at(0.50, 0.85)], stroke);
+            painter.circle_filled(at(0.50, 0.65), 2.5_f32, color);
+
+            painter.line_segment([at(0.75, 0.15), at(0.75, 0.85)], stroke);
+            painter.circle_filled(at(0.75, 0.30), 2.5_f32, color);
         }
     }
 }

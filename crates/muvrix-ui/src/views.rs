@@ -7,6 +7,14 @@ use std::path::PathBuf;
 
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
 use muvrix_core::browser::{EntryKind, MediaFilter, SortBy};
+use muvrix_core::database::{
+    LibraryItemView, LibraryRoot, LibrarySortField, MediaType, SortDirection,
+};
+use muvrix_core::network::{
+    redact_credentials_from_url, NetworkConnection, NetworkProvider, WebDavProvider,
+};
+use muvrix_player::equalizer::{EqualizerManager, EqualizerPreset, EQ_FREQUENCIES};
+use muvrix_player::shader::{Anime4KPreset, VideoAdjustmentSettings};
 use muvrix_player::{PlaybackState, SeekMode, SubtitleStyling, TrackInfo, TrackType};
 
 use crate::app::{format_timestamp, format_track_label, MuvrixApp};
@@ -17,6 +25,7 @@ use crate::icons::{self, Icon};
 pub enum AppView {
     #[default]
     Player,
+    Library,
     Browser,
     Playlist,
     Recent,
@@ -27,6 +36,7 @@ impl AppView {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Player => "Player",
+            Self::Library => "Library",
             Self::Browser => "Browser",
             Self::Playlist => "Playlist",
             Self::Recent => "History",
@@ -37,10 +47,34 @@ impl AppView {
     pub fn icon(&self) -> Icon {
         match self {
             Self::Player => Icon::Play,
+            Self::Library => Icon::Library,
             Self::Browser => Icon::Folder,
             Self::Playlist => Icon::Playlist,
             Self::Recent => Icon::History,
             Self::Settings => Icon::Settings,
+        }
+    }
+}
+
+/// Tab selector for the Settings view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    #[default]
+    Subtitles,
+    VideoEnhancement,
+    EqualizerAudio,
+    NetworkMedia,
+    Preferences,
+}
+
+impl SettingsTab {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Subtitles => "Subtitles & Engine",
+            Self::VideoEnhancement => "Video & Shaders",
+            Self::EqualizerAudio => "Audio & Equalizer",
+            Self::NetworkMedia => "Network Sources",
+            Self::Preferences => "Window & History",
         }
     }
 }
@@ -87,6 +121,1151 @@ pub fn format_timestamp_relative(timestamp_secs: u64) -> String {
 }
 
 impl MuvrixApp {
+    // -------------------------------------------------------------------------
+    // Media Library View (Indexed Catalog, Filtering, Sorting, Cards & Details)
+    // -------------------------------------------------------------------------
+
+    pub fn render_library_view(&mut self, ctx: &egui::Context) {
+        // 1. Right-side details drawer if an item is selected
+        if self.selected_library_item.is_some() {
+            egui::SidePanel::right("library_details_drawer")
+                .min_width(280.0)
+                .max_width(360.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    self.render_library_details_drawer(ui);
+                });
+        }
+
+        // 2. Library Roots Management Dialog
+        if self.add_root_dialog_open {
+            let mut close_dialog = false;
+            let mut is_open = true;
+            egui::Window::new("Manage Media Library Roots")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(520.0)
+                .open(&mut is_open)
+                .show(ctx, |ui| {
+                    self.render_roots_dialog(ui, &mut close_dialog);
+                });
+            if close_dialog || !is_open {
+                self.add_root_dialog_open = false;
+            }
+        }
+
+        // 3. Central Library Workspace Panel
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(4.0);
+
+            // Action deferred intents
+            let mut filter_changed = false;
+            let mut play_path: Option<String> = None;
+            let mut enqueue_path: Option<String> = None;
+            let mut select_item: Option<LibraryItemView> = None;
+            let mut toggle_fav: Option<(i64, bool)> = None;
+            let mut trigger_scan_root: Option<i64> = None;
+
+            // Header Toolbar
+            ui.horizontal(|ui| {
+                icons::icon_label(ui, Icon::Library, 18.0, Color32::from_rgb(60, 160, 240));
+                ui.label(
+                    RichText::new("Media Library")
+                        .strong()
+                        .size(16.0)
+                        .color(Color32::from_gray(230)),
+                );
+                ui.label(
+                    RichText::new(format!("({} items)", self.library_total_count))
+                        .size(12.0)
+                        .color(Color32::from_gray(150)),
+                );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // View Mode Toggle (Grid / List)
+                    ui.group(|ui| {
+                        if ui.selectable_label(self.library_is_grid, "Grid").clicked() {
+                            self.library_is_grid = true;
+                        }
+                        if ui.selectable_label(!self.library_is_grid, "List").clicked() {
+                            self.library_is_grid = false;
+                        }
+                    });
+
+                    // Manage Roots Button
+                    if ui.button(RichText::new("Manage Roots").size(12.0)).clicked() {
+                        self.add_root_dialog_open = true;
+                    }
+
+                    // Scan Roots Button
+                    let is_scanning = self.active_scan_cancel.is_some();
+                    if ui
+                        .add_enabled(
+                            !is_scanning,
+                            egui::Button::new(RichText::new("Scan Library").size(12.0)),
+                        )
+                        .clicked()
+                    {
+                        if let Ok(roots) = self.db.get_roots() {
+                            if let Some(first_root) = roots.first() {
+                                trigger_scan_root = Some(first_root.id);
+                            } else {
+                                self.add_root_dialog_open = true;
+                            }
+                        }
+                    }
+                });
+            });
+
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // Filter & Search Controls
+            ui.horizontal(|ui| {
+                icons::icon_label(ui, Icon::Search, 14.0, Color32::from_gray(160));
+                let mut query = self.library_filter.search_query.clone().unwrap_or_default();
+                let search_box = egui::TextEdit::singleline(&mut query)
+                    .hint_text("Search library titles, files, genres...")
+                    .desired_width(220.0);
+                if ui.add(search_box).changed() {
+                    self.library_filter.search_query = if query.trim().is_empty() {
+                        None
+                    } else {
+                        Some(query.trim().to_string())
+                    };
+                    filter_changed = true;
+                }
+
+                if self.library_filter.search_query.is_some()
+                    && ui
+                        .button("✖")
+                        .on_hover_text("Clear search query")
+                        .clicked()
+                {
+                    self.library_filter.search_query = None;
+                    filter_changed = true;
+                }
+
+                ui.separator();
+
+                // Category Filter Pills
+                let is_all = self.library_filter.media_type.is_none()
+                    && !self.library_filter.favourites_only
+                    && self.library_filter.resolution_tier.is_none();
+                if ui.selectable_label(is_all, "All").clicked() {
+                    self.library_filter.media_type = None;
+                    self.library_filter.favourites_only = false;
+                    self.library_filter.resolution_tier = None;
+                    filter_changed = true;
+                }
+
+                let is_video = self.library_filter.media_type == Some(MediaType::Video)
+                    && !self.library_filter.favourites_only;
+                if ui.selectable_label(is_video, "Video").clicked() {
+                    self.library_filter.media_type = Some(MediaType::Video);
+                    self.library_filter.favourites_only = false;
+                    self.library_filter.resolution_tier = None;
+                    filter_changed = true;
+                }
+
+                let is_audio = self.library_filter.media_type == Some(MediaType::Audio)
+                    && !self.library_filter.favourites_only;
+                if ui.selectable_label(is_audio, "Audio").clicked() {
+                    self.library_filter.media_type = Some(MediaType::Audio);
+                    self.library_filter.favourites_only = false;
+                    self.library_filter.resolution_tier = None;
+                    filter_changed = true;
+                }
+
+                let is_fav = self.library_filter.favourites_only;
+                if ui.selectable_label(is_fav, "⭐ Favourites").clicked() {
+                    self.library_filter.favourites_only = !is_fav;
+                    filter_changed = true;
+                }
+
+                let is_4k = self.library_filter.resolution_tier.as_deref() == Some("4K");
+                if ui.selectable_label(is_4k, "4K UHD").clicked() {
+                    self.library_filter.resolution_tier = if is_4k {
+                        None
+                    } else {
+                        Some("4K".to_string())
+                    };
+                    self.library_filter.media_type = Some(MediaType::Video);
+                    filter_changed = true;
+                }
+
+                let is_1080p = self.library_filter.resolution_tier.as_deref() == Some("1080p");
+                if ui.selectable_label(is_1080p, "1080p HD").clicked() {
+                    self.library_filter.resolution_tier = if is_1080p {
+                        None
+                    } else {
+                        Some("1080p".to_string())
+                    };
+                    self.library_filter.media_type = Some(MediaType::Video);
+                    filter_changed = true;
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Sort Direction Toggle
+                    let dir_label = match self.library_sort_dir {
+                        SortDirection::Ascending => "▲ Asc",
+                        SortDirection::Descending => "▼ Desc",
+                    };
+                    if ui.button(dir_label).clicked() {
+                        self.library_sort_dir = match self.library_sort_dir {
+                            SortDirection::Ascending => SortDirection::Descending,
+                            SortDirection::Descending => SortDirection::Ascending,
+                        };
+                        filter_changed = true;
+                    }
+
+                    // Sort Field Combo
+                    let current_sort_label = match self.library_sort_field {
+                        LibrarySortField::Title => "Title",
+                        LibrarySortField::FileName => "File Name",
+                        LibrarySortField::DateAdded => "Date Added",
+                        LibrarySortField::DateModified => "Date Modified",
+                        LibrarySortField::Duration => "Duration",
+                        LibrarySortField::FileSize => "File Size",
+                    };
+                    egui::ComboBox::from_id_salt("library_sort_field_combo")
+                        .selected_text(current_sort_label)
+                        .show_ui(ui, |ui| {
+                            let fields = [
+                                (LibrarySortField::Title, "Title"),
+                                (LibrarySortField::FileName, "File Name"),
+                                (LibrarySortField::DateAdded, "Date Added"),
+                                (LibrarySortField::DateModified, "Date Modified"),
+                                (LibrarySortField::Duration, "Duration"),
+                                (LibrarySortField::FileSize, "File Size"),
+                            ];
+                            for (field, label) in fields {
+                                if ui
+                                    .selectable_label(self.library_sort_field == field, label)
+                                    .clicked()
+                                {
+                                    self.library_sort_field = field;
+                                    filter_changed = true;
+                                }
+                            }
+                        });
+                    ui.label("Sort by:");
+                });
+            });
+
+            if filter_changed {
+                self.library_page = 0;
+                self.refresh_library();
+            }
+
+            ui.add_space(4.0);
+
+            // Active Scan Progress Banner
+            let mut cancel_scan = false;
+            if let Some(ref progress) = self.scan_progress {
+                if !progress.is_finished {
+                    let disc = progress.discovered_count;
+                    let ind = progress.indexed_count;
+                    let skip = progress.skipped_count;
+                    let miss = progress.missing_count;
+                    let cur = progress.current_path.clone();
+
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            icons::icon_label(
+                                ui,
+                                Icon::Replay,
+                                14.0,
+                                Color32::from_rgb(85, 175, 255),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "Scanning: Discovered {} | Indexed {} | Skipped {} | Missing {}",
+                                    disc, ind, skip, miss
+                                ))
+                                .size(12.0)
+                                .color(Color32::from_gray(210)),
+                            );
+
+                            if let Some(ref path) = cur {
+                                let current_display = path.split('/').next_back().unwrap_or(path);
+                                ui.label(
+                                    RichText::new(format!("({})", current_display))
+                                        .size(11.0)
+                                        .italics()
+                                        .color(Color32::from_gray(160)),
+                                );
+                            }
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui
+                                    .button(
+                                        RichText::new("Cancel")
+                                            .color(Color32::from_rgb(255, 100, 100)),
+                                    )
+                                    .clicked()
+                                {
+                                    cancel_scan = true;
+                                }
+                            });
+                        });
+                    });
+                    ui.add_space(4.0);
+                }
+            }
+            if cancel_scan {
+                self.cancel_library_scan();
+            }
+
+            // Main Catalog Area
+            if self.library_items.is_empty() {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(60.0);
+                    icons::icon_label(ui, Icon::Library, 48.0, Color32::from_gray(80));
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new("No media items in library")
+                            .size(16.0)
+                            .strong()
+                            .color(Color32::from_gray(180)),
+                    );
+                    ui.label(
+                        RichText::new(
+                            "Add media folders to your library roots to index and organize movies, series, and music.",
+                        )
+                        .size(12.0)
+                        .color(Color32::from_gray(140)),
+                    );
+                    ui.add_space(16.0);
+                    if ui
+                        .button(RichText::new("Add Library Root Folder").strong())
+                        .clicked()
+                    {
+                        self.add_root_dialog_open = true;
+                    }
+                    ui.add_space(60.0);
+                });
+            } else if self.library_is_grid {
+                // Pre-load thumbnail textures for visible items
+                for item_view in &self.library_items {
+                    if let Some(ref path_str) = item_view.thumbnail_path {
+                        if !self.thumbnail_textures.contains_key(path_str) {
+                            let p = std::path::Path::new(path_str);
+                            if p.is_file() {
+                                if let Ok(bytes) = std::fs::read(p) {
+                                    if let Ok(img) = image::load_from_memory(&bytes) {
+                                        let rgba = img.to_rgba8();
+                                        let size = [img.width() as usize, img.height() as usize];
+                                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                            size,
+                                            rgba.as_raw(),
+                                        );
+                                        let tex = ctx.load_texture(
+                                            path_str,
+                                            color_image,
+                                            egui::TextureOptions::LINEAR,
+                                        );
+                                        self.thumbnail_textures.insert(path_str.clone(), tex);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Responsive Grid Card Display
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let available = ui.available_width();
+                        // Deduct scrollbar (18px) and container padding (30px reserve)
+                        let usable_width = (available - 48.0).max(220.0);
+
+                        let (cols, spacing) = if usable_width >= 1050.0 {
+                            (4, 16.0_f32)
+                        } else if usable_width >= 720.0 {
+                            (3, 14.0_f32)
+                        } else if usable_width >= 460.0 {
+                            (2, 12.0_f32)
+                        } else {
+                            (1, 8.0_f32)
+                        };
+
+                        let card_outer_width =
+                            ((usable_width - ((cols - 1) as f32 * spacing)) / cols as f32).floor();
+                        let card_inner_width = (card_outer_width - 16.0).max(160.0);
+
+                        let card_frame = egui::Frame::new()
+                            .fill(Color32::from_rgb(22, 24, 30))
+                            .stroke(Stroke::new(1.0_f32, Color32::from_gray(45)))
+                            .corner_radius(6.0_f32)
+                            .inner_margin(egui::Margin::same(8));
+
+                        for chunk in self.library_items.chunks(cols) {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = spacing;
+                                for item_view in chunk {
+                                    card_frame.show(ui, |ui| {
+                                        ui.set_width(card_inner_width);
+                                        ui.set_max_width(card_inner_width);
+                                        ui.vertical(|ui| {
+                                            ui.set_width(card_inner_width);
+                                            ui.set_max_width(card_inner_width);
+
+                                            let preview_height = (card_inner_width * 0.5625)
+                                                .round()
+                                                .clamp(90.0, 160.0);
+
+                                            // 1. Dedicated Thumbnail Container (16:9 ratio)
+                                            let (rect, _response) = ui.allocate_exact_size(
+                                                Vec2::new(card_inner_width, preview_height),
+                                                egui::Sense::hover(),
+                                            );
+                                            let painter = ui.painter_at(rect);
+
+                                            let mut rendered_texture = false;
+                                            if let Some(ref thumb_path) = item_view.thumbnail_path {
+                                                if let Some(texture) =
+                                                    self.thumbnail_textures.get(thumb_path)
+                                                {
+                                                    painter.image(
+                                                        texture.id(),
+                                                        rect,
+                                                        egui::Rect::from_min_max(
+                                                            egui::pos2(0.0, 0.0),
+                                                            egui::pos2(1.0, 1.0),
+                                                        ),
+                                                        Color32::WHITE,
+                                                    );
+                                                    rendered_texture = true;
+                                                }
+                                            }
+
+                                            if !rendered_texture {
+                                                painter.rect_filled(
+                                                    rect,
+                                                    4.0,
+                                                    Color32::from_rgb(24, 26, 32),
+                                                );
+                                                let icon = if item_view.item.media_type
+                                                    == MediaType::Audio
+                                                {
+                                                    Icon::AudioTrack
+                                                } else {
+                                                    Icon::Play
+                                                };
+                                                let icon_rect = egui::Rect::from_center_size(
+                                                    rect.center(),
+                                                    Vec2::splat(32.0),
+                                                );
+                                                icons::paint_icon(
+                                                    &painter,
+                                                    icon_rect,
+                                                    icon,
+                                                    Color32::from_gray(80),
+                                                );
+                                            }
+
+                                            painter.rect_stroke(
+                                                rect,
+                                                4.0_f32,
+                                                Stroke::new(1.0_f32, Color32::from_gray(45)),
+                                                egui::StrokeKind::Inside,
+                                            );
+
+                                            // Badges: Duration & Resolution
+                                            if let Some(ref meta) = item_view.metadata {
+                                                if meta.duration_ms > 0 {
+                                                    let dur_text = format_timestamp(
+                                                        meta.duration_ms as f64 / 1000.0,
+                                                    );
+                                                    let dur_pos =
+                                                        rect.right_bottom() - Vec2::new(56.0, 18.0);
+                                                    let badge_rect = egui::Rect::from_min_size(
+                                                        dur_pos,
+                                                        Vec2::new(52.0, 14.0),
+                                                    );
+                                                    painter.rect_filled(
+                                                        badge_rect,
+                                                        2.0,
+                                                        Color32::from_black_alpha(190),
+                                                    );
+                                                    painter.text(
+                                                        badge_rect.center(),
+                                                        egui::Align2::CENTER_CENTER,
+                                                        dur_text,
+                                                        egui::FontId::monospace(10.0),
+                                                        Color32::WHITE,
+                                                    );
+                                                }
+
+                                                if meta.width >= 3800 {
+                                                    let res_pos =
+                                                        rect.left_top() + Vec2::new(4.0, 4.0);
+                                                    let badge_rect = egui::Rect::from_min_size(
+                                                        res_pos,
+                                                        Vec2::new(34.0, 14.0),
+                                                    );
+                                                    painter.rect_filled(
+                                                        badge_rect,
+                                                        2.0,
+                                                        Color32::from_rgb(180, 120, 20),
+                                                    );
+                                                    painter.text(
+                                                        badge_rect.center(),
+                                                        egui::Align2::CENTER_CENTER,
+                                                        "4K",
+                                                        egui::FontId::proportional(9.0),
+                                                        Color32::WHITE,
+                                                    );
+                                                } else if meta.width >= 1900 {
+                                                    let res_pos =
+                                                        rect.left_top() + Vec2::new(4.0, 4.0);
+                                                    let badge_rect = egui::Rect::from_min_size(
+                                                        res_pos,
+                                                        Vec2::new(36.0, 14.0),
+                                                    );
+                                                    painter.rect_filled(
+                                                        badge_rect,
+                                                        2.0,
+                                                        Color32::from_rgb(30, 110, 190),
+                                                    );
+                                                    painter.text(
+                                                        badge_rect.center(),
+                                                        egui::Align2::CENTER_CENTER,
+                                                        "1080p",
+                                                        egui::FontId::proportional(9.0),
+                                                        Color32::WHITE,
+                                                    );
+                                                }
+                                            }
+
+                                            ui.add_space(6.0);
+
+                                            // 2. Title strictly below thumbnail
+                                            let title = item_view
+                                                .metadata
+                                                .as_ref()
+                                                .and_then(|m| m.title.as_ref())
+                                                .unwrap_or(&item_view.item.file_name);
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(title)
+                                                        .strong()
+                                                        .size(12.5)
+                                                        .color(Color32::from_gray(230)),
+                                                )
+                                                .truncate(),
+                                            );
+
+                                            // 3. Subtitle strictly below title
+                                            let sub_info = match &item_view.metadata {
+                                                Some(m) => {
+                                                    let codec = m
+                                                        .video_codec
+                                                        .as_deref()
+                                                        .or(m.audio_codec.as_deref())
+                                                        .unwrap_or("media");
+                                                    format!(
+                                                        "{} • {}",
+                                                        codec.to_uppercase(),
+                                                        format_file_size(item_view.item.file_size)
+                                                    )
+                                                }
+                                                None => format_file_size(item_view.item.file_size),
+                                            };
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(sub_info)
+                                                        .size(11.0)
+                                                        .color(Color32::from_gray(140)),
+                                                )
+                                                .truncate(),
+                                            );
+
+                                            ui.add_space(6.0);
+
+                                            // 4. Dedicated Action Row strictly below title & metadata
+                                            ui.horizontal(|ui| {
+                                                ui.set_width(card_inner_width);
+                                                let star =
+                                                    if item_view.is_favourite { "★" } else { "☆" };
+                                                let star_color = if item_view.is_favourite {
+                                                    Color32::from_rgb(255, 200, 50)
+                                                } else {
+                                                    Color32::from_gray(150)
+                                                };
+                                                if ui
+                                                    .button(
+                                                        RichText::new(star)
+                                                            .size(13.0)
+                                                            .color(star_color),
+                                                    )
+                                                    .on_hover_text("Toggle Favourite")
+                                                    .clicked()
+                                                {
+                                                    toggle_fav = Some((
+                                                        item_view.item.id,
+                                                        !item_view.is_favourite,
+                                                    ));
+                                                }
+
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| {
+                                                        if ui
+                                                            .button("ℹ")
+                                                            .on_hover_text("View Technical Details")
+                                                            .clicked()
+                                                        {
+                                                            select_item = Some(item_view.clone());
+                                                        }
+
+                                                        if ui
+                                                            .button("➕")
+                                                            .on_hover_text("Enqueue to Playlist")
+                                                            .clicked()
+                                                        {
+                                                            enqueue_path = Some(
+                                                                item_view
+                                                                    .item
+                                                                    .canonical_path
+                                                                    .clone(),
+                                                            );
+                                                        }
+
+                                                        if ui
+                                                            .button(
+                                                                RichText::new("▶ Play").strong(),
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            play_path = Some(
+                                                                item_view
+                                                                    .item
+                                                                    .canonical_path
+                                                                    .clone(),
+                                                            );
+                                                        }
+                                                    },
+                                                );
+                                            });
+                                            ui.add_space(2.0);
+                                        });
+                                    });
+                                }
+                            });
+                            ui.add_space(spacing);
+                        }
+                    });
+            } else {
+                // Table / List View
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("library_table_grid")
+                            .striped(true)
+                            .spacing([12.0, 6.0])
+                            .show(ui, |ui| {
+                                // Header row
+                                ui.label(RichText::new("Fav").strong());
+                                ui.label(RichText::new("Title / File Name").strong());
+                                ui.label(RichText::new("Type").strong());
+                                ui.label(RichText::new("Format").strong());
+                                ui.label(RichText::new("Duration").strong());
+                                ui.label(RichText::new("Size").strong());
+                                ui.label(RichText::new("Actions").strong());
+                                ui.end_row();
+
+                                for item_view in &self.library_items {
+                                    let star = if item_view.is_favourite { "★" } else { "☆" };
+                                    let star_color = if item_view.is_favourite {
+                                        Color32::from_rgb(255, 200, 50)
+                                    } else {
+                                        Color32::from_gray(150)
+                                    };
+                                    if ui.button(RichText::new(star).color(star_color)).clicked() {
+                                        toggle_fav =
+                                            Some((item_view.item.id, !item_view.is_favourite));
+                                    }
+
+                                    let title = item_view
+                                        .metadata
+                                        .as_ref()
+                                        .and_then(|m| m.title.as_ref())
+                                        .unwrap_or(&item_view.item.file_name);
+                                    let title_response = ui.selectable_label(false, title);
+                                    if title_response.double_clicked() {
+                                        play_path = Some(item_view.item.canonical_path.clone());
+                                    } else if title_response.clicked() {
+                                        select_item = Some(item_view.clone());
+                                    }
+
+                                    let type_label = match item_view.item.media_type {
+                                        MediaType::Video => "Video",
+                                        MediaType::Audio => "Audio",
+                                    };
+                                    ui.label(
+                                        RichText::new(type_label).color(Color32::from_gray(160)),
+                                    );
+
+                                    let codec = item_view
+                                        .metadata
+                                        .as_ref()
+                                        .and_then(|m| {
+                                            m.video_codec
+                                                .as_deref()
+                                                .or(m.audio_codec.as_deref())
+                                        })
+                                        .unwrap_or(&item_view.item.file_extension);
+                                    ui.label(
+                                        RichText::new(codec.to_uppercase())
+                                            .color(Color32::from_gray(160)),
+                                    );
+
+                                    let dur_str = item_view
+                                        .metadata
+                                        .as_ref()
+                                        .map(|m| format_timestamp(m.duration_ms as f64 / 1000.0))
+                                        .unwrap_or_else(|| "-".to_string());
+                                    ui.label(
+                                        RichText::new(dur_str)
+                                            .monospace()
+                                            .color(Color32::from_gray(160)),
+                                    );
+
+                                    ui.label(
+                                        RichText::new(format_file_size(item_view.item.file_size))
+                                            .color(Color32::from_gray(160)),
+                                    );
+
+                                    ui.horizontal(|ui| {
+                                        if ui.button("▶ Play").clicked() {
+                                            play_path = Some(item_view.item.canonical_path.clone());
+                                        }
+                                        if ui
+                                            .button("➕")
+                                            .on_hover_text("Enqueue to Playlist")
+                                            .clicked()
+                                        {
+                                            enqueue_path =
+                                                Some(item_view.item.canonical_path.clone());
+                                        }
+                                        if ui.button("ℹ").on_hover_text("View Details").clicked() {
+                                            select_item = Some(item_view.clone());
+                                        }
+                                    });
+
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+
+            ui.add_space(4.0);
+            ui.separator();
+
+            // Pagination Controls Footer
+            ui.horizontal(|ui| {
+                let limit = 24u64;
+                let start_idx = self.library_page * limit + 1;
+                let end_idx = ((self.library_page + 1) * limit).min(self.library_total_count);
+                if self.library_total_count > 0 {
+                    ui.label(
+                        RichText::new(format!(
+                            "Showing {}-{} of {} items",
+                            start_idx, end_idx, self.library_total_count
+                        ))
+                        .size(11.5)
+                        .color(Color32::from_gray(150)),
+                    );
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let total_pages = self.library_total_count.div_ceil(limit);
+                    let has_next = (self.library_page + 1) < total_pages;
+                    if ui
+                        .add_enabled(has_next, egui::Button::new("Next ▶"))
+                        .clicked()
+                    {
+                        self.library_page += 1;
+                        self.refresh_library();
+                    }
+
+                    if total_pages > 0 {
+                        ui.label(
+                            RichText::new(format!(
+                                "Page {} of {}",
+                                self.library_page + 1,
+                                total_pages
+                            ))
+                            .size(11.5)
+                            .color(Color32::from_gray(160)),
+                        );
+                    }
+
+                    let has_prev = self.library_page > 0;
+                    if ui
+                        .add_enabled(has_prev, egui::Button::new("◀ Prev"))
+                        .clicked()
+                    {
+                        self.library_page -= 1;
+                        self.refresh_library();
+                    }
+                });
+            });
+
+            // Process Deferred Actions
+            if let Some(path) = play_path {
+                self.load_file(&path);
+                self.current_view = AppView::Player;
+            }
+            if let Some(path) = enqueue_path {
+                let _ = self.controller.playlist_append(&path);
+                self.status_message = "Added item to playlist".to_string();
+            }
+            if let Some(item) = select_item {
+                self.selected_library_item = Some(item);
+            }
+            if let Some((id, fav)) = toggle_fav {
+                let _ = self.db.set_favourite(id, fav);
+                self.refresh_library();
+            }
+            if let Some(root_id) = trigger_scan_root {
+                self.start_library_scan(root_id);
+            }
+        });
+    }
+
+    /// Renders the Media Details Drawer.
+    fn render_library_details_drawer(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        let mut close_drawer = false;
+        let mut play_path: Option<String> = None;
+        let mut enqueue_path: Option<String> = None;
+
+        if let Some(ref item_view) = self.selected_library_item {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Media Details")
+                        .strong()
+                        .size(15.0)
+                        .color(Color32::from_rgb(85, 175, 255)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("✖").on_hover_text("Close details").clicked() {
+                        close_drawer = true;
+                    }
+                });
+            });
+
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let title = item_view
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.title.as_ref())
+                        .unwrap_or(&item_view.item.file_name);
+                    ui.label(RichText::new(title).strong().size(14.0));
+
+                    ui.add_space(6.0);
+
+                    // Actions
+                    ui.horizontal(|ui| {
+                        if ui.button(RichText::new("▶ Play Now").strong()).clicked() {
+                            play_path = Some(item_view.item.canonical_path.clone());
+                        }
+                        if ui.button("➕ Enqueue").clicked() {
+                            enqueue_path = Some(item_view.item.canonical_path.clone());
+                        }
+                    });
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    // Technical Specs
+                    ui.label(
+                        RichText::new("Technical Information")
+                            .strong()
+                            .size(12.5)
+                            .color(Color32::from_gray(210)),
+                    );
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("File Name:").color(Color32::from_gray(150)));
+                        ui.label(&item_view.item.file_name);
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Size:").color(Color32::from_gray(150)));
+                        ui.label(format_file_size(item_view.item.file_size));
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Path:").color(Color32::from_gray(150)));
+                        ui.label(
+                            RichText::new(&item_view.item.canonical_path)
+                                .size(10.5)
+                                .color(Color32::from_gray(170)),
+                        );
+                    });
+
+                    if let Some(ref meta) = item_view.metadata {
+                        if meta.duration_ms > 0 {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Duration:").color(Color32::from_gray(150)));
+                                ui.label(format_timestamp(meta.duration_ms as f64 / 1000.0));
+                            });
+                        }
+
+                        if meta.width > 0 && meta.height > 0 {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Resolution:").color(Color32::from_gray(150)),
+                                );
+                                ui.label(format!("{}x{}", meta.width, meta.height));
+                            });
+                        }
+
+                        if let Some(ref v_codec) = meta.video_codec {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Video Codec:").color(Color32::from_gray(150)),
+                                );
+                                ui.label(v_codec.to_uppercase());
+                            });
+                        }
+
+                        if let Some(ref a_codec) = meta.audio_codec {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Audio Codec:").color(Color32::from_gray(150)),
+                                );
+                                ui.label(a_codec.to_uppercase());
+                            });
+                        }
+
+                        if meta.overall_bitrate > 0 {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Bitrate:").color(Color32::from_gray(150)));
+                                ui.label(format!("{} kbps", meta.overall_bitrate / 1000));
+                            });
+                        }
+
+                        if let Some(ref container) = meta.container {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Container:").color(Color32::from_gray(150)),
+                                );
+                                ui.label(container);
+                            });
+                        }
+                    }
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    // Tags
+                    ui.label(
+                        RichText::new("Tags")
+                            .strong()
+                            .size(12.5)
+                            .color(Color32::from_gray(210)),
+                    );
+                    if item_view.tags.is_empty() {
+                        ui.label(
+                            RichText::new("No tags attached")
+                                .italics()
+                                .size(11.0)
+                                .color(Color32::from_gray(140)),
+                        );
+                    } else {
+                        ui.horizontal_wrapped(|ui| {
+                            for tag in &item_view.tags {
+                                ui.label(
+                                    RichText::new(format!("#{}", tag))
+                                        .color(Color32::from_rgb(100, 180, 255))
+                                        .size(11.5),
+                                );
+                            }
+                        });
+                    }
+                });
+        }
+
+        if close_drawer {
+            self.selected_library_item = None;
+        }
+        if let Some(path) = play_path {
+            self.load_file(&path);
+            self.current_view = AppView::Player;
+        }
+        if let Some(path) = enqueue_path {
+            let _ = self.controller.playlist_append(&path);
+            self.status_message = "Added item to playlist".to_string();
+        }
+    }
+
+    /// Renders the Library Roots management modal dialog.
+    fn render_roots_dialog(&mut self, ui: &mut egui::Ui, close_dialog: &mut bool) {
+        ui.label(
+            RichText::new("Configured Media Roots")
+                .strong()
+                .size(14.0)
+                .color(Color32::from_rgb(85, 175, 255)),
+        );
+        ui.label(
+            RichText::new(
+                "Directories indexed by Muvrix for fast browsing, search, and automatic metadata extraction.",
+            )
+            .size(11.5)
+            .color(Color32::from_gray(150)),
+        );
+
+        ui.add_space(8.0);
+
+        let roots = self.db.get_roots().unwrap_or_default();
+        let mut delete_root_id: Option<i64> = None;
+        let mut scan_root_id: Option<i64> = None;
+
+        egui::ScrollArea::vertical()
+            .max_height(200.0)
+            .show(ui, |ui| {
+                if roots.is_empty() {
+                    ui.label(
+                        RichText::new("No library roots added yet.")
+                            .italics()
+                            .color(Color32::from_gray(140)),
+                    );
+                } else {
+                    for root in &roots {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(&root.display_name).strong());
+                                    ui.label(
+                                        RichText::new(&root.root_path)
+                                            .size(11.0)
+                                            .color(Color32::from_gray(150)),
+                                    );
+                                    let status_text = format!(
+                                        "Status: {} | Scanned: {}",
+                                        root.scan_status,
+                                        format_timestamp_relative(root.last_scanned_at)
+                                    );
+                                    ui.label(
+                                        RichText::new(status_text)
+                                            .size(10.5)
+                                            .color(Color32::from_gray(130)),
+                                    );
+                                });
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button("Remove").clicked() {
+                                            delete_root_id = Some(root.id);
+                                        }
+                                        let is_scanning = self.active_scan_cancel.is_some();
+                                        if ui
+                                            .add_enabled(!is_scanning, egui::Button::new("Scan"))
+                                            .clicked()
+                                        {
+                                            scan_root_id = Some(root.id);
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                        ui.add_space(4.0);
+                    }
+                }
+            });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        // Add Root Section
+        ui.label(RichText::new("Add Directory").strong().size(13.0));
+        ui.horizontal(|ui| {
+            if ui.button("Browse Folder...").clicked() {
+                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    let folder_str = folder.to_string_lossy().to_string();
+                    let name = folder
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "Media".to_string());
+                    let root = LibraryRoot {
+                        id: 0,
+                        display_name: name,
+                        root_path: folder_str,
+                        source_type: "local".to_string(),
+                        is_recursive: true,
+                        is_enabled: true,
+                        exclusion_patterns: Vec::new(),
+                        last_scanned_at: 0,
+                        scan_status: "idle".to_string(),
+                    };
+                    if let Ok(new_id) = self.db.insert_root(&root) {
+                        scan_root_id = Some(new_id);
+                    }
+                }
+            }
+
+            ui.label("or path:");
+            ui.add(egui::TextEdit::singleline(&mut self.add_root_path_input).desired_width(180.0));
+            if ui.button("Add Path").clicked() && !self.add_root_path_input.trim().is_empty() {
+                let path = self.add_root_path_input.trim().to_string();
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Media".to_string());
+                let root = LibraryRoot {
+                    id: 0,
+                    display_name: name,
+                    root_path: path,
+                    source_type: "local".to_string(),
+                    is_recursive: true,
+                    is_enabled: true,
+                    exclusion_patterns: Vec::new(),
+                    last_scanned_at: 0,
+                    scan_status: "idle".to_string(),
+                };
+                if let Ok(new_id) = self.db.insert_root(&root) {
+                    scan_root_id = Some(new_id);
+                    self.add_root_path_input.clear();
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button("Done").clicked() {
+                *close_dialog = true;
+            }
+        });
+
+        if let Some(id) = delete_root_id {
+            let _ = self.db.delete_root(id);
+            self.refresh_library();
+        }
+        if let Some(id) = scan_root_id {
+            self.start_library_scan(id);
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Media Browser View
     // -------------------------------------------------------------------------
@@ -1124,12 +2303,31 @@ impl MuvrixApp {
             });
 
             ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let tabs = [
+                    SettingsTab::Subtitles,
+                    SettingsTab::VideoEnhancement,
+                    SettingsTab::EqualizerAudio,
+                    SettingsTab::NetworkMedia,
+                    SettingsTab::Preferences,
+                ];
+                for tab in tabs {
+                    let is_selected = self.settings_tab == tab;
+                    if ui.selectable_label(is_selected, tab.label()).clicked() {
+                        self.settings_tab = tab;
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
             ui.separator();
             ui.add_space(8.0);
 
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    match self.settings_tab {
+                        SettingsTab::Subtitles => {
                     // Section 1: Dual Subtitles (Primary & Secondary)
                     ui.group(|ui| {
                         ui.label(
@@ -1370,13 +2568,423 @@ impl MuvrixApp {
                             }
                         });
                     });
-
-                    ui.add_space(10.0);
-
-                    // Section 3: Compact Mini-Player Mode & Window Display
+                }
+                SettingsTab::VideoEnhancement => {
+                    // Section 3: Video Enhancement, GLSL Shaders & Picture Adjustments
                     ui.group(|ui| {
                         ui.label(
-                            RichText::new("3. Compact Mini-Player Mode & Window Display")
+                            RichText::new("3. Video Enhancement, GLSL Shaders & Picture Adjustments")
+                                .strong()
+                                .size(14.0)
+                                .color(Color32::from_rgb(95, 185, 255)),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Configure Anime4K high-quality upscaling shaders, hardware color adjustments, debanding, and sharpening.",
+                            )
+                            .size(12.0)
+                            .color(Color32::from_gray(160)),
+                        );
+
+                        ui.add_space(8.0);
+
+                        // Anime4K Preset
+                        ui.horizontal(|ui| {
+                            ui.label("Anime4K Upscaler Preset: ");
+                            let preset_label = self.anime4k_preset.as_str();
+                            egui::ComboBox::from_id_salt("anime4k_preset_combo")
+                                .selected_text(preset_label)
+                                .show_ui(ui, |ui| {
+                                    let presets = [
+                                        Anime4KPreset::Disabled,
+                                        Anime4KPreset::ModeA,
+                                        Anime4KPreset::ModeB,
+                                        Anime4KPreset::ModeC,
+                                        Anime4KPreset::ModeAA,
+                                    ];
+                                    for p in presets {
+                                        if ui.selectable_label(self.anime4k_preset == p, p.as_str()).clicked() {
+                                            self.anime4k_preset = p;
+                                            self.apply_video_enhancements();
+                                        }
+                                    }
+                                });
+                        });
+
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Color & Picture Adjustments:").strong().size(12.5));
+
+                        let mut adj_changed = false;
+
+                        // Sliders: Brightness, Contrast, Saturation, Gamma, Hue
+                        ui.horizontal(|ui| {
+                            ui.label("Brightness: ");
+                            if ui.add(egui::Slider::new(&mut self.video_settings.brightness, -100..=100)).changed() {
+                                adj_changed = true;
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Contrast:   ");
+                            if ui.add(egui::Slider::new(&mut self.video_settings.contrast, -100..=100)).changed() {
+                                adj_changed = true;
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Saturation: ");
+                            if ui.add(egui::Slider::new(&mut self.video_settings.saturation, -100..=100)).changed() {
+                                adj_changed = true;
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Gamma:      ");
+                            if ui.add(egui::Slider::new(&mut self.video_settings.gamma, -100..=100)).changed() {
+                                adj_changed = true;
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Hue:        ");
+                            if ui.add(egui::Slider::new(&mut self.video_settings.hue, -100..=100)).changed() {
+                                adj_changed = true;
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Sharpen:    ");
+                            if ui.add(egui::Slider::new(&mut self.video_settings.sharpen, -5.0..=5.0).step_by(0.1)).changed() {
+                                adj_changed = true;
+                            }
+                        });
+
+                        if ui.checkbox(&mut self.video_settings.deband, "Deband filter (smooth color gradients and reduce banding)").changed() {
+                            adj_changed = true;
+                        }
+
+                        if adj_changed {
+                            self.apply_video_enhancements();
+                        }
+
+                        ui.add_space(6.0);
+                        if ui.button("Reset Picture Adjustments to Flat (0)").clicked() {
+                            self.video_settings = VideoAdjustmentSettings::default();
+                            self.anime4k_preset = Anime4KPreset::Disabled;
+                            self.apply_video_enhancements();
+                        }
+                    });
+                }
+                SettingsTab::EqualizerAudio => {
+                    // Section 4: Audio Equalizer & Output Device Routing
+                    ui.group(|ui| {
+                        ui.label(
+                            RichText::new("4. 10-Band Graphic Equalizer & Audio Routing")
+                                .strong()
+                                .size(14.0)
+                                .color(Color32::from_rgb(95, 185, 255)),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Configure 10-band peaking biquad equalizer filters, dynamic range compression (dynaudnorm), and physical output device selection.",
+                            )
+                            .size(12.0)
+                            .color(Color32::from_gray(160)),
+                        );
+
+                        ui.add_space(8.0);
+
+                        let mut eq_changed = false;
+
+                        if ui.checkbox(&mut self.equalizer_settings.is_enabled, "Enable 10-Band Graphic Equalizer").changed() {
+                            eq_changed = true;
+                        }
+
+                        if ui.checkbox(&mut self.equalizer_settings.dynaudnorm, "Dynamic Audio Normalizer (dynaudnorm)").changed() {
+                            eq_changed = true;
+                        }
+
+                        ui.add_space(4.0);
+
+                        // Presets
+                        ui.horizontal(|ui| {
+                            ui.label("EQ Preset: ");
+                            let preset_label = self.equalizer_settings.active_preset.as_str();
+                            egui::ComboBox::from_id_salt("eq_preset_combo")
+                                .selected_text(preset_label)
+                                .show_ui(ui, |ui| {
+                                    let presets = [
+                                        EqualizerPreset::Flat,
+                                        EqualizerPreset::BassBoost,
+                                        EqualizerPreset::BassReduction,
+                                        EqualizerPreset::TrebleBoost,
+                                        EqualizerPreset::TrebleReduction,
+                                        EqualizerPreset::VocalClarity,
+                                        EqualizerPreset::Rock,
+                                        EqualizerPreset::Classical,
+                                        EqualizerPreset::Electronic,
+                                    ];
+                                    for p in presets {
+                                        if ui.selectable_label(self.equalizer_settings.active_preset == p, p.as_str()).clicked() {
+                                            self.equalizer_settings.active_preset = p;
+                                            self.equalizer_settings.gains = p.default_gains();
+                                            if p == EqualizerPreset::Flat {
+                                                self.equalizer_settings.preamp_db = 0.0;
+                                            }
+                                            eq_changed = true;
+                                        }
+                                    }
+                                });
+                        });
+
+                        ui.add_space(4.0);
+
+                        // Preamp Slider
+                        ui.horizontal(|ui| {
+                            ui.label("Preamp Gain: ");
+                            if ui.add(egui::Slider::new(&mut self.equalizer_settings.preamp_db, -12.0..=12.0).text("dB")).changed() {
+                                if self.equalizer_settings.active_preset != EqualizerPreset::Custom {
+                                    self.equalizer_settings.active_preset = EqualizerPreset::Custom;
+                                }
+                                eq_changed = true;
+                            }
+                        });
+
+                        ui.add_space(6.0);
+
+                        // 10 Frequency Band Sliders
+                        ui.horizontal(|ui| {
+                            for (i, &freq) in EQ_FREQUENCIES.iter().enumerate() {
+                                ui.vertical(|ui| {
+                                    let label = if freq >= 1000.0 {
+                                        format!("{:.0}k", freq / 1000.0)
+                                    } else {
+                                        format!("{:.0}", freq)
+                                    };
+                                    ui.label(RichText::new(&label).size(10.5));
+                                    let slider = egui::Slider::new(&mut self.equalizer_settings.gains[i], -12.0..=12.0)
+                                        .vertical()
+                                        .show_value(false);
+                                    if ui.add_sized([24.0, 90.0], slider).changed() {
+                                        self.equalizer_settings.active_preset = EqualizerPreset::Custom;
+                                        eq_changed = true;
+                                    }
+                                    ui.label(RichText::new(format!("{:.1}", self.equalizer_settings.gains[i])).size(9.5));
+                                });
+                            }
+                        });
+
+                        if eq_changed {
+                            self.apply_equalizer_settings();
+                        }
+
+                        ui.add_space(6.0);
+                        if ui.button("Reset Equalizer to Flat (0 dB)").clicked() {
+                            self.equalizer_settings.gains = [0.0; 10];
+                            self.equalizer_settings.preamp_db = 0.0;
+                            self.equalizer_settings.active_preset = EqualizerPreset::Flat;
+                            self.apply_equalizer_settings();
+                        }
+
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        // Audio Output Device
+                        ui.label(RichText::new("Audio Output Device:").strong().size(12.5));
+                        ui.horizontal(|ui| {
+                            let current_dev_desc = self.audio_devices
+                                .iter()
+                                .find(|d| d.name == self.selected_audio_device)
+                                .map(|d| d.description.as_str())
+                                .unwrap_or("Auto-select device");
+
+                            egui::ComboBox::from_id_salt("audio_output_device_combo")
+                                .selected_text(current_dev_desc)
+                                .show_ui(ui, |ui| {
+                                    for dev in &self.audio_devices {
+                                        if ui.selectable_label(self.selected_audio_device == dev.name, &dev.description).clicked() {
+                                            self.selected_audio_device = dev.name.clone();
+                                            let _ = EqualizerManager::set_audio_device(self.controller.handle(), &dev.name);
+                                        }
+                                    }
+                                });
+
+                            if ui.button("Refresh Devices").clicked() {
+                                self.refresh_audio_devices();
+                            }
+                        });
+                    });
+                }
+                SettingsTab::NetworkMedia => {
+                    // Section 5: Network Media Connections (WebDAV)
+                    ui.group(|ui| {
+                        ui.label(
+                            RichText::new("5. Network Media Connections & Streaming")
+                                .strong()
+                                .size(14.0)
+                                .color(Color32::from_rgb(95, 185, 255)),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Configure WebDAV / HTTP endpoints for direct network streaming. Credentials are held in application memory for this session and are not persisted by Muvrix.",
+                            )
+                            .size(12.0)
+                            .color(Color32::from_gray(160)),
+                        );
+
+                        ui.add_space(8.0);
+
+                        let connections = self.db.list_connections().unwrap_or_default();
+                        let mut delete_conn_id: Option<i64> = None;
+
+                        if connections.is_empty() {
+                            ui.label(RichText::new("No network connections configured.").italics().color(Color32::from_gray(140)));
+                        } else {
+                            for conn in &connections {
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(RichText::new(&conn.name).strong());
+                                            let raw_url = format!("{}://{}:{}{}", conn.protocol, conn.host, conn.port, conn.remote_path);
+                                            let redacted = redact_credentials_from_url(&raw_url);
+                                            ui.label(RichText::new(redacted).size(11.0).color(Color32::from_gray(150)));
+                                        });
+
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui.button("Delete").clicked() {
+                                                delete_conn_id = Some(conn.id);
+                                            }
+                                        });
+                                    });
+                                });
+                                ui.add_space(4.0);
+                            }
+                        }
+
+                        if let Some(id) = delete_conn_id {
+                            let _ = self.db.delete_connection(id);
+                        }
+
+                        ui.add_space(6.0);
+
+                        let add_label = if self.add_network_open { "Hide Add Connection Form" } else { "➕ Add WebDAV Connection" };
+                        if ui.button(add_label).clicked() {
+                            self.add_network_open = !self.add_network_open;
+                        }
+
+                        if self.add_network_open {
+                            ui.add_space(6.0);
+                            ui.group(|ui| {
+                                ui.label(RichText::new("New WebDAV Endpoint").strong().size(12.5));
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Name:       ");
+                                    ui.add(egui::TextEdit::singleline(&mut self.network_name_input).hint_text("My NAS / Server"));
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Host / IP:  ");
+                                    ui.add(egui::TextEdit::singleline(&mut self.network_host_input).hint_text("dav.example.com or media.local"));
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Port:       ");
+                                    ui.add(egui::DragValue::new(&mut self.network_port_input).range(1..=65535));
+                                    ui.checkbox(&mut self.network_https_input, "Use HTTPS");
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Path:       ");
+                                    ui.add(egui::TextEdit::singleline(&mut self.network_path_input).hint_text("/remote.php/webdav/"));
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Username:   ");
+                                    ui.add(egui::TextEdit::singleline(&mut self.network_user_input));
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Password:   ");
+                                    ui.add(egui::TextEdit::singleline(&mut self.network_pass_input).password(true));
+                                });
+
+                                ui.add_space(4.0);
+
+                                ui.horizontal(|ui| {
+                                    if ui.button(RichText::new("Save Connection").strong()).clicked()
+                                        && !self.network_host_input.trim().is_empty()
+                                    {
+                                        let cred_ref = if !self.network_pass_input.is_empty() {
+                                            let key = format!("webdav_{}_{}", self.network_host_input, self.network_user_input);
+                                            self.network_vault.store(&key, &self.network_pass_input);
+                                            Some(key)
+                                        } else {
+                                            None
+                                        };
+                                        let conn = NetworkConnection {
+                                            id: 0,
+                                            name: if self.network_name_input.trim().is_empty() {
+                                                format!("WebDAV ({})", self.network_host_input)
+                                            } else {
+                                                self.network_name_input.trim().to_string()
+                                            },
+                                            protocol: "webdav".to_string(),
+                                            host: self.network_host_input.trim().to_string(),
+                                            port: self.network_port_input,
+                                            remote_path: if self.network_path_input.trim().is_empty() {
+                                                "/".to_string()
+                                            } else {
+                                                self.network_path_input.trim().to_string()
+                                            },
+                                            auth_type: if self.network_pass_input.is_empty() { "anonymous".to_string() } else { "basic".to_string() },
+                                            credential_ref: cred_ref,
+                                            is_anonymous: self.network_pass_input.is_empty(),
+                                            auto_connect: false,
+                                            last_connected_at: 0,
+                                        };
+                                        let _ = self.db.insert_connection(&conn);
+                                        self.network_status_msg = Some("Connection saved successfully".to_string());
+                                        self.add_network_open = false;
+                                    }
+
+                                    if ui.button("Test Endpoint").clicked() {
+                                        let provider = WebDavProvider::new(
+                                            &self.network_host_input,
+                                            self.network_port_input,
+                                            &self.network_path_input,
+                                            self.network_https_input,
+                                            if self.network_user_input.is_empty() { None } else { Some(self.network_user_input.clone()) },
+                                            None,
+                                            self.network_vault.clone(),
+                                        );
+                                        match provider.test_connection() {
+                                            Ok(true) => {
+                                                self.network_status_msg = Some(format!("Success: Endpoint {} verified", provider.base_url()));
+                                            }
+                                            Ok(false) => {
+                                                self.network_status_msg = Some("Connection test returned negative".to_string());
+                                            }
+                                            Err(e) => {
+                                                self.network_status_msg = Some(format!("Error: {}", e));
+                                            }
+                                        }
+                                    }
+                                });
+                            });
+                        }
+
+                        if let Some(ref msg) = self.network_status_msg {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(msg).color(Color32::from_rgb(100, 200, 100)).size(11.5));
+                        }
+                    });
+                }
+                SettingsTab::Preferences => {
+                    // Section 6: Compact Mini-Player Mode & Window Display
+                    ui.group(|ui| {
+                        ui.label(
+                            RichText::new("6. Compact Mini-Player Mode & Window Display")
                                 .strong()
                                 .size(14.0)
                                 .color(Color32::from_rgb(95, 185, 255)),
@@ -1412,10 +3020,10 @@ impl MuvrixApp {
 
                     ui.add_space(10.0);
 
-                    // Section 4: History & Persistence Controls
+                    // Section 7: History & Persistence Controls
                     ui.group(|ui| {
                         ui.label(
-                            RichText::new("4. History & Privacy Preferences")
+                            RichText::new("7. History & Privacy Preferences")
                                 .strong()
                                 .size(14.0)
                                 .color(Color32::from_rgb(95, 185, 255)),
@@ -1442,8 +3050,10 @@ impl MuvrixApp {
                             self.status_message = "History cleared".to_string();
                         }
                     });
-                });
+                }
+            }
         });
+    });
     }
 
     // -------------------------------------------------------------------------
