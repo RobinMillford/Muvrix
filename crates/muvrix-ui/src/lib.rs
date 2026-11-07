@@ -3,6 +3,7 @@
 pub mod app;
 pub mod fbo;
 pub mod gl_loader;
+pub mod icons;
 pub mod quad;
 pub mod render_engine;
 

@@ -43,10 +43,19 @@ fn main() -> eframe::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     log::info!("Starting Muvrix Desktop Player (Glow Rendering Prototype)");
 
+    let width = std::env::var("MUVRIX_WINDOW_WIDTH")
+        .ok()
+        .and_then(|w| w.parse::<f32>().ok())
+        .unwrap_or(1280.0);
+    let height = std::env::var("MUVRIX_WINDOW_HEIGHT")
+        .ok()
+        .and_then(|h| h.parse::<f32>().ok())
+        .unwrap_or(720.0);
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Muvrix Media Player (Glow Prototype)")
-            .with_inner_size([1280.0, 720.0])
+            .with_inner_size([width, height])
             .with_min_inner_size([640.0, 360.0]),
         renderer: eframe::Renderer::Glow,
         ..Default::default()

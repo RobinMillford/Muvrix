@@ -486,3 +486,88 @@ fn test_controller_clean_shutdown() {
         "Shutdown exceeded 500ms"
     );
 }
+
+#[test]
+fn test_controller_volume_and_speed_adjustments() {
+    let mut controller = create_test_controller();
+
+    // Volume adjustments
+    controller.set_volume(80.0).expect("set_volume succeeds");
+    assert_eq!(controller.volume(), 80.0);
+
+    controller
+        .adjust_volume(15.0)
+        .expect("adjust_volume +15 succeeds");
+    assert_eq!(controller.volume(), 95.0);
+
+    // Clamping at ceiling 100.0
+    controller
+        .adjust_volume(20.0)
+        .expect("adjust_volume +20 succeeds");
+    assert_eq!(controller.volume(), 100.0);
+
+    // Clamping at floor 0.0
+    controller
+        .adjust_volume(-150.0)
+        .expect("adjust_volume -150 succeeds");
+    assert_eq!(controller.volume(), 0.0);
+
+    // Mute toggle
+    assert!(!controller.is_muted());
+    controller.toggle_mute().expect("toggle_mute succeeds");
+    assert!(controller.is_muted());
+    controller
+        .toggle_mute()
+        .expect("toggle_mute un-mute succeeds");
+    assert!(!controller.is_muted());
+
+    // Speed adjustments
+    controller.set_speed(1.0).expect("set_speed succeeds");
+    assert_eq!(controller.speed(), 1.0);
+
+    controller
+        .adjust_speed(0.25)
+        .expect("adjust_speed +0.25 succeeds");
+    assert_eq!(controller.speed(), 1.25);
+
+    controller
+        .adjust_speed(-0.50)
+        .expect("adjust_speed -0.50 succeeds");
+    assert_eq!(controller.speed(), 0.75);
+
+    controller.reset_speed().expect("reset_speed succeeds");
+    assert_eq!(controller.speed(), 1.0);
+}
+
+#[test]
+fn test_controller_chapter_and_relative_seek() {
+    let path = find_media_path("tests/fixtures/test_video.mp4");
+    let mut controller = create_test_controller();
+    controller
+        .load_file(path.to_str().unwrap())
+        .expect("Load file succeeds");
+
+    assert!(wait_for_state(
+        &mut controller,
+        |s| matches!(s, PlaybackState::Playing),
+        Duration::from_secs(3)
+    ));
+
+    // Relative seek should succeed without error
+    controller
+        .seek_relative(1.0)
+        .expect("Relative seek forward succeeds");
+    controller
+        .seek_relative(-0.5)
+        .expect("Relative seek backward succeeds");
+
+    // Chapter navigation commands on file without chapters should not crash
+    assert_eq!(controller.chapter_count(), 0);
+    assert!(controller.current_chapter().is_none());
+    let _ = controller.next_chapter();
+    let _ = controller.prev_chapter();
+    let _ = controller.set_chapter(0);
+
+    controller.stop().expect("Stop succeeds");
+    assert_eq!(*controller.state(), PlaybackState::Idle);
+}

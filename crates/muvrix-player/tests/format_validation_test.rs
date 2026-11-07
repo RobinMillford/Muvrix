@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -248,13 +248,33 @@ fn test_format_audio_only_flac() {
 }
 
 #[test]
-#[ignore = "Requires external BluRay MKV sample; run with: cargo test -p muvrix-player --test format_validation_test -- --ignored"]
+#[ignore = "Requires external 7.1 EAC3 MKV sample; configure MUVRIX_SAMPLE_7_1_MKV; run with: cargo test -p muvrix-player --test format_validation_test -- test_format_eac3_7_1_sample -- --ignored --nocapture"]
 fn test_format_eac3_7_1_sample() {
-    let sample_path =
-        Path::new("/home/itsyamin/Videos/Colony.2026.1080p.BluRay.DUAL.DDP7.1.x264-PRiME.mkv");
-    if !sample_path.exists() {
-        println!("Skipping 7.1 E-AC-3 test: sample file not present on this machine.");
-        return;
+    let sample_path_str = match std::env::var("MUVRIX_SAMPLE_7_1_MKV") {
+        Ok(val) if !val.trim().is_empty() => val,
+        _ => {
+            eprintln!(
+                "\n================================================================================\n\
+                 [DIAGNOSTIC] test_format_eac3_7_1_sample requires an external 7.1 audio MKV sample.\n\
+                 Set the MUVRIX_SAMPLE_7_1_MKV environment variable to the path of your sample file:\n\
+                   export MUVRIX_SAMPLE_7_1_MKV=\"/path/to/sample_7_1.mkv\"\n\
+                   cargo test -p muvrix-player --test format_validation_test -- test_format_eac3_7_1_sample -- --ignored --nocapture\n\
+                 ================================================================================\n"
+            );
+            panic!("MUVRIX_SAMPLE_7_1_MKV environment variable is not configured. Set MUVRIX_SAMPLE_7_1_MKV to run this manual test.");
+        }
+    };
+
+    let sample_path = PathBuf::from(&sample_path_str);
+    if !sample_path.is_file() {
+        eprintln!(
+            "\n[DIAGNOSTIC] MUVRIX_SAMPLE_7_1_MKV was configured with '{}', but this path does not exist or is not a regular file.\n",
+            sample_path_str
+        );
+        panic!(
+            "MUVRIX_SAMPLE_7_1_MKV path does not exist: {}",
+            sample_path_str
+        );
     }
 
     let mut controller = create_format_test_controller("auto-safe");

@@ -23,6 +23,7 @@ pub const PROP_CURRENT_AO: u64 = 11;
 pub const PROP_EOF_REACHED: u64 = 12;
 pub const PROP_SUB_DELAY: u64 = 13;
 pub const PROP_SUB_VISIBILITY: u64 = 14;
+pub const PROP_CHAPTER: u64 = 15;
 
 /// Lifecycle state of the media player.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +67,7 @@ pub struct PlaybackController {
     sub_visibility: bool,
     tracks: Vec<TrackInfo>,
     chapters: Vec<ChapterInfo>,
+    current_chapter: Option<i64>,
     next_async_id: u64,
 }
 
@@ -91,6 +93,7 @@ impl PlaybackController {
         handle.observe_property(PROP_EOF_REACHED, "eof-reached", PropertyFormat::None)?;
         handle.observe_property(PROP_SUB_DELAY, "sub-delay", PropertyFormat::None)?;
         handle.observe_property(PROP_SUB_VISIBILITY, "sub-visibility", PropertyFormat::None)?;
+        handle.observe_property(PROP_CHAPTER, "chapter", PropertyFormat::None)?;
 
         let mut controller = Self {
             handle,
@@ -114,6 +117,7 @@ impl PlaybackController {
             sub_visibility: true,
             tracks: Vec::new(),
             chapters: Vec::new(),
+            current_chapter: None,
             next_async_id: 1000,
         };
 
@@ -152,6 +156,7 @@ impl PlaybackController {
         self.audio_codec.clear();
         self.tracks.clear();
         self.chapters.clear();
+        self.current_chapter = None;
     }
 
     /// Current playback position in seconds.
@@ -251,6 +256,16 @@ impl PlaybackController {
         &self.chapters
     }
 
+    /// Currently active chapter index, if any.
+    pub fn current_chapter(&self) -> Option<i64> {
+        self.current_chapter
+    }
+
+    /// Total number of chapters.
+    pub fn chapter_count(&self) -> usize {
+        self.chapters.len()
+    }
+
     /// Returns the currently selected track of a given type.
     pub fn selected_track(&self, track_type: TrackType) -> Option<&TrackInfo> {
         self.tracks
@@ -283,6 +298,7 @@ impl PlaybackController {
         self.audio_codec.clear();
         self.tracks.clear();
         self.chapters.clear();
+        self.current_chapter = None;
 
         self.handle.load_file(path, LoadFileMode::Replace)?;
         let _ = self.handle.play();
@@ -303,6 +319,7 @@ impl PlaybackController {
         self.audio_codec.clear();
         self.tracks.clear();
         self.chapters.clear();
+        self.current_chapter = None;
 
         let id = self.next_async_id;
         self.next_async_id += 1;
@@ -351,12 +368,18 @@ impl PlaybackController {
         self.current_file = None;
         self.tracks.clear();
         self.chapters.clear();
+        self.current_chapter = None;
         Ok(())
     }
 
     /// Seeks to `target_seconds` synchronously.
     pub fn seek(&mut self, target_seconds: f64, mode: SeekMode) -> Result<(), MpvError> {
         self.handle.seek(target_seconds, mode)
+    }
+
+    /// Convenience method for relative seeking (e.g. +5.0 or -5.0 seconds).
+    pub fn seek_relative(&mut self, seconds: f64) -> Result<(), MpvError> {
+        self.seek(seconds, SeekMode::Relative)
     }
 
     /// Seeks to `target_seconds` asynchronously.
@@ -376,6 +399,12 @@ impl PlaybackController {
         Ok(())
     }
 
+    /// Adjusts volume by delta (e.g. +5.0 or -5.0), clamped to [0.0, 100.0].
+    pub fn adjust_volume(&mut self, delta: f64) -> Result<(), MpvError> {
+        let new_vol = (self.volume + delta).clamp(0.0, 100.0);
+        self.set_volume(new_vol)
+    }
+
     /// Sets audio mute state.
     pub fn set_mute(&mut self, muted: bool) -> Result<(), MpvError> {
         self.handle.set_property("mute", muted)?;
@@ -392,6 +421,35 @@ impl PlaybackController {
     pub fn set_speed(&mut self, speed: f64) -> Result<(), MpvError> {
         self.handle.set_property("speed", speed)?;
         self.speed = speed;
+        Ok(())
+    }
+
+    /// Adjusts playback speed by delta, clamped to [0.25, 4.0].
+    pub fn adjust_speed(&mut self, delta: f64) -> Result<(), MpvError> {
+        let new_speed = ((self.speed + delta) * 100.0).round() / 100.0;
+        let clamped = new_speed.clamp(0.25, 4.0);
+        self.set_speed(clamped)
+    }
+
+    /// Resets playback speed to normal 1.0x.
+    pub fn reset_speed(&mut self) -> Result<(), MpvError> {
+        self.set_speed(1.0)
+    }
+
+    /// Jumps to the next chapter (`add chapter 1`).
+    pub fn next_chapter(&mut self) -> Result<(), MpvError> {
+        self.handle.command(&["add", "chapter", "1"])
+    }
+
+    /// Jumps to the previous chapter (`add chapter -1`).
+    pub fn prev_chapter(&mut self) -> Result<(), MpvError> {
+        self.handle.command(&["add", "chapter", "-1"])
+    }
+
+    /// Jumps to a specific chapter by 0-based index.
+    pub fn set_chapter(&mut self, index: i64) -> Result<(), MpvError> {
+        self.handle.set_property("chapter", index)?;
+        self.current_chapter = Some(index);
         Ok(())
     }
 
@@ -615,6 +673,11 @@ impl PlaybackController {
                     self.chapters = chapters;
                 }
             }
+            PROP_CHAPTER => {
+                if let Ok(ch) = self.handle.get_property::<i64>("chapter") {
+                    self.current_chapter = if ch >= 0 { Some(ch) } else { None };
+                }
+            }
             PROP_HWDEC_CURRENT => {
                 if let Ok(hw) = self.handle.get_property_string("hwdec-current") {
                     self.hwdec_current = hw;
@@ -696,6 +759,9 @@ impl PlaybackController {
         }
         if let Ok(c) = self.handle.get_chapter_list() {
             self.chapters = c;
+        }
+        if let Ok(ch) = self.handle.get_property::<i64>("chapter") {
+            self.current_chapter = if ch >= 0 { Some(ch) } else { None };
         }
     }
 }
