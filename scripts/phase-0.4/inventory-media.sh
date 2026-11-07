@@ -57,9 +57,9 @@ def analyze_sample(path, root_dir):
     elif "remotion" in rel_path:
         source = "Remotion Test Media"
         license_type = "Public Domain / CC0"
-    elif "Colony" in rel_path or "Dog.Stars" in rel_path:
-        source = "Real-World Cinema / BluRay Source"
-        license_type = "Fair-Use Local Diagnostic Reference"
+    elif any(k in rel_path.lower() for k in ["external", "reference"]):
+        source = "External Reference Media"
+        license_type = "Local Diagnostic Reference"
     elif is_synthetic:
         source = "Locally Generated (FFmpeg lavfi / libx264 / libx265 / libsvtav1)"
         license_type = "Project Generated / Unrestricted"
@@ -197,13 +197,20 @@ def main():
             if ext in target_extensions:
                 files_to_probe.append(os.path.join(dirpath, f))
 
-    # Also add external reference files if present
-    extra_files = [
-        "/home/itsyamin/Videos/Colony.2026.1080p.BluRay.DUAL.DDP7.1.x264-PRiME.mkv",
-        f"{root_dir}/The.Dog.Stars.2026.1080p.WEB-DL.English.ESubs.x264-1VegaMovies.tw.mkv"
-    ]
+    # Check for optional external reference files specified via environment variables
+    extra_files = []
+    if "MUVRIX_EXTERNAL_MEDIA" in os.environ:
+        for p in os.environ["MUVRIX_EXTERNAL_MEDIA"].split(os.pathsep):
+            clean_p = p.strip()
+            if clean_p and os.path.exists(clean_p):
+                extra_files.append(clean_p)
+    if "MUVRIX_SAMPLE_7_1_MKV" in os.environ:
+        clean_p = os.environ["MUVRIX_SAMPLE_7_1_MKV"].strip()
+        if clean_p and os.path.exists(clean_p):
+            extra_files.append(clean_p)
+
     for ef in extra_files:
-        if os.path.exists(ef) and ef not in files_to_probe:
+        if ef not in files_to_probe:
             files_to_probe.append(ef)
 
     files_to_probe.sort()

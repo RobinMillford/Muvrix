@@ -118,17 +118,18 @@ fn test_preset_path_resolution_all_buttons() {
     );
     assert!(multi_sub.unwrap().is_file());
 
-    // 9. Colony 7.1 MKV (with local fallback)
-    let colony = resolve_preset(&[
-        "~/Videos/Colony.2026.1080p.BluRay.DUAL.DDP7.1.x264-PRiME.mkv",
+    // 9. Surround 7.1 MKV (with TrueHD fallback)
+    let surround = resolve_preset(&[
+        "tests/MuvrixTestMedia/phase-0.4/C-audio/surround-7.1-sample.mkv",
+        "tests/MuvrixTestMedia/tracks/surround-7.1.mkv",
         "tests/MuvrixTestMedia/phase-0.4/C-audio/TrueHD Sample 1 (Final Fantasy VII Advent Children).mkv",
     ]);
     assert!(
-        colony.is_ok(),
-        "Colony 7.1 preset (with TrueHD fallback) failed to resolve: {:?}",
-        colony
+        surround.is_ok(),
+        "Surround 7.1 preset (with TrueHD fallback) failed to resolve: {:?}",
+        surround
     );
-    assert!(colony.unwrap().is_file());
+    assert!(surround.unwrap().is_file());
 }
 
 #[test]

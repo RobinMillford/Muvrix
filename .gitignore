@@ -10,10 +10,18 @@ tests/*.mkv
 tests/*.mp4
 tests/fixtures/*.mp4
 tests/fixtures/*.txt
-tests/The.Dog.Stars.*
 tests/MuvrixTestMedia/
 tests/fixtures/*.png
-docs/
+# Documentation: Ignore internal research archives by default
+docs/*
+
+# Public documentation whitelist
+!docs/BUILDING.md
+!docs/ARCHITECTURE.md
+!docs/FEATURES.md
+!docs/PLATFORM-SUPPORT.md
+!docs/TESTING.md
+!docs/ROADMAP.md
 
 # Dedicated committed test fixtures
 !tests/fixtures/path-resolution/

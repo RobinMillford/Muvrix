@@ -6,27 +6,13 @@ Muvrix is a modern, high-performance cross-platform desktop media player built w
 
 ## Documentation Index
 
-### Phase 0.5 — Cross-Platform Build & Integration Feasibility
-- [**Phase 0.5 Cross-Platform Portability & Architecture Audit**](docs/PHASE-0.5-CROSS-PLATFORM-PORTABILITY-AUDIT.md)
-- [**Phase 0.5 libmpv Cross-Platform Dependency & Linkage Strategy**](docs/PHASE-0.5-LIBMPV-DEPENDENCY-STRATEGY.md)
-- [**Phase 0.5 Cross-Platform Compatibility Matrix (JSON)**](docs/PHASE-0.5-PLATFORM-COMPATIBILITY-MATRIX.json)
-- [**Continuous Integration Pipeline (`.github/workflows/ci.yml`)**](.github/workflows/ci.yml)
-
-### Phase 0.4 — Playback Engine, Hardware Decoding & Verification
-- [**Phase 0.4 Final Verification Sign-Off**](docs/FINAL-VERIFICATION-SIGN-OFF.md) *(Authoritative Record)*
-- [**Phase 0.4 Post Playback Failure Investigation**](docs/POST-PHASE-0.4-PLAYBACK-FAILURE-INVESTIGATION.md) *(Historical Incident Record)*
-- [**Phase 0.4 Hardware Decoding & Cross-Platform Validation**](docs/PHASE-0.4-HARDWARE-DECODING-AND-PLATFORM-VALIDATION.md)
-- [**Phase 0.4 Hardware Capability & Telemetry Architecture**](docs/PHASE-0.4-HARDWARE-CAPABILITY-ARCHITECTURE.md)
-- [**Phase 0.4 Media Test Collection Inventory**](docs/PHASE-0.4-MEDIA-INVENTORY.md)
-- [**Phase 0.4 Media Compatibility Matrix (JSON)**](docs/PHASE-0.4-MEDIA-COMPATIBILITY-MATRIX.json)
-
-### Earlier Phases & Architectural Audits
-- [**Phase 0.3 Playback Subsystem Hardening & Validation**](docs/PHASE-0.3-PLAYBACK-VALIDATION.md)
-- [**Phase 0.2 Rendering Prototype Review**](docs/RENDERING-PROTOTYPE.md)
-- [**Final Architecture Cross-Audit Review**](docs/FINAL-ARCHITECTURE-REVIEW.md)
-- [**Phase 0.1 Developer Guide**](docs/DEVELOPER-GUIDE-PHASE-0.1.md)
-- [**Android Reference Architecture Audit**](docs/architecture/README.md)
-- [**Upstream mpv Core Engine Audit**](docs/mpv-engine/README.md)
+- [**Building Guide**](docs/BUILDING.md) — Prerequisites, build commands, and environment setup for Linux, macOS, and Windows.
+- [**Architecture Overview**](docs/ARCHITECTURE.md) — Three-tier architecture, rendering pipeline, threading model, and design principles.
+- [**Features & Controls**](docs/FEATURES.md) — Playback controls, timeline scrubbing, track selection, keyboard shortcuts, and diagnostic HUD.
+- [**Platform Support**](docs/PLATFORM-SUPPORT.md) — Operating system support, hardware decoding backends, and CI verification status.
+- [**Testing Guide**](docs/TESTING.md) — Quality gates, test execution, test fixture structure, and test suite breakdown.
+- [**Development Roadmap**](docs/ROADMAP.md) — Project milestones from Phase 0.1 through Phase 2.0.
+- [**Continuous Integration Pipeline**](.github/workflows/ci.yml) — GitHub Actions multi-platform matrix definition.
 
 ---
 
@@ -39,7 +25,8 @@ Muvrix is a modern, high-performance cross-platform desktop media player built w
 | **Phase 0.3** | Playback Hardening | Controller state model, async dispatch, property observers, error safety | **COMPLETE** |
 | **Phase 0.4** | Engine & HW Acceleration | Codec validation, VA-API copy-back, 4K60/HFR, telemetry HUD, 10 GUI flows | **COMPLETE** |
 | **Phase 0.5** | Cross-Platform Feasibility | Multi-target compilation (Linux/Win/Mac), libmpv dependency strategy, CI | **COMPLETE** |
-| **Phase 1.0** | Full Desktop UI & Media Shell | Advanced controls, playlist management, full OSD, theme system, audio sinks | *Planned* |
+| **Phase 0.6** | Core Player Experience | Complete playback controls, timeline/scrubbing, volume/mute, audio/subtitle selection, track info OSD, debug HUD, vector icons | **COMPLETE** *(Local)* |
+| **Phase 1.0** | Advanced Media Shell | Playlist management, full OSD, theme system, audio sinks | *Planned* |
 | **Phase 2.0** | Distribution & Packaging | Flatpak, AppImage, Windows Inno Setup/MSIX, macOS `.app` bundle | *Planned* |
 
 ---
@@ -60,7 +47,7 @@ Muvrix is a modern, high-performance cross-platform desktop media player built w
 # 1. Install system prerequisites (e.g. Fedora)
 sudo dnf install mpv-libs-devel mesa-libGL-devel libX11-devel wayland-devel
 
-# 2. Run linters and full test suite (71 automated tests)
+# 2. Run linters and full test suite (59 automated tests)
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets
