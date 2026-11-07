@@ -1,5 +1,6 @@
 //! Integration tests verifying all 10 Muvrix GUI Playback Flows (A through J).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -165,7 +166,23 @@ fn test_flow_e_open_file_manual_selection() {
         Duration::from_secs(3),
     );
     assert!(playing, "Flow E: Expected Playing state for picked file");
-    assert_eq!(controller.current_file(), Some(canonical.to_str().unwrap()));
+
+    let actual_str = controller
+        .current_file()
+        .expect("Flow E: Current file should be set on controller");
+    let actual_path = PathBuf::from(actual_str);
+    assert!(
+        actual_path.is_file(),
+        "Flow E: Current file path must point to an existing file"
+    );
+
+    let actual_canonical = actual_path
+        .canonicalize()
+        .expect("Flow E: Failed to canonicalize actual path");
+    let expected_canonical = manual_selection
+        .canonicalize()
+        .expect("Flow E: Failed to canonicalize expected fixture path");
+    assert_eq!(actual_canonical, expected_canonical);
 }
 
 /// FLOW F: Enter an absolute media path and click Load
