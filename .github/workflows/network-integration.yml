@@ -1,0 +1,49 @@
+name: Network Integration & Interoperability
+
+on:
+  push:
+    branches: [ master, main, 'phase-*' ]
+  pull_request:
+    branches: [ master, main ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  network-integration:
+    name: Real-Server Interoperability & Memory Profiling (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install system dependencies & libmpv-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libmpv-dev \
+            libasound2-dev \
+            libx11-xcb-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libgl1-mesa-dev \
+            pkg-config
+
+      - name: Run Network Integration Test Suite
+        run: |
+          chmod +x tests/network-integration/scripts/*.sh
+          tests/network-integration/scripts/run.sh
+
+      - name: Teardown Network Containers
+        if: always()
+        run: |
+          tests/network-integration/scripts/teardown.sh

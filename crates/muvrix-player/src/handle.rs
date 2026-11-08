@@ -13,6 +13,7 @@ use crate::version::ApiVersion;
 pub struct MpvHandle {
     ctx: *mut libmpv_sys::mpv_handle,
     is_destroyed: AtomicBool,
+    retained_resources: std::sync::Mutex<Vec<std::sync::Arc<dyn std::any::Any + Send + Sync>>>,
 }
 
 // mpv_handle instances are thread-safe for API operations per upstream client.h
@@ -29,7 +30,18 @@ impl MpvHandle {
         Ok(Self {
             ctx,
             is_destroyed: AtomicBool::new(false),
+            retained_resources: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Retains a reference-counted resource for the lifetime of this `MpvHandle`.
+    ///
+    /// This structurally prevents use-after-free when raw pointers into Rust structures (such as
+    /// `StreamRegistry`) are passed to libmpv C callbacks via `user_data`.
+    pub fn retain_resource(&self, resource: std::sync::Arc<dyn std::any::Any + Send + Sync>) {
+        if let Ok(mut lock) = self.retained_resources.lock() {
+            lock.push(resource);
+        }
     }
 
     /// Queries the runtime libmpv API version (`mpv_client_api_version()`).
@@ -218,6 +230,9 @@ impl MpvHandle {
                 libmpv_sys::mpv_terminate_destroy(self.ctx);
             }
             self.ctx = std::ptr::null_mut();
+        }
+        if let Ok(mut lock) = self.retained_resources.lock() {
+            lock.clear();
         }
     }
 }

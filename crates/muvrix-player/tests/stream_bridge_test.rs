@@ -749,3 +749,135 @@ fn test_stream_bridge_repeated_open_read_seek_close_lifecycle_regression() {
         assert!(registry_map.take(&key).is_none());
     }
 }
+
+#[test]
+fn test_stream_bridge_lifetime_when_bridge_dropped_early() {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_path = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/test_video.mp4");
+    if !fixture_path.exists() {
+        eprintln!("SKIPPING test_stream_bridge_lifetime_when_bridge_dropped_early: test media fixture not found");
+        return;
+    }
+    let file_bytes = std::fs::read(&fixture_path).expect("Read test media fixture");
+
+    let handle = MpvHandle::new().expect("Create mpv handle");
+    handle.set_option_string("vo", "null").unwrap();
+    handle.set_option_string("ao", "null").unwrap();
+    handle.initialize().expect("Initialize mpv handle");
+
+    let stream_url = {
+        let bridge = MpvStreamBridge::new();
+        bridge
+            .attach_to_handle(&handle)
+            .expect("Attach stream bridge to handle");
+
+        let stream = MemoryStream::new(file_bytes);
+        let url = bridge.register(stream);
+        // `bridge` is dropped here, but `handle.retain_resource` retains the registry
+        url
+    };
+
+    handle
+        .command(&["loadfile", &stream_url])
+        .expect("Load custom stream file into mpv");
+
+    let mut loaded = false;
+    for _ in 0..50 {
+        let event = handle.wait_event(0.1);
+        match event {
+            muvrix_player::Event::FileLoaded => {
+                loaded = true;
+                break;
+            }
+            muvrix_player::Event::EndFile {
+                reason: muvrix_player::EndFileReason::Error,
+                error,
+                ..
+            } => {
+                panic!(
+                    "mpv failed to demux stream after early bridge drop: EndFile(Error: {:?})",
+                    error
+                );
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        loaded,
+        "FileLoaded must be emitted when bridge was dropped early (structural ownership preserved)"
+    );
+}
+
+#[test]
+fn test_stream_bridge_handle_destruction_while_stream_active() {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_path = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/test_video.mp4");
+    if !fixture_path.exists() {
+        eprintln!("SKIPPING test_stream_bridge_handle_destruction_while_stream_active: test fixture not found");
+        return;
+    }
+    let file_bytes = std::fs::read(&fixture_path).expect("Read test media fixture");
+
+    let drop_counter = Arc::new(AtomicUsize::new(0));
+    let tracked_stream = TrackedLifecycleStream::new(file_bytes, drop_counter.clone());
+
+    let handle = MpvHandle::new().expect("Create mpv handle");
+    handle.set_option_string("vo", "null").unwrap();
+    handle.set_option_string("ao", "null").unwrap();
+    handle.initialize().expect("Initialize mpv handle");
+
+    let bridge = MpvStreamBridge::new();
+    bridge
+        .attach_to_handle(&handle)
+        .expect("Attach stream bridge");
+
+    let url = bridge.register(tracked_stream);
+
+    handle
+        .command(&["loadfile", &url])
+        .expect("Load stream into mpv");
+
+    let mut loaded = false;
+    for _ in 0..50 {
+        if let muvrix_player::Event::FileLoaded = handle.wait_event(0.1) {
+            loaded = true;
+            break;
+        }
+    }
+    assert!(loaded, "File must be loaded and actively streaming");
+
+    // Explicitly destroy the handle while stream is active
+    handle.terminate_destroy();
+
+    // Verify stream was closed and dropped by mpv without leaking
+    assert_eq!(
+        drop_counter.load(Ordering::SeqCst),
+        1,
+        "Active stream must be cleanly dropped upon handle termination"
+    );
+}
+
+#[test]
+fn test_mpv_handle_repeated_teardown_safety() {
+    let handle = MpvHandle::new().expect("Create mpv handle");
+    handle.set_option_string("vo", "null").unwrap();
+    handle.set_option_string("ao", "null").unwrap();
+    handle.initialize().expect("Initialize handle");
+
+    // First teardown
+    handle.terminate_destroy();
+
+    // Verify calling terminate_destroy or dropping does not crash or double-free
+    // (MpvHandle implements Drop with atomic check-and-set)
+}

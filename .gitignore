@@ -35,16 +35,18 @@ tests/fixtures/*.mp4
 tests/fixtures/*.txt
 tests/fixtures/*.lrc
 tests/fixtures/*.png
-# Documentation: Ignore internal research archives by default
-docs/*
-
-# Public documentation whitelist
-!docs/BUILDING.md
-!docs/ARCHITECTURE.md
-!docs/FEATURES.md
-!docs/PLATFORM-SUPPORT.md
-!docs/TESTING.md
-!docs/ROADMAP.md
+# Private Phase engineering reports, internal audits, and research archives
+docs/PHASE-*.md
+docs/PHASE-*.json
+docs/ROADMAP-CARRY-FORWARD.md
+docs/FINAL-ARCHITECTURE-REVIEW.md
+docs/FINAL-VERIFICATION-SIGN-OFF.md
+docs/POST-PHASE-*.md
+docs/DEVELOPER-GUIDE-PHASE-*.md
+docs/RENDERING-PROTOTYPE.md
+docs/architecture/
+docs/mpv-engine/
+docs/verification/
 
 # Dedicated committed test fixtures
 !tests/fixtures/path-resolution/
@@ -52,3 +54,9 @@ docs/*
 !tests/fixtures/test_video.mp4
 !tests/fixtures/corrupted.mp4
 !tests/fixtures/unsupported.txt
+
+# Ephemeral network integration test artifacts
+/tests/network-integration/openssh/ssh_host_*
+/tests/network-integration/openssh/*.pub
+/tests/network-integration/sftp_fingerprint.txt
+/tests/network-integration/fixtures/
