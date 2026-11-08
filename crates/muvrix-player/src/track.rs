@@ -175,6 +175,27 @@ impl MpvHandle {
             .and_then(|s| s.parse::<i64>().ok())
     }
 
+    /// Sets secondary subtitle delay in seconds.
+    pub fn set_secondary_sub_delay(&self, delay_seconds: f64) -> Result<(), MpvError> {
+        self.set_property("secondary-sub-delay", delay_seconds)
+    }
+
+    /// Toggles secondary subtitle visibility.
+    pub fn set_secondary_sub_visibility(&self, visible: bool) -> Result<(), MpvError> {
+        self.set_property("secondary-sub-visibility", visible)
+    }
+
+    /// Configures dual-subtitle positioning to mitigate overlap by placing primary subtitles
+    /// at their original/default position (`sub-pos=100`) and secondary subtitles towards the
+    /// top edge (`secondary-sub-pos=10`). Note: In libmpv, `sub-pos=100` specifies original
+    /// position rather than guaranteed absolute bottom; this reduces likely overlap but does
+    /// not guarantee collision-free rendering for all arbitrary ASS script positions.
+    pub fn configure_dual_subtitle_collision_avoidance(&self) -> Result<(), MpvError> {
+        self.set_property("sub-pos", 100i64)?;
+        self.set_property("secondary-sub-pos", 10i64)?;
+        Ok(())
+    }
+
     /// Applies subtitle styling preferences to the mpv core.
     pub fn apply_subtitle_styling(&self, styling: &SubtitleStyling) -> Result<(), MpvError> {
         if !styling.font.trim().is_empty() {
@@ -190,14 +211,43 @@ impl MpvHandle {
         let _ = self.set_property("sub-border-size", styling.border_size);
         let _ = self.set_property("sub-pos", styling.pos);
         let _ = self.set_property("sub-scale", styling.scale);
-        let override_val = if styling.ass_override { "force" } else { "no" };
+        let override_val = styling.ass_override_mode.as_mpv_str();
         let _ = self.set_property_string("sub-ass-override", override_val);
+
+        // Secondary subtitle distinct positioning and styling
+        let _ = self.set_property("secondary-sub-pos", styling.secondary_pos);
+        let _ = self.set_property_string("secondary-sub-ass-override", override_val);
         Ok(())
     }
 
     /// Resets all subtitle styling properties back to engine defaults.
     pub fn reset_subtitle_styling(&self) -> Result<(), MpvError> {
         self.apply_subtitle_styling(&SubtitleStyling::default())
+    }
+}
+
+/// ASS/SSA script styling override policy.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+pub enum AssOverrideMode {
+    /// Strictly preserves all author styling, positioning, signs, and karaoke animations.
+    #[default]
+    Preserve,
+    /// Proportional font scaling while preserving author colors and layout.
+    SafeScale,
+    /// Overrides author fonts and colors with user styling preferences.
+    Force,
+    /// Strips all ASS styling completely into basic plain text.
+    Strip,
+}
+
+impl AssOverrideMode {
+    pub fn as_mpv_str(&self) -> &'static str {
+        match self {
+            Self::Preserve => "no",
+            Self::SafeScale => "scale",
+            Self::Force => "force",
+            Self::Strip => "strip",
+        }
     }
 }
 
@@ -218,8 +268,12 @@ pub struct SubtitleStyling {
     pub pos: i64,
     /// Scale multiplier factor (0.5..2.5).
     pub scale: f64,
-    /// Whether to force these styles over embedded ASS script styles.
+    /// Whether to force these styles over embedded ASS script styles (legacy flag).
     pub ass_override: bool,
+    /// Detailed ASS styling override policy.
+    pub ass_override_mode: AssOverrideMode,
+    /// Secondary subtitle vertical position (default 10 = top).
+    pub secondary_pos: i64,
 }
 
 impl Default for SubtitleStyling {
@@ -233,6 +287,8 @@ impl Default for SubtitleStyling {
             pos: 100,
             scale: 1.0,
             ass_override: false,
+            ass_override_mode: AssOverrideMode::Preserve,
+            secondary_pos: 10,
         }
     }
 }

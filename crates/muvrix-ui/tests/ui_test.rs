@@ -119,6 +119,7 @@ fn test_app_view_labels_and_icons() {
     assert_eq!(AppView::Player.label(), "Player");
     assert_eq!(AppView::Browser.label(), "Browser");
     assert_eq!(AppView::Playlist.label(), "Playlist");
+    assert_eq!(AppView::Lyrics.label(), "Lyrics");
     assert_eq!(AppView::Recent.label(), "History");
     assert_eq!(AppView::Settings.label(), "Settings");
 
@@ -127,6 +128,7 @@ fn test_app_view_labels_and_icons() {
         AppView::Player,
         AppView::Browser,
         AppView::Playlist,
+        AppView::Lyrics,
         AppView::Recent,
         AppView::Settings,
     ];

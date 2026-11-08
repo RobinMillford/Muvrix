@@ -166,3 +166,22 @@ fn test_equalizer_state_transitions_and_filter_consistency() {
     EqualizerManager::reset(&handle).expect("Reset after failure");
     assert_eq!(handle.get_property_string("af").unwrap(), "");
 }
+
+#[test]
+fn test_controller_audio_device_selection_and_routing() {
+    let handle = std::sync::Arc::new(MpvHandle::new().expect("Create handle"));
+    handle.set_option_string("vo", "null").unwrap();
+    handle.set_option_string("ao", "null").unwrap();
+    handle.initialize().unwrap();
+
+    let controller = muvrix_player::PlaybackController::new(handle).expect("Create controller");
+
+    let devices = controller.audio_devices().expect("Query audio devices");
+    assert!(!devices.is_empty(), "Should contain at least auto device");
+    assert_eq!(devices[0].name, "auto");
+
+    // Select auto device
+    controller
+        .set_audio_device("auto")
+        .expect("Select auto audio device");
+}

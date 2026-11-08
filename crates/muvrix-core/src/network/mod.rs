@@ -2,11 +2,17 @@
 
 pub mod credentials;
 pub mod provider;
+pub mod sftp;
+pub mod smb;
 pub mod webdav;
+pub mod webdav_xml;
 
 pub use crate::database::NetworkConnection;
 pub use credentials::{redact_credentials_from_url, CredentialVault};
 pub use provider::{
     MockNetworkProvider, NetworkError, NetworkProvider, NetworkResult, RemoteFileEntry,
 };
+pub use sftp::SftpProvider;
+pub use smb::SmbProvider;
 pub use webdav::WebDavProvider;
+pub use webdav_xml::parse_propfind_xml;

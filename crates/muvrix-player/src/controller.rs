@@ -3,11 +3,13 @@
 use std::sync::Arc;
 
 use crate::command::{LoadFileMode, SeekMode};
+use crate::equalizer::{AudioDeviceInfo, EqualizerManager};
 use crate::error::MpvError;
 use crate::event::{EndFileReason, Event};
 use crate::handle::MpvHandle;
 use crate::playlist::PlaylistItem;
 use crate::property::PropertyFormat;
+use crate::stream::{MpvStreamBridge, SeekableStream};
 use crate::track::{ChapterInfo, SubtitleStyling, TrackInfo, TrackType};
 
 pub const PROP_TIME_POS: u64 = 1;
@@ -77,12 +79,16 @@ pub struct PlaybackController {
     playlist_pos: Option<usize>,
     secondary_sub_track_id: Option<i64>,
     subtitle_styling: SubtitleStyling,
+    stream_bridge: MpvStreamBridge,
     next_async_id: u64,
 }
 
 impl PlaybackController {
     /// Creates a new `PlaybackController` and registers property observation callbacks.
     pub fn new(handle: Arc<MpvHandle>) -> Result<Self, MpvError> {
+        let stream_bridge = MpvStreamBridge::new();
+        let _ = stream_bridge.attach_to_handle(&handle);
+
         // Observe key properties to avoid high-frequency polling
         handle.observe_property(PROP_TIME_POS, "time-pos", PropertyFormat::None)?;
         handle.observe_property(PROP_DURATION, "duration", PropertyFormat::None)?;
@@ -135,6 +141,7 @@ impl PlaybackController {
             playlist_pos: None,
             secondary_sub_track_id: None,
             subtitle_styling: SubtitleStyling::default(),
+            stream_bridge,
             next_async_id: 1000,
         };
 
@@ -146,6 +153,21 @@ impl PlaybackController {
     /// Returns a reference to the underlying `MpvHandle`.
     pub fn handle(&self) -> &Arc<MpvHandle> {
         &self.handle
+    }
+
+    /// Returns a reference to the custom stream bridge.
+    pub fn stream_bridge(&self) -> &MpvStreamBridge {
+        &self.stream_bridge
+    }
+
+    /// Plays a custom seekable stream via libmpv's custom stream callback bridge.
+    pub fn play_stream<S: SeekableStream + 'static>(
+        &mut self,
+        stream: S,
+    ) -> Result<String, MpvError> {
+        let uri = self.stream_bridge.register(stream);
+        self.load_file(&uri)?;
+        Ok(uri)
     }
 
     /// Current high-level playback state.
@@ -405,6 +427,21 @@ impl PlaybackController {
         Ok(())
     }
 
+    /// Sets secondary subtitle delay in seconds.
+    pub fn set_secondary_sub_delay(&self, delay_seconds: f64) -> Result<(), MpvError> {
+        self.handle.set_secondary_sub_delay(delay_seconds)
+    }
+
+    /// Toggles secondary subtitle visibility.
+    pub fn set_secondary_sub_visibility(&self, visible: bool) -> Result<(), MpvError> {
+        self.handle.set_secondary_sub_visibility(visible)
+    }
+
+    /// Configures dual-subtitle collision avoidance (primary bottom, secondary top).
+    pub fn configure_dual_subtitle_collision_avoidance(&self) -> Result<(), MpvError> {
+        self.handle.configure_dual_subtitle_collision_avoidance()
+    }
+
     /// Returns the active subtitle styling configuration.
     pub fn subtitle_styling(&self) -> &SubtitleStyling {
         &self.subtitle_styling
@@ -422,6 +459,16 @@ impl PlaybackController {
         self.handle.reset_subtitle_styling()?;
         self.subtitle_styling = SubtitleStyling::default();
         Ok(())
+    }
+
+    /// Queries detected audio output devices via `audio-device-list`.
+    pub fn audio_devices(&self) -> Result<Vec<AudioDeviceInfo>, MpvError> {
+        EqualizerManager::query_audio_devices(&self.handle)
+    }
+
+    /// Selects an audio output device by name.
+    pub fn set_audio_device(&self, device_name: &str) -> Result<(), MpvError> {
+        EqualizerManager::set_audio_device(&self.handle, device_name)
     }
 
     // -------------------------------------------------------------------------

@@ -906,4 +906,91 @@ impl Repository {
 
         Ok((items, total_count))
     }
+
+    // -------------------------------------------------------------------------
+    // User Bookmarks
+    // -------------------------------------------------------------------------
+
+    pub fn insert_bookmark(
+        conn: &Connection,
+        media_id: i64,
+        timestamp_ms: i64,
+        label: &str,
+        note: Option<&str>,
+    ) -> Result<i64> {
+        let now = current_timestamp() as i64;
+        conn.execute(
+            "INSERT INTO user_bookmarks (media_id, timestamp_ms, label, note, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![media_id, timestamp_ms, label, note, now, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn list_bookmarks_for_media(conn: &Connection, media_id: i64) -> Result<Vec<Bookmark>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, media_id, timestamp_ms, label, note, created_at, updated_at
+             FROM user_bookmarks
+             WHERE media_id = ?1
+             ORDER BY timestamp_ms ASC",
+        )?;
+
+        let rows = stmt.query_map(params![media_id], |row| {
+            Ok(Bookmark {
+                id: row.get(0)?,
+                media_id: row.get(1)?,
+                timestamp_ms: row.get(2)?,
+                label: row.get(3)?,
+                note: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        })?;
+
+        let mut bookmarks = Vec::new();
+        for b in rows {
+            bookmarks.push(b?);
+        }
+        Ok(bookmarks)
+    }
+
+    pub fn get_bookmark(conn: &Connection, id: i64) -> Result<Option<Bookmark>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, media_id, timestamp_ms, label, note, created_at, updated_at
+             FROM user_bookmarks
+             WHERE id = ?1",
+        )?;
+
+        stmt.query_row(params![id], |row| {
+            Ok(Bookmark {
+                id: row.get(0)?,
+                media_id: row.get(1)?,
+                timestamp_ms: row.get(2)?,
+                label: row.get(3)?,
+                note: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        })
+        .optional()
+    }
+
+    pub fn update_bookmark(
+        conn: &Connection,
+        id: i64,
+        label: &str,
+        note: Option<&str>,
+    ) -> Result<bool> {
+        let now = current_timestamp() as i64;
+        let rows = conn.execute(
+            "UPDATE user_bookmarks SET label = ?1, note = ?2, updated_at = ?3 WHERE id = ?4",
+            params![label, note, now, id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn delete_bookmark(conn: &Connection, id: i64) -> Result<bool> {
+        let rows = conn.execute("DELETE FROM user_bookmarks WHERE id = ?1", params![id])?;
+        Ok(rows > 0)
+    }
 }
