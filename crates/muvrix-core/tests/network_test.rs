@@ -53,7 +53,7 @@ fn test_webdav_provider_stream_url_and_endpoints() {
 
     assert_eq!(provider.protocol(), "webdav");
     assert_eq!(provider.base_url(), "https://nas.local:8443");
-    assert!(provider.test_connection().unwrap());
+    assert!(provider.validate_config().is_ok());
 
     let stream_url = provider.resolve_stream_url("movies/film.mkv").unwrap();
     assert_eq!(stream_url, "https://nas.local:8443/movies/film.mkv");
@@ -120,6 +120,54 @@ fn test_http_range_and_webdav_streaming_simulation() {
                     let has_auth = headers
                         .iter()
                         .any(|h| h.to_lowercase().starts_with("authorization: basic"));
+
+                    // WebDAV PROPFIND handling
+                    if request_line.starts_with("PROPFIND") {
+                        let has_valid_auth = headers.iter().any(|h| h.contains("dXNlcjpwYXNz"));
+                        if (request_line.contains("/protected") || request_line.contains("/dav"))
+                            && !has_valid_auth
+                        {
+                            let response = "HTTP/1.1 401 Unauthorized\r\n\
+                                            WWW-Authenticate: Basic realm=\"Muvrix\"\r\n\
+                                            Content-Length: 0\r\n\
+                                            Connection: close\r\n\r\n";
+                            let _ = stream.write_all(response.as_bytes());
+                            continue;
+                        }
+
+                        let propfind_body = r#"<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/protected/</D:href>
+    <D:propstat>
+      <D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/protected/clip.mp4</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype/>
+        <D:getcontentlength>256</D:getcontentlength>
+        <D:getlastmodified>Sun, 08 Nov 2026 12:00:00 GMT</D:getlastmodified>
+        <D:getetag>"deadbeef-256"</D:getetag>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"#;
+                        let response = format!(
+                            "HTTP/1.1 207 Multi-Status\r\n\
+                             Content-Type: application/xml; charset=\"utf-8\"\r\n\
+                             Content-Length: {}\r\n\
+                             Connection: close\r\n\r\n{}",
+                            propfind_body.len(),
+                            propfind_body
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        continue;
+                    }
 
                     // Protected path check
                     if request_line.contains("/protected/") && !has_auth {
@@ -235,7 +283,7 @@ fn test_http_range_and_webdav_streaming_simulation() {
     let (head, _) = send_request("GET /protected/clip.mp4 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
     assert!(head.contains("401 Unauthorized"));
 
-    // 5. Test WebDavProvider stream URL resolution against this server
+    // 5. Test WebDavProvider live connection, directory listing, and stream URL resolution against this server
     let vault = CredentialVault::new();
     vault.store("test_cred", "pass");
     let provider = WebDavProvider::new(
@@ -247,6 +295,35 @@ fn test_http_range_and_webdav_streaming_simulation() {
         Some("test_cred".to_string()),
         vault,
     );
+
+    assert!(provider
+        .test_connection()
+        .expect("WebDAV test_connection should succeed with valid auth"));
+
+    let entries = provider
+        .list_directory("/protected")
+        .expect("WebDAV list_directory should succeed");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "clip.mp4");
+    assert_eq!(entries[0].size_bytes, 256);
+    assert!(!entries[0].is_dir);
+
+    // Test bad credentials return AuthenticationFailed
+    let bad_vault = CredentialVault::new();
+    bad_vault.store("bad_cred", "wrong_pass");
+    let bad_provider = WebDavProvider::new(
+        "127.0.0.1",
+        port,
+        "/protected",
+        false,
+        Some("user".to_string()),
+        Some("bad_cred".to_string()),
+        bad_vault,
+    );
+    assert!(matches!(
+        bad_provider.test_connection(),
+        Err(NetworkError::AuthenticationFailed(_))
+    ));
 
     let stream_url = provider.resolve_stream_url("clip.mp4").unwrap();
     assert_eq!(stream_url, format!("http://127.0.0.1:{}/clip.mp4", port));
@@ -451,4 +528,38 @@ fn test_sftp_provider_host_key_verification_and_security() {
         redacted,
         "sftp://[redacted]@sftp.example.com:2222/home/media/sample.mp4"
     );
+}
+
+#[test]
+fn test_sftp_fingerprint_generation_and_padding_tolerance() {
+    let raw_key = b"ssh-ed25519-mock-public-key-data";
+    let computed_fp = SftpProvider::calculate_sha256_fingerprint(raw_key);
+    assert!(computed_fp.starts_with("SHA256:"));
+
+    let vault = CredentialVault::new();
+    let provider = SftpProvider::new(
+        "10.0.0.1",
+        22,
+        "/data",
+        "user",
+        None,
+        Some("/id_rsa".into()),
+        Some(computed_fp.clone()),
+        vault,
+    );
+
+    // Exact match
+    assert!(provider.verify_host_key(&computed_fp).is_ok());
+
+    // Tolerance for trailing '='
+    let with_padding = format!("{computed_fp}=");
+    assert!(provider.verify_host_key(&with_padding).is_ok());
+
+    // Tolerance for raw base64 without prefix
+    let raw_b64 = computed_fp.strip_prefix("SHA256:").unwrap();
+    assert!(provider.verify_host_key(raw_b64).is_ok());
+
+    // Tampered / altered key must fail
+    let tampered = format!("{computed_fp}XYZ");
+    assert!(provider.verify_host_key(&tampered).is_err());
 }

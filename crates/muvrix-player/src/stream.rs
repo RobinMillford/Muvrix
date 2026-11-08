@@ -145,6 +145,38 @@ impl HttpRangeStream {
         Ok(stream)
     }
 
+    /// Creates an `HttpRangeStream` parsed from a full HTTP/HTTPS URL.
+    pub fn from_url(url: &str, auth_header: Option<String>) -> std::io::Result<Self> {
+        let rest = url
+            .strip_prefix("http://")
+            .or_else(|| url.strip_prefix("https://"))
+            .unwrap_or(url);
+
+        let (host_port, path) = match rest.find('/') {
+            Some(idx) => (&rest[..idx], &rest[idx..]),
+            None => (rest, "/"),
+        };
+
+        let (host, port) = match host_port.find(':') {
+            Some(idx) => {
+                let h = &host_port[..idx];
+                let p = host_port[idx + 1..].parse::<u16>().map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("Invalid port: {e}"),
+                    )
+                })?;
+                (h, p)
+            }
+            None => {
+                let p = if url.starts_with("https://") { 443 } else { 80 };
+                (host_port, p)
+            }
+        };
+
+        Self::new(host, port, path, auth_header)
+    }
+
     fn connect(&self) -> std::io::Result<TcpStream> {
         let addr = format!("{}:{}", self.host, self.port);
         let stream = TcpStream::connect_timeout(
@@ -329,6 +361,227 @@ impl SeekableStream for HttpRangeStream {
 
     fn total_size(&self) -> Option<u64> {
         self.total_size
+    }
+
+    fn cancel(&mut self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Bounded read-ahead stream wrapper smoothing network latency and micro chunk reads.
+pub struct ReadAheadStream<S: SeekableStream> {
+    inner: S,
+    buffer: Vec<u8>,
+    buffer_start: u64,
+    buffer_len: usize,
+    position: u64,
+    capacity: usize,
+}
+
+impl<S: SeekableStream> ReadAheadStream<S> {
+    pub const DEFAULT_CAPACITY: usize = 256 * 1024; // 256 KB bounded read-ahead buffer
+
+    pub fn new(inner: S) -> Self {
+        Self::with_capacity(inner, Self::DEFAULT_CAPACITY)
+    }
+
+    pub fn with_capacity(inner: S, capacity: usize) -> Self {
+        Self {
+            inner,
+            buffer: vec![0u8; capacity],
+            buffer_start: 0,
+            buffer_len: 0,
+            position: 0,
+            capacity,
+        }
+    }
+
+    fn fill_buffer(&mut self) -> std::io::Result<()> {
+        self.inner.seek(self.position)?;
+        self.buffer_start = self.position;
+        let mut read_total = 0;
+        while read_total < self.capacity {
+            let n = self.inner.read(&mut self.buffer[read_total..])?;
+            if n == 0 {
+                break;
+            }
+            read_total += n;
+        }
+        self.buffer_len = read_total;
+        Ok(())
+    }
+}
+
+impl<S: SeekableStream> SeekableStream for ReadAheadStream<S> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let buf_end = self.buffer_start + self.buffer_len as u64;
+        if self.position < self.buffer_start || self.position >= buf_end || self.buffer_len == 0 {
+            self.fill_buffer()?;
+            if self.buffer_len == 0 {
+                return Ok(0);
+            }
+        }
+
+        let offset_in_buf = (self.position - self.buffer_start) as usize;
+        let available = self.buffer_len.saturating_sub(offset_in_buf);
+        let to_copy = available.min(buf.len());
+
+        buf[..to_copy].copy_from_slice(&self.buffer[offset_in_buf..offset_in_buf + to_copy]);
+        self.position += to_copy as u64;
+
+        Ok(to_copy)
+    }
+
+    fn seek(&mut self, position: u64) -> std::io::Result<u64> {
+        self.position = position;
+        let buf_end = self.buffer_start + self.buffer_len as u64;
+        if position < self.buffer_start || position >= buf_end {
+            self.buffer_len = 0;
+        }
+        Ok(position)
+    }
+
+    fn total_size(&self) -> Option<u64> {
+        self.inner.total_size()
+    }
+
+    fn cancel(&mut self) {
+        self.inner.cancel();
+    }
+}
+
+/// Seekable stream reading directly from an authenticated SFTP remote file using `ssh2`.
+pub struct SftpSeekableStream {
+    file: ssh2::File,
+    size: Option<u64>,
+    position: u64,
+    cancelled: AtomicBool,
+}
+
+impl SftpSeekableStream {
+    pub fn new(mut file: ssh2::File) -> std::io::Result<Self> {
+        let size = file.stat().ok().and_then(|st| st.size);
+        let _ = file.seek(SeekFrom::Start(0));
+        Ok(Self {
+            file,
+            size,
+            position: 0,
+            cancelled: AtomicBool::new(false),
+        })
+    }
+}
+
+impl SeekableStream for SftpSeekableStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "SFTP stream cancelled",
+            ));
+        }
+        let n = self.file.read(buf)?;
+        self.position += n as u64;
+        Ok(n)
+    }
+
+    fn seek(&mut self, position: u64) -> std::io::Result<u64> {
+        let pos = self.file.seek(SeekFrom::Start(position))?;
+        self.position = pos;
+        Ok(pos)
+    }
+
+    fn total_size(&self) -> Option<u64> {
+        self.size
+    }
+
+    fn cancel(&mut self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Helper executing async futures within synchronous stream methods
+/// using an isolated executor thread to avoid runtime re-entrancy issues.
+fn run_async_stream<T: Send + 'static, F: std::future::Future<Output = T> + Send + 'static>(
+    f: F,
+) -> T {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Build tokio runtime");
+        rt.block_on(f)
+    })
+    .join()
+    .expect("Join async execution thread")
+}
+
+/// Seekable stream reading chunks on-demand from an SMB2/3 share file using pure-Rust `smb2`.
+pub struct SmbSeekableStream {
+    reader: Arc<smb2::client::stream::FileReader>,
+    size: u64,
+    position: u64,
+    cancelled: AtomicBool,
+}
+
+impl SmbSeekableStream {
+    pub fn new(reader: smb2::client::stream::FileReader) -> Self {
+        let size = reader.size();
+        Self {
+            reader: Arc::new(reader),
+            size,
+            position: 0,
+            cancelled: AtomicBool::new(false),
+        }
+    }
+}
+
+impl SeekableStream for SmbSeekableStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "SMB stream cancelled",
+            ));
+        }
+        if self.position >= self.size {
+            return Ok(0);
+        }
+
+        let start = self.position;
+        let max_to_read = (buf.len() as u64).min(self.size - start);
+        if max_to_read == 0 {
+            return Ok(0);
+        }
+
+        let reader = self.reader.clone();
+        let chunk = run_async_stream(async move { reader.read_at(start, max_to_read).await })
+            .map_err(|e| {
+                std::io::Error::other(format!("SMB read failed at offset {start}: {e}"))
+            })?;
+
+        let n = chunk.len();
+        buf[..n].copy_from_slice(&chunk);
+        self.position += n as u64;
+        Ok(n)
+    }
+
+    fn seek(&mut self, position: u64) -> std::io::Result<u64> {
+        if position > self.size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Seek beyond EOF",
+            ));
+        }
+        self.position = position;
+        Ok(position)
+    }
+
+    fn total_size(&self) -> Option<u64> {
+        Some(self.size)
     }
 
     fn cancel(&mut self) {

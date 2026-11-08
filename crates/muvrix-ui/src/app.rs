@@ -22,8 +22,8 @@ use muvrix_player::equalizer::{
 };
 use muvrix_player::shader::{Anime4KPreset, ShaderManager, VideoAdjustmentSettings};
 use muvrix_player::{
-    Event, MpvHandle, MpvRenderContext, PlaybackController, PlaybackState, SeekMode,
-    SubtitleStyling, TrackInfo, TrackType,
+    Event, MpvHandle, MpvRenderContext, MpvStreamBridge, PlaybackController, PlaybackState,
+    SeekMode, SubtitleStyling, TrackInfo, TrackType,
 };
 
 use crate::gl_loader;
@@ -97,6 +97,13 @@ pub struct MuvrixApp {
     pub(crate) network_https_input: bool,
     pub(crate) network_protocol_input: String,
     pub(crate) network_status_msg: Option<String>,
+    pub(crate) network_host_key_input: String,
+    pub(crate) stream_bridge: Arc<MpvStreamBridge>,
+    pub(crate) browsing_conn_id: Option<i64>,
+    pub(crate) browsing_path: String,
+    pub(crate) browsing_entries: Vec<muvrix_core::network::RemoteFileEntry>,
+    pub(crate) browsing_loading: bool,
+    pub(crate) browsing_error: Option<String>,
     pub(crate) settings_tab: SettingsTab,
     pub(crate) lyrics: Option<LrcFile>,
     pub(crate) lyrics_auto_scroll: bool,
@@ -135,6 +142,8 @@ impl MuvrixApp {
 
         // 2. Initialize libmpv handle with required options
         let mpv = Arc::new(MpvHandle::new()?);
+        let stream_bridge = Arc::new(MpvStreamBridge::new());
+        let _ = stream_bridge.attach_to_handle(&mpv);
         mpv.set_option_string("vo", "libmpv")?;
         mpv.set_option_string("hwdec", "auto-safe")?;
         mpv.set_option_string("keepaspect", "yes")?;
@@ -348,6 +357,13 @@ impl MuvrixApp {
             } else {
                 None
             },
+            network_host_key_input: String::new(),
+            stream_bridge,
+            browsing_conn_id: None,
+            browsing_path: "/".to_string(),
+            browsing_entries: Vec::new(),
+            browsing_loading: false,
+            browsing_error: None,
             settings_tab: match std::env::var("MUVRIX_SETTINGS_TAB").as_deref() {
                 Ok("enhancement" | "video") => SettingsTab::VideoEnhancement,
                 Ok("equalizer" | "audio") => SettingsTab::EqualizerAudio,

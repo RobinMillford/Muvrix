@@ -29,3 +29,8 @@ serde_json = "1.0"
 tempfile = "3.17"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
+ureq = { version = "2.10", default-features = false, features = ["tls"] }
+ssh2 = "0.9"
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "windows-native", "apple-native"] }
+smb2 = "0.43"
+tokio = { version = "1.0", features = ["rt", "net", "io-util"] }
