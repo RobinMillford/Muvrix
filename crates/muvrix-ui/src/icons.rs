@@ -42,6 +42,7 @@ pub enum Icon {
     Pip,
     Library,
     Sliders,
+    Lyrics,
 }
 
 /// Paints a vector icon into the designated bounding rectangle.
@@ -407,6 +408,19 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
 
             painter.line_segment([at(0.75, 0.15), at(0.75, 0.85)], stroke);
             painter.circle_filled(at(0.75, 0.30), 2.5_f32, color);
+        }
+
+        Icon::Lyrics => {
+            let stroke = Stroke::new(1.3_f32, color);
+            painter.circle_filled(at(0.35, 0.70), 2.8_f32, color);
+            painter.line_segment([at(0.42, 0.70), at(0.42, 0.25)], stroke);
+            painter.line_segment([at(0.42, 0.25), at(0.75, 0.20)], stroke);
+            painter.line_segment([at(0.75, 0.20), at(0.75, 0.60)], stroke);
+            painter.circle_filled(at(0.68, 0.60), 2.8_f32, color);
+            painter.line_segment(
+                [at(0.20, 0.88), at(0.80, 0.88)],
+                Stroke::new(1.0_f32, color),
+            );
         }
     }
 }

@@ -3,7 +3,7 @@
 use rusqlite::{Connection, Result, Transaction};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const LATEST_SCHEMA_VERSION: u32 = 1;
+pub const LATEST_SCHEMA_VERSION: u32 = 2;
 
 /// Apply all pending database migrations within a transaction.
 pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
@@ -29,6 +29,13 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
         let tx = conn.transaction()?;
         migration_001_core_schema(&tx)?;
         record_migration(&tx, 1, "Initial core schema for library and network")?;
+        tx.commit()?;
+    }
+
+    if current_version < 2 {
+        let tx = conn.transaction()?;
+        migration_002_user_bookmarks(&tx)?;
+        record_migration(&tx, 2, "User bookmarks schema with foreign key cascade")?;
         tx.commit()?;
     }
 
@@ -201,6 +208,27 @@ fn migration_001_core_schema(tx: &Transaction) -> Result<()> {
             auto_connect INTEGER NOT NULL DEFAULT 0,
             last_connected_at INTEGER NOT NULL DEFAULT 0
         );
+        ",
+    )?;
+
+    Ok(())
+}
+
+fn migration_002_user_bookmarks(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
+        "
+        CREATE TABLE user_bookmarks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            media_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+            timestamp_ms INTEGER NOT NULL,
+            label TEXT NOT NULL,
+            note TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX idx_user_bookmarks_media_id ON user_bookmarks(media_id);
+        CREATE INDEX idx_user_bookmarks_timestamp ON user_bookmarks(media_id, timestamp_ms);
         ",
     )?;
 

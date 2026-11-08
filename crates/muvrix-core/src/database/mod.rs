@@ -310,4 +310,40 @@ impl DatabaseManager {
         Repository::query_library(&conn, filter, sort_field, sort_dir, pagination)
             .map_err(DatabaseError::Sqlite)
     }
+
+    // -------------------------------------------------------------------------
+    // User Bookmarks
+    // -------------------------------------------------------------------------
+
+    pub fn insert_bookmark(
+        &self,
+        media_id: i64,
+        timestamp_ms: i64,
+        label: &str,
+        note: Option<&str>,
+    ) -> DbResult<i64> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::insert_bookmark(&conn, media_id, timestamp_ms, label, note)
+            .map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn list_bookmarks_for_media(&self, media_id: i64) -> DbResult<Vec<Bookmark>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::list_bookmarks_for_media(&conn, media_id).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn get_bookmark(&self, id: i64) -> DbResult<Option<Bookmark>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::get_bookmark(&conn, id).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn update_bookmark(&self, id: i64, label: &str, note: Option<&str>) -> DbResult<bool> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::update_bookmark(&conn, id, label, note).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn delete_bookmark(&self, id: i64) -> DbResult<bool> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::delete_bookmark(&conn, id).map_err(DatabaseError::Sqlite)
+    }
 }

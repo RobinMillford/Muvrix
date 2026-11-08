@@ -56,16 +56,12 @@ fn test_webdav_provider_stream_url_and_endpoints() {
     assert!(provider.test_connection().unwrap());
 
     let stream_url = provider.resolve_stream_url("movies/film.mkv").unwrap();
-    assert_eq!(
-        stream_url,
-        "https://media_user:secret_dav_pass@nas.local:8443/movies/film.mkv"
-    );
+    assert_eq!(stream_url, "https://nas.local:8443/movies/film.mkv");
+    assert!(!stream_url.contains("secret_dav_pass"));
+    assert!(!stream_url.contains("media_user"));
 
-    let redacted_stream = redact_credentials_from_url(&stream_url);
-    assert_eq!(
-        redacted_stream,
-        "https://[redacted]@nas.local:8443/movies/film.mkv"
-    );
+    let auth_header = provider.auth_header().expect("Auth header present");
+    assert!(auth_header.starts_with("Authorization: Basic "));
 }
 
 #[test]
@@ -253,17 +249,206 @@ fn test_http_range_and_webdav_streaming_simulation() {
     );
 
     let stream_url = provider.resolve_stream_url("clip.mp4").unwrap();
-    assert_eq!(
-        stream_url,
-        format!("http://user:pass@127.0.0.1:{}/clip.mp4", port)
-    );
-    let sanitized_url = redact_credentials_from_url(&stream_url);
-    assert_eq!(
-        sanitized_url,
-        format!("http://[redacted]@127.0.0.1:{}/clip.mp4", port)
-    );
+    assert_eq!(stream_url, format!("http://127.0.0.1:{}/clip.mp4", port));
+    assert!(!stream_url.contains("pass"));
+    assert!(!stream_url.contains("user"));
+
+    let auth_header = provider.auth_header().expect("Auth header present");
+    assert!(auth_header.starts_with("Authorization: Basic "));
 
     // Stop server
     is_running.store(false, Ordering::SeqCst);
     let _ = server_handle.join();
+}
+
+#[test]
+fn test_webdav_propfind_xml_directory_listing_and_filtering() {
+    let xml_payload = r#"<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/remote/webdav/Series/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype><D:collection/></D:resourcetype>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/remote/webdav/Series/Season%2001/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype><D:collection/></D:resourcetype>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/remote/webdav/Series/Episode%2001%20-%20Pilot.mkv</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype/>
+        <D:getcontentlength>524288000</D:getcontentlength>
+        <D:getlastmodified>Tue, 03 Nov 2026 14:20:00 GMT</D:getlastmodified>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/remote/webdav/Series/Episode%2002.mkv</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype/>
+        <D:getcontentlength>480000000</D:getcontentlength>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"#;
+
+    let vault = CredentialVault::new();
+    let provider = WebDavProvider::new(
+        "nas.local",
+        443,
+        "/remote/webdav/Series",
+        true,
+        None,
+        None,
+        vault,
+    );
+
+    let entries = provider
+        .parse_propfind(xml_payload, "/remote/webdav/Series/")
+        .expect("Parse WebDAV PROPFIND");
+
+    assert_eq!(entries.len(), 3, "Should exclude parent /Series/ directory");
+
+    assert_eq!(entries[0].name, "Season 01");
+    assert!(entries[0].is_dir);
+    assert_eq!(entries[0].size_bytes, 0);
+
+    assert_eq!(entries[1].name, "Episode 01 - Pilot.mkv");
+    assert!(!entries[1].is_dir);
+    assert_eq!(entries[1].size_bytes, 524288000);
+
+    assert_eq!(entries[2].name, "Episode 02.mkv");
+    assert!(!entries[2].is_dir);
+    assert_eq!(entries[2].size_bytes, 480000000);
+}
+
+#[test]
+fn test_smb_provider_lifecycle_and_url_resolution() {
+    let vault = CredentialVault::new();
+    let cred_ref = "smb-secret-uuid";
+    vault.store(cred_ref, "StrongSmbPass#99");
+
+    let provider = SmbProvider::new(
+        "192.168.1.50",
+        445,
+        "MediaShare",
+        "/Movies",
+        Some("smb_user".to_string()),
+        Some("WORKGROUP".to_string()),
+        Some(cred_ref.to_string()),
+        false,
+        vault,
+    );
+
+    assert_eq!(provider.protocol(), "smb");
+    assert_eq!(provider.unc_path(), "smb://192.168.1.50/MediaShare");
+    assert!(provider.test_connection().unwrap());
+
+    let stream_url = provider.resolve_stream_url("Movies/matrix.mkv").unwrap();
+    assert_eq!(
+        stream_url,
+        "smb://WORKGROUP;smb_user:StrongSmbPass#99@192.168.1.50/MediaShare/Movies/matrix.mkv"
+    );
+
+    let redacted = redact_credentials_from_url(&stream_url);
+    assert_eq!(
+        redacted,
+        "smb://[redacted]@192.168.1.50/MediaShare/Movies/matrix.mkv"
+    );
+
+    let listing = provider.list_directory("/Movies").unwrap();
+    assert_eq!(listing.len(), 2);
+    assert_eq!(listing[0].name, "Movies");
+    assert!(listing[0].is_dir);
+    assert_eq!(listing[1].name, "film_hd.mkv");
+    assert!(!listing[1].is_dir);
+}
+
+#[test]
+fn test_sftp_provider_host_key_verification_and_security() {
+    let vault = CredentialVault::new();
+    let cred_ref = "sftp-pass-uuid";
+    vault.store(cred_ref, "SshSecretKeyPassword!");
+
+    let pinned_fingerprint = "SHA256:uThbg6kIfTh2XX6mZa20WIPC8P48T0dEvn6g9Z91ioE";
+    let provider = SftpProvider::new(
+        "sftp.example.com",
+        2222,
+        "/home/media",
+        "ssh_admin",
+        Some(cred_ref.to_string()),
+        None,
+        Some(pinned_fingerprint.to_string()),
+        vault.clone(),
+    );
+
+    assert_eq!(provider.protocol(), "sftp");
+    assert!(provider.test_connection().unwrap());
+
+    // 1. Valid host key matching pinned fingerprint
+    assert!(provider.verify_host_key(pinned_fingerprint).is_ok());
+
+    // 2. Mismatched host key triggers security error (MITM protection)
+    let fake_fingerprint = "SHA256:FAKEFINGERPRINTDOESNOTMATCH0000000000000000";
+    let err = provider.verify_host_key(fake_fingerprint).unwrap_err();
+    match err {
+        NetworkError::AuthenticationFailed(msg) => {
+            assert!(msg.contains("SSH host key mismatch"));
+            assert!(msg.contains("Man-In-The-Middle"));
+        }
+        other => panic!("Expected AuthenticationFailed, got: {:?}", other),
+    }
+
+    // 3. Unpinned host key is strictly rejected by default
+    let unpinned_provider = SftpProvider::new(
+        "sftp.example.com",
+        2222,
+        "/home/media",
+        "ssh_admin",
+        Some("cred_key".to_string()),
+        None,
+        None, // explicitly unpinned
+        vault,
+    );
+    let unpinned_err = unpinned_provider
+        .verify_host_key(pinned_fingerprint)
+        .unwrap_err();
+    match unpinned_err {
+        NetworkError::AuthenticationFailed(msg) => {
+            assert!(msg.contains("unpinned"));
+        }
+        other => panic!(
+            "Expected AuthenticationFailed for unpinned host, got: {:?}",
+            other
+        ),
+    }
+
+    // 4. Stream URL resolution with credential redaction
+    let stream_url = provider
+        .resolve_stream_url("/home/media/sample.mp4")
+        .unwrap();
+    assert_eq!(
+        stream_url,
+        "sftp://ssh_admin:SshSecretKeyPassword!@sftp.example.com:2222/home/media/sample.mp4"
+    );
+
+    let redacted = redact_credentials_from_url(&stream_url);
+    assert_eq!(
+        redacted,
+        "sftp://[redacted]@sftp.example.com:2222/home/media/sample.mp4"
+    );
 }

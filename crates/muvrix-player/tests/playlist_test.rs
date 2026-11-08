@@ -157,6 +157,7 @@ fn test_subtitle_styling_configuration() {
         pos: 90,
         scale: 1.2,
         ass_override: true,
+        ..SubtitleStyling::default()
     };
 
     controller

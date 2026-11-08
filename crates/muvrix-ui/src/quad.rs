@@ -26,13 +26,14 @@ void main() {
 #[rustfmt::skip]
 const QUAD_VERTICES: [f32; 24] = [
     // pos.x, pos.y, uv.u, uv.v
-    -1.0, -1.0,  0.0, 0.0,
-     1.0, -1.0,  1.0, 0.0,
-     1.0,  1.0,  1.0, 1.0,
+    // Y-inverted UV coordinates so top of video (v=0 in FBO) maps to top of screen (pos.y=+1.0)
+    -1.0, -1.0,  0.0, 1.0,
+     1.0, -1.0,  1.0, 1.0,
+     1.0,  1.0,  1.0, 0.0,
 
-    -1.0, -1.0,  0.0, 0.0,
-     1.0,  1.0,  1.0, 1.0,
-    -1.0,  1.0,  0.0, 1.0,
+    -1.0, -1.0,  0.0, 1.0,
+     1.0,  1.0,  1.0, 0.0,
+    -1.0,  1.0,  0.0, 0.0,
 ];
 
 /// Shader program and vertex arrays for rendering a textured screen quad.

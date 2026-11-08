@@ -46,6 +46,67 @@ impl WebDavProvider {
             format!("{}://{}:{}", scheme, self.host, self.port)
         }
     }
+
+    /// Parses an RFC 4918 PROPFIND XML response payload.
+    pub fn parse_propfind(
+        &self,
+        xml_response: &str,
+        requested_path: &str,
+    ) -> NetworkResult<Vec<RemoteFileEntry>> {
+        super::webdav_xml::parse_propfind_xml(xml_response, requested_path)
+    }
+
+    /// Formats an RFC 4918 PROPFIND XML request body for querying collection children.
+    pub fn propfind_request_body() -> &'static str {
+        r#"<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:resourcetype/>
+    <D:getcontentlength/>
+    <D:getlastmodified/>
+    <D:getetag/>
+  </D:prop>
+</D:propfind>"#
+    }
+    /// Generates an HTTP Basic Authorization header string from credentials in the vault,
+    /// keeping secrets isolated in memory rather than exposed in playback URLs.
+    pub fn auth_header(&self) -> Option<String> {
+        if let (Some(ref user), Some(ref cred_ref)) = (&self.username, &self.credential_ref) {
+            if let Some(secret) = self.vault.get(cred_ref) {
+                let token = format!("{}:{}", user, secret);
+                let encoded = base64_encode(token.as_bytes());
+                return Some(format!("Authorization: Basic {}", encoded));
+            }
+        }
+        None
+    }
+}
+
+/// Helper encoding byte buffers into standard RFC 4648 Base64 strings.
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut i = 0;
+    while i < input.len() {
+        let b0 = input[i];
+        let b1 = if i + 1 < input.len() { input[i + 1] } else { 0 };
+        let b2 = if i + 2 < input.len() { input[i + 2] } else { 0 };
+
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if i + 1 < input.len() {
+            out.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if i + 2 < input.len() {
+            out.push(TABLE[(b2 & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        i += 3;
+    }
+    out
 }
 
 impl NetworkProvider for WebDavProvider {
@@ -94,6 +155,8 @@ impl NetworkProvider for WebDavProvider {
         ])
     }
 
+    /// Resolves stream URL strictly without credentials to prevent secret leakage in logs,
+    /// URIs, or `current-path` properties. Authentication is delivered out-of-band via headers.
     fn resolve_stream_url(&self, remote_file_path: &str) -> NetworkResult<String> {
         let base = self.base_url();
         let path = if remote_file_path.starts_with('/') {
@@ -101,19 +164,6 @@ impl NetworkProvider for WebDavProvider {
         } else {
             &format!("/{}", remote_file_path)
         };
-
-        if let (Some(ref user), Some(ref cred_ref)) = (&self.username, &self.credential_ref) {
-            if let Some(secret) = self.vault.get(cred_ref) {
-                let scheme = if self.use_https { "https" } else { "http" };
-                let default_port = if self.use_https { 443 } else { 80 };
-                let auth_host = if self.port == default_port || self.port == 0 {
-                    format!("{}:{}@{}", user, secret, self.host)
-                } else {
-                    format!("{}:{}@{}:{}", user, secret, self.host, self.port)
-                };
-                return Ok(format!("{}://{}{}", scheme, auth_host, path));
-            }
-        }
 
         Ok(format!("{}{}", base, path))
     }

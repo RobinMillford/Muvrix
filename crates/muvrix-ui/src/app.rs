@@ -5,13 +5,15 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
+use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, Vec2};
 use glow::HasContext as _;
 use muvrix_core::browser::MediaBrowser;
 use muvrix_core::database::{
-    DatabaseManager, LibraryFilter, LibraryItemView, LibrarySortField, Pagination, SortDirection,
+    Bookmark, DatabaseManager, LibraryFilter, LibraryItemView, LibrarySortField, Pagination,
+    SortDirection,
 };
 use muvrix_core::history::HistoryStore;
+use muvrix_core::lyrics::{find_sidecar_lrc, LrcFile};
 use muvrix_core::network::CredentialVault;
 use muvrix_core::scanner::{ScanOptions, ScanProgress, ScannerService};
 use muvrix_core::thumbnails::ThumbnailCache;
@@ -49,6 +51,7 @@ pub struct MuvrixApp {
     pub(crate) show_shortcuts: bool,
     pub(crate) show_diagnostics: bool,
     pub(crate) screenshot_requested: bool,
+    pub(crate) screenshot_frames: usize,
 
     // Phase 0.7 navigation and feature state
     pub(crate) current_view: AppView,
@@ -92,8 +95,15 @@ pub struct MuvrixApp {
     pub(crate) network_user_input: String,
     pub(crate) network_pass_input: String,
     pub(crate) network_https_input: bool,
+    pub(crate) network_protocol_input: String,
     pub(crate) network_status_msg: Option<String>,
     pub(crate) settings_tab: SettingsTab,
+    pub(crate) lyrics: Option<LrcFile>,
+    pub(crate) lyrics_auto_scroll: bool,
+    pub(crate) active_bookmarks: Vec<Bookmark>,
+    pub(crate) editing_bookmark_id: Option<i64>,
+    pub(crate) editing_bookmark_label: String,
+    pub(crate) editing_bookmark_note: String,
 
     // Frame timing and UI responsiveness measurements
     pub(crate) last_frame_instant: Instant,
@@ -129,6 +139,12 @@ impl MuvrixApp {
         mpv.set_option_string("hwdec", "auto-safe")?;
         mpv.set_option_string("keepaspect", "yes")?;
         mpv.set_option_string("video-timing-offset", "0")?;
+        // Exclude 'lrc' from mpv's automatic subtitle track detection to prevent
+        // mpv from loading LRC files as video subtitles and rendering raw timestamps.
+        mpv.set_option_string(
+            "sub-auto-exts",
+            "ass,idx,mks,pgs,rt,sbv,scc,smi,srt,ssa,sub,sup,utf,utf-8,utf8,vtt",
+        )?;
         mpv.initialize()?;
 
         // 3. Initialize libmpv OpenGL render context
@@ -189,6 +205,7 @@ impl MuvrixApp {
             Ok("library") => AppView::Library,
             Ok("browser") => AppView::Browser,
             Ok("playlist") => AppView::Playlist,
+            Ok("lyrics") => AppView::Lyrics,
             Ok("history" | "recent") => AppView::Recent,
             Ok("settings") => AppView::Settings,
             _ => AppView::Player,
@@ -217,6 +234,7 @@ impl MuvrixApp {
             show_shortcuts: false,
             show_diagnostics: false,
             screenshot_requested: false,
+            screenshot_frames: 0,
             current_view,
             media_browser: MediaBrowser::default(),
             history_store: HistoryStore::load(None),
@@ -320,6 +338,7 @@ impl MuvrixApp {
                 String::new()
             },
             network_https_input: true,
+            network_protocol_input: "webdav".to_string(),
             network_status_msg: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network")
             {
                 Some(
@@ -336,10 +355,65 @@ impl MuvrixApp {
                 Ok("preferences" | "privacy" | "window") => SettingsTab::Preferences,
                 _ => SettingsTab::Subtitles,
             },
+            lyrics: None,
+            lyrics_auto_scroll: true,
+            active_bookmarks: Vec::new(),
+            editing_bookmark_id: None,
+            editing_bookmark_label: String::new(),
+            editing_bookmark_note: String::new(),
         };
 
         app.refresh_library();
         app.refresh_audio_devices();
+
+        if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network") {
+            if let Ok(conns) = app.db.list_connections() {
+                if conns.is_empty() {
+                    let c1 = muvrix_core::database::NetworkConnection {
+                        id: 0,
+                        name: "Demo WebDAV Share (Nextcloud)".to_string(),
+                        protocol: "webdav".to_string(),
+                        host: "dav.example.com".to_string(),
+                        port: 8443,
+                        remote_path: "/remote.php/webdav/Media/sample.mp4".to_string(),
+                        auth_type: "basic".to_string(),
+                        credential_ref: Some("cred_1".to_string()),
+                        is_anonymous: false,
+                        auto_connect: false,
+                        last_connected_at: 0,
+                    };
+                    let c2 = muvrix_core::database::NetworkConnection {
+                        id: 0,
+                        name: "Home NAS Media Share (Samba)".to_string(),
+                        protocol: "smb".to_string(),
+                        host: "nas.local".to_string(),
+                        port: 445,
+                        remote_path: "/storage/movies/sample.mkv".to_string(),
+                        auth_type: "basic".to_string(),
+                        credential_ref: Some("cred_2".to_string()),
+                        is_anonymous: false,
+                        auto_connect: false,
+                        last_connected_at: 0,
+                    };
+                    let c3 = muvrix_core::database::NetworkConnection {
+                        id: 0,
+                        name: "Remote Studio Media Server (SSH)".to_string(),
+                        protocol: "sftp".to_string(),
+                        host: "studio.media.internal".to_string(),
+                        port: 2222,
+                        remote_path: "/srv/media/dailies.mov".to_string(),
+                        auth_type: "basic".to_string(),
+                        credential_ref: Some("cred_3".to_string()),
+                        is_anonymous: false,
+                        auto_connect: false,
+                        last_connected_at: 0,
+                    };
+                    let _ = app.db.insert_connection(&c1);
+                    let _ = app.db.insert_connection(&c2);
+                    let _ = app.db.insert_connection(&c3);
+                }
+            }
+        }
 
         if let Ok(seed) = std::env::var("MUVRIX_INITIAL_MEDIA") {
             app.load_file(&seed);
@@ -350,6 +424,26 @@ impl MuvrixApp {
                     let _ = app.controller.playlist_append(item.trim());
                 }
             }
+        }
+        if let Ok(seed_bms) = std::env::var("MUVRIX_SEED_BOOKMARKS") {
+            for bm_entry in seed_bms.split(';') {
+                let parts: Vec<&str> = bm_entry.split(':').collect();
+                if parts.len() >= 2 {
+                    if let Ok(pos) = parts[0].parse::<f64>() {
+                        let label = parts[1];
+                        let note = parts.get(2).copied();
+                        app.add_bookmark_at(pos, label, note);
+                    }
+                }
+            }
+        }
+        if let Ok(pos_str) = std::env::var("MUVRIX_INITIAL_SEEK") {
+            if let Ok(pos) = pos_str.parse::<f64>() {
+                let _ = app.controller.seek(pos, muvrix_player::SeekMode::Absolute);
+            }
+        }
+        if std::env::var("MUVRIX_INITIAL_PAUSE").is_ok() {
+            let _ = app.controller.pause();
         }
 
         Ok(app)
@@ -382,10 +476,29 @@ impl MuvrixApp {
 
                         // Offer resume prompt if saved position > 10s
                         if let Some(pos) = resume_pos {
-                            self.pending_resume_prompt = Some((path_str, pos));
+                            self.pending_resume_prompt = Some((path_str.clone(), pos));
                         } else {
                             self.pending_resume_prompt = None;
                         }
+
+                        // Auto-detect and parse sidecar LRC lyrics
+                        if let Some(lrc_path) = find_sidecar_lrc(&resolved) {
+                            match LrcFile::from_file(&lrc_path) {
+                                Ok(lrc) => {
+                                    log::info!("Auto-loaded sidecar lyrics from {:?}", lrc_path);
+                                    self.lyrics = Some(lrc);
+                                }
+                                Err(e) => {
+                                    log::warn!("Failed to parse sidecar lyrics: {e}");
+                                    self.lyrics = None;
+                                }
+                            }
+                        } else {
+                            self.lyrics = None;
+                        }
+
+                        // Refresh active media bookmarks
+                        self.refresh_active_bookmarks();
                     }
                     Err(e) => {
                         let err_msg = format!("Failed to initiate playback on '{path_str}': {e}");
@@ -494,6 +607,15 @@ impl MuvrixApp {
                     );
                     self.status_message =
                         format!("Playback active: {vfmt} ({w}x{h}) | HWDEC: {hw} | AO: {ao}");
+                    self.refresh_active_bookmarks();
+                    if let Ok(pos_str) = std::env::var("MUVRIX_INITIAL_SEEK") {
+                        if let Ok(pos) = pos_str.parse::<f64>() {
+                            let _ = self.controller.seek(pos, muvrix_player::SeekMode::Absolute);
+                        }
+                    }
+                    if std::env::var("MUVRIX_INITIAL_PAUSE").is_ok() {
+                        let _ = self.controller.pause();
+                    }
                 }
                 Event::EndFile { reason, error, .. } => {
                     if let Some(path) = self.controller.current_file() {
@@ -698,6 +820,147 @@ impl MuvrixApp {
         }
     }
 
+    /// Reloads the list of user bookmarks for the currently playing media item.
+    pub fn refresh_active_bookmarks(&mut self) {
+        let current_path = self
+            .controller
+            .current_file()
+            .map(|s| s.to_string())
+            .or_else(|| {
+                if !self.path_input.is_empty() {
+                    Some(self.path_input.clone())
+                } else {
+                    None
+                }
+            });
+        if let Some(path) = current_path {
+            let canon = std::fs::canonicalize(&path)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| path.clone());
+            if let Ok(Some(item)) = self
+                .db
+                .get_media_item_by_canonical_path(&canon)
+                .or_else(|_| self.db.get_media_item_by_canonical_path(&path))
+            {
+                if let Ok(bms) = self.db.list_bookmarks_for_media(item.id) {
+                    self.active_bookmarks = bms;
+                    return;
+                }
+            } else if let Ok(Some(item)) = self.db.get_media_item_by_canonical_path(&path) {
+                if let Ok(bms) = self.db.list_bookmarks_for_media(item.id) {
+                    self.active_bookmarks = bms;
+                    return;
+                }
+            }
+        }
+        self.active_bookmarks.clear();
+    }
+
+    /// Creates and persists a user bookmark at an explicit playback position.
+    pub fn add_bookmark_at(&mut self, time_pos: f64, label: &str, note: Option<&str>) {
+        let current_path = self
+            .controller
+            .current_file()
+            .map(|s| s.to_string())
+            .or_else(|| {
+                if !self.path_input.is_empty() {
+                    Some(self.path_input.clone())
+                } else {
+                    None
+                }
+            });
+        if let Some(path) = current_path {
+            let canon = std::fs::canonicalize(&path)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| path.clone());
+            let timestamp_ms = (time_pos * 1000.0) as i64;
+            let media_id = match self
+                .db
+                .get_media_item_by_canonical_path(&canon)
+                .or_else(|_| self.db.get_media_item_by_canonical_path(&path))
+            {
+                Ok(Some(item)) => item.id,
+                _ => {
+                    let root_id = match self.db.get_roots() {
+                        Ok(roots) if !roots.is_empty() => roots[0].id,
+                        _ => {
+                            let root = muvrix_core::database::LibraryRoot {
+                                id: 0,
+                                display_name: "Standalone Media".to_string(),
+                                root_path: "/".to_string(),
+                                source_type: "local".to_string(),
+                                is_recursive: false,
+                                is_enabled: true,
+                                exclusion_patterns: Vec::new(),
+                                last_scanned_at: 0,
+                                scan_status: "idle".to_string(),
+                            };
+                            self.db.insert_root(&root).unwrap_or(1)
+                        }
+                    };
+                    let file_name = std::path::Path::new(&path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&path)
+                        .to_string();
+                    let file_ext = std::path::Path::new(&path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let item = muvrix_core::database::MediaItem {
+                        id: 0,
+                        root_id,
+                        relative_path: file_name.clone(),
+                        canonical_path: canon,
+                        file_name,
+                        file_extension: file_ext,
+                        media_type: muvrix_core::database::MediaType::Video,
+                        file_size: 0,
+                        modified_time: 0,
+                        added_time: 0,
+                        last_scanned_at: 0,
+                        availability_state: muvrix_core::database::AvailabilityState::Available,
+                        metadata_status: muvrix_core::database::MetadataStatus::Pending,
+                    };
+                    self.db.upsert_media_item(&item).unwrap_or(0)
+                }
+            };
+            if media_id > 0 {
+                let _ = self.db.insert_bookmark(media_id, timestamp_ms, label, note);
+                self.refresh_active_bookmarks();
+                self.status_message =
+                    format!("Added bookmark '{label}' at {}", format_timestamp(time_pos));
+            }
+        }
+    }
+
+    /// Creates and persists a user bookmark at the current playback position.
+    pub fn add_bookmark(&mut self, label: &str, note: Option<&str>) {
+        let time_pos = self.controller.time_pos();
+        self.add_bookmark_at(time_pos, label, note);
+    }
+
+    /// Opens a native file dialog to manually select a synchronized LRC lyrics file.
+    pub fn load_lyrics_dialog(&mut self) {
+        if let Some(file) = rfd::FileDialog::new()
+            .set_title("Open Synchronized LRC Lyrics File")
+            .add_filter("LRC Lyrics", &["lrc", "txt"])
+            .pick_file()
+        {
+            match LrcFile::from_file(&file) {
+                Ok(lrc) => {
+                    let title = lrc.title.as_deref().unwrap_or("lyrics");
+                    self.status_message = format!("Loaded synchronized lyrics for '{title}'");
+                    self.lyrics = Some(lrc);
+                }
+                Err(e) => {
+                    self.status_message = format!("Failed to parse LRC lyrics: {e}");
+                }
+            }
+        }
+    }
+
     pub fn start_library_scan(&mut self, root_id: i64) {
         if self.active_scan_cancel.is_some() {
             return;
@@ -778,12 +1041,23 @@ impl eframe::App for MuvrixApp {
 
         // Optional automated window screenshot capture for verification
         if let Ok(capture_path) = std::env::var("MUVRIX_CAPTURE_WINDOW_PNG") {
-            if (*self.controller.state() == PlaybackState::Playing
-                || *self.controller.state() == PlaybackState::Idle)
+            self.screenshot_frames += 1;
+            let media_ready = self.controller.current_file().is_none()
+                || self.controller.duration() > 0.0
+                || self.screenshot_frames >= 30;
+            let state_ready = *self.controller.state() == PlaybackState::Playing
+                || *self.controller.state() == PlaybackState::Idle
+                || *self.controller.state() == PlaybackState::Paused;
+
+            if self.screenshot_frames >= 15
+                && media_ready
+                && state_ready
                 && !self.screenshot_requested
             {
                 self.screenshot_requested = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            } else if !self.screenshot_requested {
+                ctx.request_repaint();
             }
 
             ctx.input(|i| {
@@ -803,6 +1077,7 @@ impl eframe::App for MuvrixApp {
                             log::info!("Successfully captured window screenshot to {capture_path}");
                             if std::env::var("MUVRIX_CAPTURE_AND_EXIT").is_ok() {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                std::process::exit(0);
                             }
                         }
                     }
@@ -842,17 +1117,28 @@ impl eframe::App for MuvrixApp {
                     ui.separator();
                     ui.add_space(4.0);
 
-                    // Navigation View Tabs (Player, Library, Browser, Playlist, History, Settings)
+                    // Navigation View Tabs (Player, Library, Browser, Playlist, Lyrics, History, Settings)
                     for view in &[
                         AppView::Player,
                         AppView::Library,
                         AppView::Browser,
                         AppView::Playlist,
+                        AppView::Lyrics,
                         AppView::Recent,
                         AppView::Settings,
                     ] {
                         let is_active = self.current_view == *view;
-                        let text = if *view == AppView::Playlist
+                        let text = if available_w <= 960.0 {
+                            match *view {
+                                AppView::Player => "Player".to_string(),
+                                AppView::Library => "Lib".to_string(),
+                                AppView::Browser => "Files".to_string(),
+                                AppView::Playlist => "Queue".to_string(),
+                                AppView::Lyrics => "Lyrics".to_string(),
+                                AppView::Recent => "History".to_string(),
+                                AppView::Settings => "Settings".to_string(),
+                            }
+                        } else if *view == AppView::Playlist
                             && self.controller.playlist_count() > 0
                         {
                             format!("Playlist ({})", self.controller.playlist_count())
@@ -873,13 +1159,15 @@ impl eframe::App for MuvrixApp {
                         }
                     }
 
-                    ui.add_space(4.0);
+                    ui.add_space(3.0);
                     ui.separator();
-                    ui.add_space(4.0);
+                    ui.add_space(3.0);
 
                     // User file actions with clean vector icons
-                    let (open_text, subs_text) = if available_w > 860.0 {
+                    let (open_text, subs_text) = if available_w > 1050.0 {
                         ("Open File...", "Add Subs...")
+                    } else if available_w > 860.0 {
+                        ("Open...", "Subs...")
                     } else {
                         ("Open", "Subs")
                     };
@@ -906,9 +1194,9 @@ impl eframe::App for MuvrixApp {
                         self.add_subtitle_dialog();
                     }
 
-                    ui.add_space(4.0);
+                    ui.add_space(3.0);
                     ui.separator();
-                    ui.add_space(4.0);
+                    ui.add_space(3.0);
 
                     // Media file title / label with collision protection
                     let file_label = self
@@ -930,24 +1218,26 @@ impl eframe::App for MuvrixApp {
                         Color32::from_gray(140)
                     };
 
-                    // Compute reserved space for right-hand actions to prevent collisions at narrow widths
+                    // Compute dynamic right-side reserved width
                     let (w, h) = self.controller.video_dimensions();
                     let vfmt = self.controller.video_format().to_string();
                     let afmt = self.controller.audio_codec().to_string();
                     let hw = self.controller.hwdec_current().to_string();
-                    let show_badge = (w > 0 || !vfmt.is_empty()) && available_w >= 920.0;
+                    let show_badge = (w > 0 || !vfmt.is_empty()) && available_w >= 1150.0;
 
-                    let right_reserved = if show_badge {
-                        480.0
-                    } else if available_w > 720.0 {
-                        280.0
-                    } else {
-                        200.0
-                    };
-                    let max_title_w = (available_w - right_reserved).max(50.0);
+                    let is_player = self.current_view == AppView::Player;
+                    let dev_w = 80.0;
+                    let help_w = if available_w > 1100.0 { 95.0 } else { 55.0 };
+                    let player_extra_w = if is_player { 60.0 } else { 0.0 };
+                    let badge_w = if show_badge { 220.0 } else { 0.0 };
+                    let total_right_w = dev_w + help_w + player_extra_w + badge_w + 40.0;
 
+                    let remaining_w = ui.available_width();
+                    let title_w = (remaining_w - total_right_w).max(40.0);
+
+                    // Allocated middle title with truncation guarantee
                     ui.allocate_ui_with_layout(
-                        Vec2::new(max_title_w, ui.available_height()),
+                        Vec2::new(title_w, ui.available_height()),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
                             ui.add(
@@ -1068,7 +1358,7 @@ impl eframe::App for MuvrixApp {
                         ui.separator();
 
                         // Keyboard shortcuts help button
-                        let help_text = if available_w > 800.0 {
+                        let help_text = if available_w > 1100.0 {
                             "Shortcuts (F1)"
                         } else {
                             "Help"
@@ -1089,7 +1379,7 @@ impl eframe::App for MuvrixApp {
                             ui.separator();
                             let v_clean = format_codec_name(&vfmt);
                             let a_clean = format_codec_name(&afmt);
-                            let badge = if !a_clean.is_empty() && available_w > 940.0 {
+                            let badge = if !a_clean.is_empty() && available_w > 1250.0 {
                                 format!("{}×{} · {} · {} · HW: {}", w, h, v_clean, a_clean, hw)
                             } else {
                                 format!("{}×{} · {} · HW: {}", w, h, v_clean, hw)
@@ -1107,7 +1397,7 @@ impl eframe::App for MuvrixApp {
             });
 
         // ---------------------------------------------------------------------
-        // Active View Dispatch (Player, Browser, Playlist, History, Settings)
+        // Active View Dispatch (Player, Library, Browser, Playlist, Lyrics, History, Settings)
         // ---------------------------------------------------------------------
         if self.current_view != AppView::Player {
             self.render_mini_player_deck(ctx);
@@ -1115,6 +1405,7 @@ impl eframe::App for MuvrixApp {
                 AppView::Library => self.render_library_view(ctx),
                 AppView::Browser => self.render_browser_view(ctx),
                 AppView::Playlist => self.render_playlist_view(ctx),
+                AppView::Lyrics => self.render_lyrics_view(ctx),
                 AppView::Recent => self.render_recent_view(ctx),
                 AppView::Settings => self.render_settings_view(ctx),
                 AppView::Player => unreachable!(),
@@ -1235,8 +1526,100 @@ impl eframe::App for MuvrixApp {
                             .trailing_fill(true);
 
                         let response = ui.add_sized([slider_width, 18.0], slider);
-                        let response = response
-                            .on_hover_text(format!("Seek to {}", format_timestamp(slider_val)));
+
+                        // Context-aware hover information: chapter title, bookmark pin details, or seek timestamp
+                        let mut custom_hover: Option<String> = None;
+                        if let Some(mouse_pos) = response.hover_pos() {
+                            if duration > 0.0 {
+                                for bm in &self.active_bookmarks {
+                                    let frac =
+                                        (bm.timestamp_seconds() / duration).clamp(0.0, 1.0) as f32;
+                                    let x = response.rect.min.x + frac * response.rect.width();
+                                    if (mouse_pos.x - x).abs() <= 7.0 {
+                                        let note_str = bm
+                                            .note
+                                            .as_deref()
+                                            .map(|n| format!(" — {}", n))
+                                            .unwrap_or_default();
+                                        custom_hover = Some(format!(
+                                            "🔖 {} ({}){}",
+                                            bm.label,
+                                            format_timestamp(bm.timestamp_seconds()),
+                                            note_str
+                                        ));
+                                        break;
+                                    }
+                                }
+                                if custom_hover.is_none() {
+                                    for ch in self.controller.chapters() {
+                                        let frac = (ch.time / duration).clamp(0.0, 1.0) as f32;
+                                        let x = response.rect.min.x + frac * response.rect.width();
+                                        if (mouse_pos.x - x).abs() <= 7.0 {
+                                            custom_hover = Some(format!(
+                                                "📑 {} ({})",
+                                                ch.title,
+                                                format_timestamp(ch.time)
+                                            ));
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let tooltip = custom_hover
+                            .unwrap_or_else(|| format!("Seek to {}", format_timestamp(slider_val)));
+                        let response = response.on_hover_text(tooltip);
+
+                        // Draw visual chapter marks on slider track
+                        let chapters = self.controller.chapters();
+                        if duration > 0.0 && !chapters.is_empty() {
+                            let painter = ui.painter();
+                            for ch in chapters {
+                                let frac = (ch.time / duration).clamp(0.0, 1.0) as f32;
+                                let x = response.rect.min.x + frac * response.rect.width();
+                                painter.line_segment(
+                                    [
+                                        Pos2::new(x, response.rect.min.y + 1.0),
+                                        Pos2::new(x, response.rect.max.y - 1.0),
+                                    ],
+                                    Stroke::new(2.0_f32, Color32::from_rgb(56, 189, 248)),
+                                );
+                                painter.circle_filled(
+                                    Pos2::new(x, response.rect.min.y - 1.0),
+                                    2.5,
+                                    Color32::from_rgb(56, 189, 248),
+                                );
+                            }
+                        }
+
+                        // Draw visual bookmark pins on slider track
+                        if duration > 0.0 && !self.active_bookmarks.is_empty() {
+                            let painter = ui.painter();
+                            for bm in &self.active_bookmarks {
+                                let frac =
+                                    (bm.timestamp_seconds() / duration).clamp(0.0, 1.0) as f32;
+                                let x = response.rect.min.x + frac * response.rect.width();
+                                painter.line_segment(
+                                    [
+                                        Pos2::new(x, response.rect.min.y),
+                                        Pos2::new(x, response.rect.max.y),
+                                    ],
+                                    Stroke::new(2.5_f32, Color32::from_rgb(245, 158, 11)),
+                                );
+                                let head = vec![
+                                    Pos2::new(x, response.rect.min.y - 4.0),
+                                    Pos2::new(x + 4.0, response.rect.min.y + 1.0),
+                                    Pos2::new(x, response.rect.min.y + 6.0),
+                                    Pos2::new(x - 4.0, response.rect.min.y + 1.0),
+                                ];
+                                painter.add(Shape::convex_polygon(
+                                    head,
+                                    Color32::from_rgb(245, 158, 11),
+                                    Stroke::new(1.0_f32, Color32::from_rgb(180, 83, 9)),
+                                ));
+                            }
+                        }
 
                         if response.drag_started() {
                             self.is_seeking = true;
@@ -1343,7 +1726,13 @@ impl eframe::App for MuvrixApp {
                             let selected_title = chapters
                                 .iter()
                                 .find(|c| c.index == cur_ch_idx)
-                                .map(|c| format!("Ch {}: {}", c.index + 1, c.title))
+                                .map(|c| {
+                                    if deck_width < 960.0 {
+                                        format!("Ch {}", c.index + 1)
+                                    } else {
+                                        format!("Ch {}: {}", c.index + 1, c.title)
+                                    }
+                                })
                                 .unwrap_or_else(|| "Chapters".to_string());
 
                             egui::ComboBox::from_id_salt("chapters_combo")
@@ -1363,6 +1752,48 @@ impl eframe::App for MuvrixApp {
                                         }
                                     }
                                 });
+                        }
+
+                        // Bookmark actions
+                        if self.controller.current_file().is_some() {
+                            ui.add_space(2.0);
+                            let bm_btn_text = if deck_width < 960.0 {
+                                "🔖"
+                            } else {
+                                "🔖 Bookmark"
+                            };
+                            if ui
+                                .button(RichText::new(bm_btn_text).size(11.5))
+                                .on_hover_text("Add bookmark at current playback position")
+                                .clicked()
+                            {
+                                let label = format!("Bookmark {}", format_timestamp(time_pos));
+                                self.add_bookmark(&label, None);
+                            }
+
+                            if !self.active_bookmarks.is_empty() {
+                                ui.add_space(2.0);
+                                egui::ComboBox::from_id_salt("bookmarks_combo")
+                                    .selected_text(format!(
+                                        "Bookmarks ({})",
+                                        self.active_bookmarks.len()
+                                    ))
+                                    .show_ui(ui, |ui| {
+                                        for bm in &self.active_bookmarks {
+                                            let label = format!(
+                                                "{} ({})",
+                                                bm.label,
+                                                format_timestamp(bm.timestamp_seconds())
+                                            );
+                                            if ui.button(label).clicked() {
+                                                let _ = self.controller.seek(
+                                                    bm.timestamp_seconds(),
+                                                    SeekMode::Absolute,
+                                                );
+                                            }
+                                        }
+                                    });
+                            }
                         }
 
                         ui.add_space(4.0);
@@ -1389,7 +1820,7 @@ impl eframe::App for MuvrixApp {
                         let vol_slider = egui::Slider::new(&mut vol, 0.0..=100.0)
                             .show_value(false)
                             .text(vol_label);
-                        let vol_w = if deck_width < 760.0 { 48.0 } else { 65.0 };
+                        let vol_w = if deck_width < 960.0 { 38.0 } else { 65.0 };
                         let vol_res = ui
                             .add_sized([vol_w, 18.0], vol_slider)
                             .on_hover_text(format!("Volume: {:.0}% (Up/Down Arrow)", vol));
@@ -1397,9 +1828,9 @@ impl eframe::App for MuvrixApp {
                             let _ = self.controller.set_volume(vol);
                         }
 
-                        ui.add_space(4.0);
+                        ui.add_space(3.0);
                         ui.separator();
-                        ui.add_space(4.0);
+                        ui.add_space(3.0);
 
                         // Group 3: Playback Speed Selector
                         let current_speed = self.controller.speed();
@@ -1424,7 +1855,8 @@ impl eframe::App for MuvrixApp {
                                 }
                             });
 
-                        if (current_speed - 1.0).abs() > 0.01
+                        if deck_width >= 960.0
+                            && (current_speed - 1.0).abs() > 0.01
                             && ui
                                 .button("1.0x")
                                 .on_hover_text("Reset to normal speed (Backspace)")
@@ -1546,15 +1978,17 @@ impl eframe::App for MuvrixApp {
                                             .lang
                                             .as_deref()
                                             .unwrap_or(t.title.as_deref().unwrap_or("On"));
-                                        if deck_width < 860.0 {
+                                        if deck_width < 960.0 {
                                             format!("Sub: {label}")
                                         } else {
                                             format!("Subtitles: {label}")
                                         }
-                                    } else {
+                                    } else if deck_width < 960.0 {
                                         "Sub: On".to_string()
+                                    } else {
+                                        "Subtitles: On".to_string()
                                     }
-                                } else if deck_width < 860.0 {
+                                } else if deck_width < 960.0 {
                                     "Sub: Off".to_string()
                                 } else {
                                     "Subtitles: Off".to_string()
@@ -1618,7 +2052,7 @@ impl eframe::App for MuvrixApp {
                                         }
                                     });
 
-                                ui.add_space(4.0);
+                                ui.add_space(3.0);
 
                                 // Audio track selector
                                 let audio_summary = if let Some(id) = selected_audio_id {
@@ -1627,10 +2061,18 @@ impl eframe::App for MuvrixApp {
                                             .lang
                                             .as_deref()
                                             .unwrap_or(t.title.as_deref().unwrap_or("On"));
-                                        format!("Audio: {label}")
+                                        if deck_width < 960.0 {
+                                            format!("Aud: {label}")
+                                        } else {
+                                            format!("Audio: {label}")
+                                        }
+                                    } else if deck_width < 960.0 {
+                                        "Aud: On".to_string()
                                     } else {
                                         "Audio: On".to_string()
                                     }
+                                } else if deck_width < 960.0 {
+                                    "Aud: None".to_string()
                                 } else {
                                     "Audio: None".to_string()
                                 };

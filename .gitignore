@@ -4,13 +4,36 @@
 *~
 .DS_Store
 
-# Large media files and test media collections
+# Large media files, test captures, and test media collections
 test/
-tests/*.mkv
-tests/*.mp4
+tests/MuvrixTestMedia/
+tests/**/*.mkv
+tests/**/*.mp4
+tests/**/*.avi
+tests/**/*.webm
+tests/**/*.mov
+tests/**/*.flac
+tests/**/*.wav
+tests/**/*.ogg
+tests/**/*.opus
+tests/**/*.mp3
+tests/**/*.m4a
+tests/**/*.ts
+tests/**/*.m2ts
+tests/**/*.lrc
+tests/**/*.srt
+tests/**/*.ass
+tests/**/*.vtt
+tests/**/*.png
+tests/**/*.jpg
+tests/**/*.jpeg
+tests/**/*.log
+tests/**/*.tmp
+tests/**/temp/
+tests/**/tmp/
 tests/fixtures/*.mp4
 tests/fixtures/*.txt
-tests/MuvrixTestMedia/
+tests/fixtures/*.lrc
 tests/fixtures/*.png
 # Documentation: Ignore internal research archives by default
 docs/*

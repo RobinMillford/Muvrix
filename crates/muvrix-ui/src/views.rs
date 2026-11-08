@@ -15,7 +15,9 @@ use muvrix_core::network::{
 };
 use muvrix_player::equalizer::{EqualizerManager, EqualizerPreset, EQ_FREQUENCIES};
 use muvrix_player::shader::{Anime4KPreset, VideoAdjustmentSettings};
-use muvrix_player::{PlaybackState, SeekMode, SubtitleStyling, TrackInfo, TrackType};
+use muvrix_player::{
+    AssOverrideMode, PlaybackState, SeekMode, SubtitleStyling, TrackInfo, TrackType,
+};
 
 use crate::app::{format_timestamp, format_track_label, MuvrixApp};
 use crate::icons::{self, Icon};
@@ -28,6 +30,7 @@ pub enum AppView {
     Library,
     Browser,
     Playlist,
+    Lyrics,
     Recent,
     Settings,
 }
@@ -39,6 +42,7 @@ impl AppView {
             Self::Library => "Library",
             Self::Browser => "Browser",
             Self::Playlist => "Playlist",
+            Self::Lyrics => "Lyrics",
             Self::Recent => "History",
             Self::Settings => "Settings",
         }
@@ -50,6 +54,7 @@ impl AppView {
             Self::Library => Icon::Library,
             Self::Browser => Icon::Folder,
             Self::Playlist => Icon::Playlist,
+            Self::Lyrics => Icon::Lyrics,
             Self::Recent => Icon::History,
             Self::Settings => Icon::Settings,
         }
@@ -946,6 +951,8 @@ impl MuvrixApp {
         let mut close_drawer = false;
         let mut play_path: Option<String> = None;
         let mut enqueue_path: Option<String> = None;
+        let mut delete_bm_id: Option<i64> = None;
+        let mut save_bm: Option<(i64, String, Option<String>)> = None;
 
         if let Some(ref item_view) = self.selected_library_item {
             ui.horizontal(|ui| {
@@ -1101,7 +1108,144 @@ impl MuvrixApp {
                             }
                         });
                     }
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    // User Bookmarks
+                    ui.label(
+                        RichText::new("Saved Bookmarks")
+                            .strong()
+                            .size(12.5)
+                            .color(Color32::from_gray(210)),
+                    );
+                    let bookmarks = self
+                        .db
+                        .list_bookmarks_for_media(item_view.item.id)
+                        .unwrap_or_default();
+                    if bookmarks.is_empty() {
+                        ui.label(
+                            RichText::new("No bookmarks saved for this media item.")
+                                .italics()
+                                .size(11.0)
+                                .color(Color32::from_gray(140)),
+                        );
+                    } else {
+                        for bm in &bookmarks {
+                            if self.editing_bookmark_id == Some(bm.id) {
+                                ui.group(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            RichText::new("Edit Bookmark")
+                                                .strong()
+                                                .size(11.5)
+                                                .color(Color32::from_rgb(245, 158, 11)),
+                                        );
+                                        ui.horizontal(|ui| {
+                                            ui.label("Label:");
+                                            ui.text_edit_singleline(
+                                                &mut self.editing_bookmark_label,
+                                            );
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Note: ");
+                                            ui.text_edit_singleline(
+                                                &mut self.editing_bookmark_note,
+                                            );
+                                        });
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Save").clicked() {
+                                                let note_opt =
+                                                    if self.editing_bookmark_note.trim().is_empty()
+                                                    {
+                                                        None
+                                                    } else {
+                                                        Some(
+                                                            self.editing_bookmark_note
+                                                                .trim()
+                                                                .to_string(),
+                                                        )
+                                                    };
+                                                save_bm = Some((
+                                                    bm.id,
+                                                    self.editing_bookmark_label.trim().to_string(),
+                                                    note_opt,
+                                                ));
+                                                self.editing_bookmark_id = None;
+                                            }
+                                            if ui.button("Cancel").clicked() {
+                                                self.editing_bookmark_id = None;
+                                            }
+                                        });
+                                    });
+                                });
+                            } else {
+                                ui.group(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(RichText::new(&bm.label).strong().size(12.0));
+                                            let time_str = format_timestamp(bm.timestamp_seconds());
+                                            ui.label(
+                                                RichText::new(time_str)
+                                                    .monospace()
+                                                    .size(11.0)
+                                                    .color(Color32::from_rgb(245, 158, 11)),
+                                            );
+                                            if let Some(ref note) = bm.note {
+                                                ui.label(
+                                                    RichText::new(note)
+                                                        .size(10.5)
+                                                        .color(Color32::from_gray(160)),
+                                                );
+                                            }
+                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .button("✖")
+                                                    .on_hover_text("Delete bookmark")
+                                                    .clicked()
+                                                {
+                                                    delete_bm_id = Some(bm.id);
+                                                }
+                                                if ui
+                                                    .button("✏")
+                                                    .on_hover_text("Edit label and note")
+                                                    .clicked()
+                                                {
+                                                    self.editing_bookmark_id = Some(bm.id);
+                                                    self.editing_bookmark_label = bm.label.clone();
+                                                    self.editing_bookmark_note =
+                                                        bm.note.clone().unwrap_or_default();
+                                                }
+                                                if ui.button("▶ Jump").clicked() {
+                                                    play_path =
+                                                        Some(item_view.item.canonical_path.clone());
+                                                    let _ = self.controller.seek(
+                                                        bm.timestamp_seconds(),
+                                                        SeekMode::Absolute,
+                                                    );
+                                                }
+                                            },
+                                        );
+                                    });
+                                });
+                            }
+                            ui.add_space(2.0);
+                        }
+                    }
                 });
+        }
+
+        if let Some(id) = delete_bm_id {
+            let _ = self.db.delete_bookmark(id);
+            self.refresh_active_bookmarks();
+        }
+        if let Some((id, label, note)) = save_bm {
+            let _ = self.db.update_bookmark(id, &label, note.as_deref());
+            self.refresh_active_bookmarks();
         }
 
         if close_drawer {
@@ -2416,6 +2560,18 @@ impl MuvrixApp {
                                     }
                                 });
                         });
+
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(RichText::new("⚡ Enforce Collision Avoidance").strong())
+                                .on_hover_text("Pins primary subtitles at bottom (pos=100) and secondary subtitles at top (pos=10)")
+                                .clicked()
+                            {
+                                let _ = self.controller.configure_dual_subtitle_collision_avoidance();
+                                self.status_message = "Enforced dual-subtitle collision avoidance (Primary: Bottom, Secondary: Top)".to_string();
+                            }
+                        });
                     });
 
                     ui.add_space(10.0);
@@ -2544,9 +2700,55 @@ impl MuvrixApp {
 
                         ui.add_space(4.0);
 
+                        ui.horizontal(|ui| {
+                            ui.label("SSA/ASS Override:  ");
+                            let mode_label = match self.active_styling.ass_override_mode {
+                                AssOverrideMode::Preserve => "Preserve Author Styles (Default)",
+                                AssOverrideMode::SafeScale => "Safe Font Scaling Only",
+                                AssOverrideMode::Force => "Force User Styling Overrides",
+                                AssOverrideMode::Strip => "Strip SSA/ASS to Plain Text",
+                            };
+                            egui::ComboBox::from_id_salt("ass_override_mode_combo")
+                                .selected_text(mode_label)
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_label(self.active_styling.ass_override_mode == AssOverrideMode::Preserve, "Preserve Author Styles (Default)").clicked() {
+                                        self.active_styling.ass_override_mode = AssOverrideMode::Preserve;
+                                    }
+                                    if ui.selectable_label(self.active_styling.ass_override_mode == AssOverrideMode::SafeScale, "Safe Font Scaling Only").clicked() {
+                                        self.active_styling.ass_override_mode = AssOverrideMode::SafeScale;
+                                    }
+                                    if ui.selectable_label(self.active_styling.ass_override_mode == AssOverrideMode::Force, "Force User Styling Overrides").clicked() {
+                                        self.active_styling.ass_override_mode = AssOverrideMode::Force;
+                                    }
+                                    if ui.selectable_label(self.active_styling.ass_override_mode == AssOverrideMode::Strip, "Strip SSA/ASS to Plain Text").clicked() {
+                                        self.active_styling.ass_override_mode = AssOverrideMode::Strip;
+                                    }
+                                });
+                        });
+
+                        ui.add_space(4.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Secondary Sub Pos: ");
+                            ui.add(
+                                egui::Slider::new(&mut self.active_styling.secondary_pos, 0..=100)
+                                    .text("% (0=top, 100=bottom)"),
+                            );
+                        });
+
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new("Note: Secondary subtitle positioning (pos=10) and ASS override policy are supported natively. Independent font/color customization for secondary subtitles is unsupported by libmpv.")
+                                .italics()
+                                .size(11.0)
+                                .color(Color32::from_gray(140)),
+                        );
+
+                        ui.add_space(4.0);
+
                         ui.checkbox(
                             &mut self.active_styling.ass_override,
-                            "Force override embedded ASS subtitle styles",
+                            "Force override embedded ASS subtitle styles (Legacy mode)",
                         );
 
                         ui.add_space(8.0);
@@ -2841,11 +3043,33 @@ impl MuvrixApp {
                         if connections.is_empty() {
                             ui.label(RichText::new("No network connections configured.").italics().color(Color32::from_gray(140)));
                         } else {
+                            let mut stream_target: Option<String> = None;
                             for conn in &connections {
                                 ui.group(|ui| {
                                     ui.horizontal(|ui| {
                                         ui.vertical(|ui| {
-                                            ui.label(RichText::new(&conn.name).strong());
+                                            let proto_str = conn.protocol.to_lowercase();
+                                            let is_webdav = proto_str == "webdav" || proto_str == "http" || proto_str == "https";
+                                            let badge_text = if is_webdav {
+                                                format!("[{}]", conn.protocol.to_uppercase())
+                                            } else {
+                                                format!("[{} - Scaffolded]", conn.protocol.to_uppercase())
+                                            };
+                                            let badge_color = if is_webdav {
+                                                Color32::from_rgb(125, 211, 252)
+                                            } else {
+                                                Color32::from_rgb(251, 191, 36)
+                                            };
+
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    RichText::new(badge_text)
+                                                        .monospace()
+                                                        .size(11.0)
+                                                        .color(badge_color),
+                                                );
+                                                ui.label(RichText::new(&conn.name).strong());
+                                            });
                                             let raw_url = format!("{}://{}:{}{}", conn.protocol, conn.host, conn.port, conn.remote_path);
                                             let redacted = redact_credentials_from_url(&raw_url);
                                             ui.label(RichText::new(redacted).size(11.0).color(Color32::from_gray(150)));
@@ -2855,10 +3079,28 @@ impl MuvrixApp {
                                             if ui.button("Delete").clicked() {
                                                 delete_conn_id = Some(conn.id);
                                             }
+                                            let proto_str = conn.protocol.to_lowercase();
+                                            let is_webdav = proto_str == "webdav" || proto_str == "http" || proto_str == "https";
+                                            if is_webdav {
+                                                if ui.button("▶ Stream").on_hover_text("Open network stream directly in Muvrix player").clicked() {
+                                                    let target = format!("{}://{}:{}{}", conn.protocol, conn.host, conn.port, conn.remote_path);
+                                                    stream_target = Some(target);
+                                                }
+                                            } else {
+                                                ui.add_enabled(false, egui::Button::new("▶ Stream (Scaffolded)"))
+                                                    .on_disabled_hover_text(format!(
+                                                        "{} streaming backend is scaffolded for schema validation. Remote playback requires future direct VFS driver.",
+                                                        conn.protocol.to_uppercase()
+                                                    ));
+                                            }
                                         });
                                     });
                                 });
                                 ui.add_space(4.0);
+                            }
+                            if let Some(target) = stream_target {
+                                self.load_file(&target);
+                                self.current_view = AppView::Player;
                             }
                         }
 
@@ -2868,7 +3110,7 @@ impl MuvrixApp {
 
                         ui.add_space(6.0);
 
-                        let add_label = if self.add_network_open { "Hide Add Connection Form" } else { "➕ Add WebDAV Connection" };
+                        let add_label = if self.add_network_open { "Hide Add Connection Form" } else { "➕ Add Network Connection" };
                         if ui.button(add_label).clicked() {
                             self.add_network_open = !self.add_network_open;
                         }
@@ -2876,7 +3118,33 @@ impl MuvrixApp {
                         if self.add_network_open {
                             ui.add_space(6.0);
                             ui.group(|ui| {
-                                ui.label(RichText::new("New WebDAV Endpoint").strong().size(12.5));
+                                ui.label(RichText::new("New Network Remote Endpoint").strong().size(12.5));
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Protocol:   ");
+                                    let cur_proto = self.network_protocol_input.clone();
+                                    let proto_label = match cur_proto.as_str() {
+                                        "smb" => "SMB / Samba Share (Windows / NAS)",
+                                        "sftp" => "SFTP (SSH File Transfer Protocol)",
+                                        _ => "WebDAV / Nextcloud / ownCloud",
+                                    };
+                                    egui::ComboBox::from_id_salt("net_proto_combo")
+                                        .selected_text(proto_label)
+                                        .show_ui(ui, |ui| {
+                                            if ui.selectable_label(self.network_protocol_input == "webdav", "WebDAV / Nextcloud").clicked() {
+                                                self.network_protocol_input = "webdav".to_string();
+                                                self.network_port_input = if self.network_https_input { 443 } else { 80 };
+                                            }
+                                            if ui.selectable_label(self.network_protocol_input == "smb", "SMB / Samba Share").clicked() {
+                                                self.network_protocol_input = "smb".to_string();
+                                                self.network_port_input = 445;
+                                            }
+                                            if ui.selectable_label(self.network_protocol_input == "sftp", "SFTP (SSH File Transfer)").clicked() {
+                                                self.network_protocol_input = "sftp".to_string();
+                                                self.network_port_input = 22;
+                                            }
+                                        });
+                                });
 
                                 ui.horizontal(|ui| {
                                     ui.label("Name:       ");
@@ -2885,18 +3153,36 @@ impl MuvrixApp {
 
                                 ui.horizontal(|ui| {
                                     ui.label("Host / IP:  ");
-                                    ui.add(egui::TextEdit::singleline(&mut self.network_host_input).hint_text("dav.example.com or media.local"));
+                                    ui.add(egui::TextEdit::singleline(&mut self.network_host_input).hint_text("nas.local or 192.168.1.100"));
                                 });
 
                                 ui.horizontal(|ui| {
                                     ui.label("Port:       ");
                                     ui.add(egui::DragValue::new(&mut self.network_port_input).range(1..=65535));
-                                    ui.checkbox(&mut self.network_https_input, "Use HTTPS");
+                                    if self.network_protocol_input == "webdav"
+                                        && ui
+                                            .checkbox(&mut self.network_https_input, "Use HTTPS")
+                                            .changed()
+                                    {
+                                        if self.network_https_input && self.network_port_input == 80
+                                        {
+                                            self.network_port_input = 443;
+                                        } else if !self.network_https_input
+                                            && self.network_port_input == 443
+                                        {
+                                            self.network_port_input = 80;
+                                        }
+                                    }
                                 });
 
                                 ui.horizontal(|ui| {
-                                    ui.label("Path:       ");
-                                    ui.add(egui::TextEdit::singleline(&mut self.network_path_input).hint_text("/remote.php/webdav/"));
+                                    ui.label("Path/Share: ");
+                                    let hint = match self.network_protocol_input.as_str() {
+                                        "smb" => "ShareName/Movies/video.mp4",
+                                        "sftp" => "/home/user/media/video.mkv",
+                                        _ => "/remote.php/webdav/Media/",
+                                    };
+                                    ui.add(egui::TextEdit::singleline(&mut self.network_path_input).hint_text(hint));
                                 });
 
                                 ui.horizontal(|ui| {
@@ -2915,8 +3201,9 @@ impl MuvrixApp {
                                     if ui.button(RichText::new("Save Connection").strong()).clicked()
                                         && !self.network_host_input.trim().is_empty()
                                     {
+                                        let proto = self.network_protocol_input.clone();
                                         let cred_ref = if !self.network_pass_input.is_empty() {
-                                            let key = format!("webdav_{}_{}", self.network_host_input, self.network_user_input);
+                                            let key = format!("{}_{}_{}", proto, self.network_host_input, self.network_user_input);
                                             self.network_vault.store(&key, &self.network_pass_input);
                                             Some(key)
                                         } else {
@@ -2925,11 +3212,11 @@ impl MuvrixApp {
                                         let conn = NetworkConnection {
                                             id: 0,
                                             name: if self.network_name_input.trim().is_empty() {
-                                                format!("WebDAV ({})", self.network_host_input)
+                                                format!("{} ({})", proto.to_uppercase(), self.network_host_input)
                                             } else {
                                                 self.network_name_input.trim().to_string()
                                             },
-                                            protocol: "webdav".to_string(),
+                                            protocol: proto,
                                             host: self.network_host_input.trim().to_string(),
                                             port: self.network_port_input,
                                             remote_path: if self.network_path_input.trim().is_empty() {
@@ -3174,5 +3461,156 @@ impl MuvrixApp {
 
                 ui.add_space(4.0);
             });
+    }
+
+    /// Renders the Synchronized LRC Lyrics view with karaoke timeline tracking.
+    pub(crate) fn render_lyrics_view(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                icons::icon_label(ui, Icon::Lyrics, 20.0, Color32::from_rgb(56, 189, 248));
+                ui.label(
+                    RichText::new("Synchronized Lyrics")
+                        .strong()
+                        .size(17.0)
+                        .color(Color32::from_rgb(56, 189, 248)),
+                );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button("Load LRC File...")
+                        .on_hover_text("Open external LRC file from disk")
+                        .clicked()
+                    {
+                        self.load_lyrics_dialog();
+                    }
+                    if self.lyrics.is_some() && ui.button("Clear Lyrics").clicked() {
+                        self.lyrics = None;
+                    }
+                    ui.checkbox(&mut self.lyrics_auto_scroll, "Auto-scroll");
+                });
+            });
+
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(6.0);
+
+            let current_pos = self.controller.time_pos();
+
+            if let Some(ref lrc) = self.lyrics {
+                let title = lrc.title.as_deref().unwrap_or("Unknown Title");
+                let artist = lrc.artist.as_deref().unwrap_or("Unknown Artist");
+                let album = lrc.album.as_deref().unwrap_or("");
+
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new(title).strong().size(18.0).color(Color32::WHITE));
+                    let sub = if !album.is_empty() {
+                        format!("{} — {}", artist, album)
+                    } else {
+                        artist.to_string()
+                    };
+                    ui.label(RichText::new(sub).size(13.0).color(Color32::from_gray(180)));
+                });
+
+                ui.add_space(10.0);
+
+                let active_idx = lrc.find_active_index((current_pos * 1000.0) as i64);
+                let mut seek_to_sec: Option<f64> = None;
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            for (idx, line) in lrc.lines.iter().enumerate() {
+                                let is_active = Some(idx) == active_idx;
+                                let time_sec = line.timestamp_seconds();
+                                let time_label = format_timestamp(time_sec);
+
+                                let (font_size, color, strong) = if is_active {
+                                    (19.0, Color32::from_rgb(56, 189, 248), true)
+                                } else {
+                                    (14.5, Color32::from_rgb(148, 163, 184), false)
+                                };
+
+                                ui.horizontal(|ui| {
+                                    ui.add_space(ui.available_width() * 0.12);
+                                    ui.label(
+                                        RichText::new(format!("[{}]", time_label))
+                                            .monospace()
+                                            .size(11.0)
+                                            .color(Color32::from_gray(110)),
+                                    );
+
+                                    if is_active && !line.words.is_empty() {
+                                        let active_word_idx = line.find_active_word_index((current_pos * 1000.0) as i64);
+                                        for (w_idx, word) in line.words.iter().enumerate() {
+                                            let (w_color, w_strong) = if Some(w_idx) == active_word_idx {
+                                                (Color32::from_rgb(251, 191, 36), true) // Glowing amber/gold active word
+                                            } else if active_word_idx.is_some_and(|cur| w_idx < cur) {
+                                                (Color32::from_rgb(224, 242, 254), true) // Sung words (light cyan)
+                                            } else {
+                                                (Color32::from_rgb(148, 163, 184), false) // Upcoming words
+                                            };
+
+                                            let mut w_text = RichText::new(&word.text).size(font_size).color(w_color);
+                                            if w_strong {
+                                                w_text = w_text.strong();
+                                            }
+                                            if ui.selectable_label(Some(w_idx) == active_word_idx, w_text).clicked() {
+                                                seek_to_sec = Some(word.timestamp_seconds());
+                                            }
+                                        }
+                                    } else {
+                                        let mut text =
+                                            RichText::new(&line.text).size(font_size).color(color);
+                                        if strong {
+                                            text = text.strong();
+                                        }
+                                        let resp = ui.selectable_label(is_active, text);
+                                        if resp.clicked() {
+                                            seek_to_sec = Some(time_sec);
+                                        }
+                                        if is_active && self.lyrics_auto_scroll {
+                                            resp.scroll_to_me(Some(egui::Align::Center));
+                                        }
+                                    }
+                                });
+                                ui.add_space(4.0);
+                            }
+                        });
+                    });
+
+                if let Some(target) = seek_to_sec {
+                    let _ = self.controller.seek(target, SeekMode::Absolute);
+                }
+            } else {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(60.0);
+                    icons::icon_label(ui, Icon::Lyrics, 48.0, Color32::from_gray(120));
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new("No Synchronized Lyrics Loaded")
+                            .strong()
+                            .size(16.0)
+                            .color(Color32::from_gray(200)),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(
+                            "Open a media file with an adjacent .lrc sidecar file, or click below to select an LRC lyric file manually.",
+                        )
+                        .size(13.0)
+                        .color(Color32::from_gray(150)),
+                    );
+                    ui.add_space(16.0);
+                    if ui
+                        .button(RichText::new("📂 Load LRC Lyric File...").strong())
+                        .clicked()
+                    {
+                        self.load_lyrics_dialog();
+                    }
+                });
+            }
+        });
     }
 }

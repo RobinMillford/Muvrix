@@ -331,3 +331,21 @@ impl Default for Pagination {
         }
     }
 }
+
+/// User-created timestamp bookmark on a media item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bookmark {
+    pub id: i64,
+    pub media_id: i64,
+    pub timestamp_ms: i64,
+    pub label: String,
+    pub note: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl Bookmark {
+    pub fn timestamp_seconds(&self) -> f64 {
+        self.timestamp_ms as f64 / 1000.0
+    }
+}

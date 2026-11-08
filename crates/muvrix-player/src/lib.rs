@@ -12,6 +12,7 @@ pub mod playlist;
 pub mod property;
 pub mod render;
 pub mod shader;
+pub mod stream;
 pub mod thumbnail;
 pub mod track;
 pub mod version;
@@ -33,6 +34,10 @@ pub use playlist::PlaylistItem;
 pub use property::{GetProperty, PropertyFormat, SetProperty};
 pub use render::MpvRenderContext;
 pub use shader::{Anime4KPreset, ShaderManager, VideoAdjustmentSettings};
+pub use stream::{
+    HttpRangeStream, IoSeekableStream, MemoryStream, MpvStreamBridge, SeekableStream,
+    StreamRegistry,
+};
 pub use thumbnail::MpvThumbnailExtractor;
-pub use track::{ChapterInfo, SubtitleStyling, TrackInfo, TrackType};
+pub use track::{AssOverrideMode, ChapterInfo, SubtitleStyling, TrackInfo, TrackType};
 pub use version::ApiVersion;

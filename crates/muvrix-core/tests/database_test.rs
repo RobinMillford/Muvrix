@@ -631,3 +631,177 @@ fn test_transaction_rollback_safety() {
     assert_eq!(items_after.len(), 1);
     assert_eq!(items_after[0].item.file_name, "item1.mp4");
 }
+
+#[test]
+fn test_user_bookmarks_crud_and_foreign_key_cascade() {
+    let db = DatabaseManager::open_in_memory().expect("In-memory DB");
+
+    // 1. Insert root and media item
+    let root = LibraryRoot {
+        id: 0,
+        display_name: "BookmarksTestRoot".to_string(),
+        root_path: "/test/bookmarks".to_string(),
+        source_type: "local".to_string(),
+        is_recursive: false,
+        is_enabled: true,
+        exclusion_patterns: vec![],
+        last_scanned_at: 0,
+        scan_status: "idle".to_string(),
+    };
+    let root_id = db.insert_root(&root).expect("Insert root");
+
+    let item = MediaItem {
+        id: 0,
+        root_id,
+        relative_path: "lecture.mp4".to_string(),
+        canonical_path: "/test/bookmarks/lecture.mp4".to_string(),
+        file_name: "lecture.mp4".to_string(),
+        file_extension: "mp4".to_string(),
+        media_type: MediaType::Video,
+        file_size: 50_000_000,
+        modified_time: 1700000000,
+        added_time: 1700000000,
+        last_scanned_at: 1700000000,
+        availability_state: AvailabilityState::Available,
+        metadata_status: MetadataStatus::Extracted,
+    };
+    let media_id = db.upsert_media_item(&item).expect("Insert media item");
+
+    // 2. Insert bookmarks out of order
+    let b2_id = db
+        .insert_bookmark(
+            media_id,
+            120_000,
+            "Conclusion & Summary",
+            Some("Important exam review topic"),
+        )
+        .expect("Insert bookmark 2");
+
+    let b1_id = db
+        .insert_bookmark(media_id, 15_000, "Introduction to Neural Nets", None)
+        .expect("Insert bookmark 1");
+
+    let b3_id = db
+        .insert_bookmark(
+            media_id,
+            65_000,
+            "Gradient Descent Algorithm",
+            Some("Step-by-step formula derivation"),
+        )
+        .expect("Insert bookmark 3");
+
+    // 3. List bookmarks: must be sorted by timestamp_ms ASC
+    let bookmarks = db
+        .list_bookmarks_for_media(media_id)
+        .expect("List bookmarks");
+
+    assert_eq!(bookmarks.len(), 3);
+    assert_eq!(bookmarks[0].id, b1_id);
+    assert_eq!(bookmarks[0].timestamp_ms, 15_000);
+    assert_eq!(bookmarks[0].label, "Introduction to Neural Nets");
+
+    assert_eq!(bookmarks[1].id, b3_id);
+    assert_eq!(bookmarks[1].timestamp_ms, 65_000);
+    assert_eq!(bookmarks[1].label, "Gradient Descent Algorithm");
+
+    assert_eq!(bookmarks[2].id, b2_id);
+    assert_eq!(bookmarks[2].timestamp_ms, 120_000);
+    assert_eq!(bookmarks[2].label, "Conclusion & Summary");
+
+    // 4. Update bookmark 2
+    let updated = db
+        .update_bookmark(
+            b2_id,
+            "Final Conclusion (Revised)",
+            Some("Updated homework deadlines"),
+        )
+        .expect("Update bookmark");
+    assert!(updated);
+
+    let retrieved = db
+        .get_bookmark(b2_id)
+        .expect("Get bookmark")
+        .expect("Found bookmark");
+    assert_eq!(retrieved.label, "Final Conclusion (Revised)");
+    assert_eq!(
+        retrieved.note.as_deref(),
+        Some("Updated homework deadlines")
+    );
+
+    // 5. Delete single bookmark
+    let deleted = db.delete_bookmark(b1_id).expect("Delete bookmark");
+    assert!(deleted);
+
+    let remaining = db
+        .list_bookmarks_for_media(media_id)
+        .expect("Remaining bookmarks");
+    assert_eq!(remaining.len(), 2);
+
+    // 6. Test Multi-Item Isolation under Shared Root:
+    // Create a second distinct media item under the exact same root_id.
+    let item_b = MediaItem {
+        id: 0,
+        root_id,
+        relative_path: "seminar.mp4".to_string(),
+        canonical_path: "/test/bookmarks/seminar.mp4".to_string(),
+        file_name: "seminar.mp4".to_string(),
+        file_extension: "mp4".to_string(),
+        media_type: MediaType::Video,
+        file_size: 75_000_000,
+        modified_time: 1700000000,
+        added_time: 1700000000,
+        last_scanned_at: 1700000000,
+        availability_state: AvailabilityState::Available,
+        metadata_status: MetadataStatus::Extracted,
+    };
+    let media_id_b = db.upsert_media_item(&item_b).expect("Insert media item B");
+    assert_ne!(
+        media_id, media_id_b,
+        "Media item IDs under the same root must be distinct"
+    );
+
+    let bm_b1 = db
+        .insert_bookmark(
+            media_id_b,
+            45_000,
+            "Seminar Keynote",
+            Some("Guest speaker notes"),
+        )
+        .expect("Insert bookmark on item B");
+
+    // Verify isolation: listing bookmarks for media A returns only A's bookmarks, and B returns B's
+    let bms_a = db
+        .list_bookmarks_for_media(media_id)
+        .expect("Query bookmarks A");
+    let bms_b = db
+        .list_bookmarks_for_media(media_id_b)
+        .expect("Query bookmarks B");
+    assert_eq!(bms_a.len(), 2);
+    assert_eq!(bms_b.len(), 1);
+    assert_eq!(bms_b[0].id, bm_b1);
+    assert_eq!(bms_b[0].media_id, media_id_b);
+    assert_eq!(bms_b[0].label, "Seminar Keynote");
+
+    // 7. Test Foreign Key Cascade: delete media item A.
+    // Media item A bookmarks must cascade delete, while Media item B bookmarks must remain intact.
+    db.delete_media_item(media_id).expect("Delete media item A");
+
+    let post_delete_a = db
+        .list_bookmarks_for_media(media_id)
+        .expect("Query post-delete A");
+    assert_eq!(
+        post_delete_a.len(),
+        0,
+        "All bookmarks must cascade-delete when parent media_item A is removed"
+    );
+
+    let post_delete_b = db
+        .list_bookmarks_for_media(media_id_b)
+        .expect("Query post-delete B");
+    assert_eq!(
+        post_delete_b.len(),
+        1,
+        "Media item B bookmarks must remain untouched when media item A is deleted"
+    );
+    assert_eq!(post_delete_b[0].id, bm_b1);
+}

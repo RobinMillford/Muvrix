@@ -22,6 +22,10 @@ fn test_app_view_transitions() {
     current_view = AppView::Playlist;
     assert_eq!(current_view, AppView::Playlist);
 
+    // Switch to lyrics
+    current_view = AppView::Lyrics;
+    assert_eq!(current_view, AppView::Lyrics);
+
     // Switch to history
     current_view = AppView::Recent;
     assert_eq!(current_view, AppView::Recent);
@@ -63,6 +67,11 @@ fn test_subtitle_styling_ui_defaults() {
     assert_eq!(styling.pos, 100);
     assert_eq!(styling.scale, 1.0);
     assert!(!styling.ass_override);
+    assert_eq!(
+        styling.ass_override_mode,
+        muvrix_player::AssOverrideMode::Preserve
+    );
+    assert_eq!(styling.secondary_pos, 10);
 }
 
 #[test]
