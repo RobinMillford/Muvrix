@@ -176,13 +176,25 @@ impl MpvHandle {
     }
 
     /// Sets secondary subtitle delay in seconds.
+    ///
+    /// On older libmpv versions (< 0.38.0) where `secondary-sub-delay` is not supported,
+    /// `PropertyNotFound` is gracefully ignored.
     pub fn set_secondary_sub_delay(&self, delay_seconds: f64) -> Result<(), MpvError> {
-        self.set_property("secondary-sub-delay", delay_seconds)
+        match self.set_property("secondary-sub-delay", delay_seconds) {
+            Ok(()) | Err(MpvError::PropertyNotFound) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Toggles secondary subtitle visibility.
+    ///
+    /// On older libmpv versions (< 0.38.0) where `secondary-sub-visibility` is not supported,
+    /// `PropertyNotFound` is gracefully ignored.
     pub fn set_secondary_sub_visibility(&self, visible: bool) -> Result<(), MpvError> {
-        self.set_property("secondary-sub-visibility", visible)
+        match self.set_property("secondary-sub-visibility", visible) {
+            Ok(()) | Err(MpvError::PropertyNotFound) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Configures dual-subtitle positioning to mitigate overlap by placing primary subtitles
@@ -190,10 +202,16 @@ impl MpvHandle {
     /// top edge (`secondary-sub-pos=10`). Note: In libmpv, `sub-pos=100` specifies original
     /// position rather than guaranteed absolute bottom; this reduces likely overlap but does
     /// not guarantee collision-free rendering for all arbitrary ASS script positions.
+    ///
+    /// On older libmpv versions (< 0.38.0, e.g. Ubuntu 24.04 package archives) where
+    /// `secondary-sub-pos` is not recognized, `PropertyNotFound` is gracefully ignored so
+    /// primary subtitle positioning (`sub-pos=100`) succeeds without returning an error.
     pub fn configure_dual_subtitle_collision_avoidance(&self) -> Result<(), MpvError> {
         self.set_property("sub-pos", 100i64)?;
-        self.set_property("secondary-sub-pos", 10i64)?;
-        Ok(())
+        match self.set_property("secondary-sub-pos", 10i64) {
+            Ok(()) | Err(MpvError::PropertyNotFound) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Applies subtitle styling preferences to the mpv core.

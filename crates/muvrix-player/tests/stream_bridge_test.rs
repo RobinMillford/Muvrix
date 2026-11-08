@@ -377,7 +377,10 @@ fn test_c_ffi_stream_callbacks_panic_and_error_handling() {
         }
     }
 
-    // Test panicking stream: must not crash the process or unwind across C-ABI
+    // Test panicking stream: must not crash the process or unwind across C-ABI.
+    // Suppress default panic hook output during deliberate panic verification.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
     let panicking_stream = PanickingStream;
     let panic_uri = bridge.register(panicking_stream);
     let _ = handle.command(&["loadfile", &panic_uri]);
@@ -388,6 +391,7 @@ fn test_c_ffi_stream_callbacks_panic_and_error_handling() {
             break;
         }
     }
+    std::panic::set_hook(prev_hook);
 
     let _ = handle.command(&["stop"]);
 }
