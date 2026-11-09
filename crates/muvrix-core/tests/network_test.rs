@@ -237,7 +237,11 @@ fn test_http_range_and_webdav_streaming_simulation() {
     let send_request = |req: &str| -> (String, Vec<u8>) {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("Connect to mock server");
         stream.write_all(req.as_bytes()).expect("Write request");
-        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        // Half-close write side (best-effort): on macOS this can return
+        // ENOTCONN (code 57, NotConnected) if the server already closed the
+        // connection after sending its response. That is benign since the
+        // response is already buffered for reading.
+        let _ = stream.shutdown(std::net::Shutdown::Write);
 
         let mut reader = BufReader::new(stream);
         let mut header_text = String::new();
