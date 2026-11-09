@@ -46,7 +46,7 @@ pub unsafe extern "C" fn gl_get_proc_address_trampoline(
             fn GetModuleHandleA(lpModuleName: *const c_char) -> *mut c_void;
             fn GetProcAddress(hModule: *mut c_void, lpProcName: *const c_char) -> *mut c_void;
         }
-        let h_gl = GetModuleHandleA(b"opengl32.dll\0".as_ptr() as *const c_char);
+        let h_gl = GetModuleHandleA(c"opengl32.dll".as_ptr());
         if !h_gl.is_null() {
             let proc = GetProcAddress(h_gl, name);
             if !proc.is_null() {
