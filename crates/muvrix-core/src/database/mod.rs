@@ -31,7 +31,7 @@ pub enum DatabaseError {
 pub type DbResult<T> = std::result::Result<T, DatabaseError>;
 
 /// Thread-safe central manager for the SQLite media library database.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DatabaseManager {
     conn: Arc<Mutex<Connection>>,
     database_path: Option<String>,
@@ -99,6 +99,17 @@ impl DatabaseManager {
         } else {
             Err(DatabaseError::Corruption(result))
         }
+    }
+
+    /// Returns the highest applied schema migration version.
+    pub fn get_schema_version(&self) -> DbResult<u32> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        let version: u32 = conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(version)
     }
 
     pub fn database_path(&self) -> Option<&str> {
@@ -345,5 +356,53 @@ impl DatabaseManager {
     pub fn delete_bookmark(&self, id: i64) -> DbResult<bool> {
         let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
         Repository::delete_bookmark(&conn, id).map_err(DatabaseError::Sqlite)
+    }
+
+    // -------------------------------------------------------------------------
+    // Persistent SSH Host Trust (Phase 1.2)
+    // -------------------------------------------------------------------------
+
+    pub fn get_ssh_host_trust(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> DbResult<Option<SshHostTrustRecord>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::get_ssh_host_trust(&conn, host, port).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn record_ssh_host_trust(
+        &self,
+        host: &str,
+        port: u16,
+        key_algorithm: &str,
+        fingerprint_sha256: &str,
+        notes: Option<&str>,
+    ) -> DbResult<SshHostTrustRecord> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::record_ssh_host_trust(
+            &conn,
+            host,
+            port,
+            key_algorithm,
+            fingerprint_sha256,
+            notes,
+        )
+        .map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn update_ssh_host_last_seen(&self, host: &str, port: u16) -> DbResult<bool> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::update_ssh_host_last_seen(&conn, host, port).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn revoke_ssh_host_trust(&self, host: &str, port: u16) -> DbResult<bool> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::revoke_ssh_host_trust(&conn, host, port).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn list_ssh_host_trust(&self) -> DbResult<Vec<SshHostTrustRecord>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::list_ssh_host_trust(&conn).map_err(DatabaseError::Sqlite)
     }
 }

@@ -63,6 +63,7 @@ pub struct PlaybackController {
     is_buffering: bool,
     speed: f64,
     volume: f64,
+    volume_boost_max: f64,
     is_muted: bool,
     hwdec_current: String,
     current_ao: String,
@@ -128,6 +129,7 @@ impl PlaybackController {
             is_buffering: false,
             speed: 1.0,
             volume: 100.0,
+            volume_boost_max: 100.0,
             is_muted: false,
             hwdec_current: "inactive".to_string(),
             current_ao: "none".to_string(),
@@ -477,6 +479,76 @@ impl PlaybackController {
         EqualizerManager::set_audio_device(&self.handle, device_name)
     }
 
+    /// Selects an audio output device with automatic fallback to "auto".
+    pub fn set_audio_device_with_fallback(
+        &self,
+        preferred_device: &str,
+    ) -> Result<String, MpvError> {
+        EqualizerManager::set_audio_device_with_fallback(&self.handle, preferred_device)
+    }
+
+    /// Applies 10-band equalizer and DSP settings to the active engine.
+    pub fn apply_equalizer(
+        &self,
+        settings: &crate::equalizer::EqualizerSettings,
+    ) -> Result<(), MpvError> {
+        EqualizerManager::apply_to_handle(&self.handle, settings)
+    }
+
+    /// Resets the equalizer and audio DSP filters to flat default.
+    pub fn reset_equalizer(&self) -> Result<(), MpvError> {
+        EqualizerManager::reset(&self.handle)
+    }
+
+    /// Applies hardware picture adjustments and libplacebo tone mapping.
+    pub fn apply_video_adjustments(
+        &self,
+        settings: &crate::shader::VideoAdjustmentSettings,
+    ) -> Result<(), MpvError> {
+        crate::shader::ShaderManager::apply_adjustments(&self.handle, settings)
+    }
+
+    /// Resets hardware picture adjustments to neutral defaults.
+    pub fn reset_video_adjustments(&self) -> Result<(), MpvError> {
+        crate::shader::ShaderManager::reset_adjustments(&self.handle)
+    }
+
+    /// Applies Anime4K v4.0.1 shader preset and quality profile.
+    pub fn apply_anime4k(
+        &self,
+        preset: crate::shader::Anime4KPreset,
+        quality: crate::shader::ShaderQuality,
+    ) -> Result<Vec<String>, MpvError> {
+        crate::shader::ShaderManager::apply_anime4k_mode(&self.handle, preset, quality, None)
+    }
+
+    /// Clears all active video shaders.
+    pub fn clear_shaders(&self) -> Result<(), MpvError> {
+        crate::shader::ShaderManager::clear_shaders(&self.handle)
+    }
+
+    /// Sets audio delay in seconds (-10.0..10.0s).
+    pub fn set_audio_delay(&self, delay_seconds: f64) -> Result<(), MpvError> {
+        self.handle
+            .set_property("audio-delay", delay_seconds.clamp(-10.0, 10.0))
+    }
+
+    /// Queries active audio delay in seconds.
+    pub fn audio_delay(&self) -> Result<f64, MpvError> {
+        self.handle.get_property::<f64>("audio-delay")
+    }
+
+    /// Enables or disables speed pitch preservation.
+    pub fn set_pitch_correction(&self, enabled: bool) -> Result<(), MpvError> {
+        self.handle
+            .set_property_string("audio-pitch-correction", if enabled { "yes" } else { "no" })
+    }
+
+    /// Configures audio channel layout ("auto", "stereo", "5.1", "7.1").
+    pub fn set_channel_layout(&self, layout: &str) -> Result<(), MpvError> {
+        self.handle.set_property_string("audio-channels", layout)
+    }
+
     // -------------------------------------------------------------------------
     // Playback Commands
     // -------------------------------------------------------------------------
@@ -619,16 +691,32 @@ impl PlaybackController {
         Ok(id)
     }
 
-    /// Sets playback volume (0.0 to 100.0+).
+    /// Sets playback volume (0.0 to 100.0, or up to volume_boost_max when boost is enabled).
     pub fn set_volume(&mut self, volume: f64) -> Result<(), MpvError> {
-        self.handle.set_property("volume", volume)?;
-        self.volume = volume;
+        let max_vol = self.volume_boost_max.max(100.0);
+        let clamped = volume.clamp(0.0, max_vol);
+        self.handle.set_property("volume", clamped)?;
+        self.volume = clamped;
         Ok(())
     }
 
-    /// Adjusts volume by delta (e.g. +5.0 or -5.0), clamped to [0.0, 100.0].
+    /// Sets volume boost ceiling (100.0% to 150.0%).
+    pub fn set_volume_boost(&mut self, boost_percent: f64) -> Result<(), MpvError> {
+        let max_vol = boost_percent.clamp(100.0, 150.0);
+        self.volume_boost_max = max_vol;
+        self.handle.set_property("volume-max", max_vol)?;
+        Ok(())
+    }
+
+    /// Current volume boost ceiling (100.0% to 150.0%).
+    pub fn volume_boost_max(&self) -> f64 {
+        self.volume_boost_max
+    }
+
+    /// Adjusts volume by delta (e.g. +5.0 or -5.0), clamped to [0.0, volume_boost_max].
     pub fn adjust_volume(&mut self, delta: f64) -> Result<(), MpvError> {
-        let new_vol = (self.volume + delta).clamp(0.0, 100.0);
+        let max_vol = self.volume_boost_max.max(100.0);
+        let new_vol = (self.volume + delta).clamp(0.0, max_vol);
         self.set_volume(new_vol)
     }
 

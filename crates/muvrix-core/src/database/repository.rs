@@ -993,4 +993,117 @@ impl Repository {
         let rows = conn.execute("DELETE FROM user_bookmarks WHERE id = ?1", params![id])?;
         Ok(rows > 0)
     }
+
+    // -------------------------------------------------------------------------
+    // SSH Host Trust Management (Phase 1.2)
+    // -------------------------------------------------------------------------
+
+    pub fn get_ssh_host_trust(
+        conn: &Connection,
+        host: &str,
+        port: u16,
+    ) -> Result<Option<SshHostTrustRecord>> {
+        let norm_host = SshHostTrustRecord::normalize_host(host);
+        let mut stmt = conn.prepare(
+            "SELECT id, host, port, key_algorithm, fingerprint_sha256, trusted_at, last_seen_at, notes
+             FROM ssh_host_trust
+             WHERE host = ?1 AND port = ?2",
+        )?;
+
+        stmt.query_row(params![norm_host, port], |row| {
+            Ok(SshHostTrustRecord {
+                id: row.get(0)?,
+                host: row.get(1)?,
+                port: row.get(2)?,
+                key_algorithm: row.get(3)?,
+                fingerprint_sha256: row.get(4)?,
+                trusted_at: row.get(5)?,
+                last_seen_at: row.get(6)?,
+                notes: row.get(7)?,
+            })
+        })
+        .optional()
+    }
+
+    pub fn record_ssh_host_trust(
+        conn: &Connection,
+        host: &str,
+        port: u16,
+        key_algorithm: &str,
+        fingerprint_sha256: &str,
+        notes: Option<&str>,
+    ) -> Result<SshHostTrustRecord> {
+        let norm_host = SshHostTrustRecord::normalize_host(host);
+        let now = current_timestamp() as i64;
+        let clean_fp = fingerprint_sha256.trim().to_string();
+
+        conn.execute(
+            "INSERT INTO ssh_host_trust (host, port, key_algorithm, fingerprint_sha256, trusted_at, last_seen_at, notes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(host, port) DO UPDATE SET
+                key_algorithm = excluded.key_algorithm,
+                fingerprint_sha256 = excluded.fingerprint_sha256,
+                last_seen_at = excluded.last_seen_at,
+                notes = excluded.notes",
+            params![norm_host, port, key_algorithm, clean_fp, now, now, notes],
+        )?;
+
+        let id = conn.last_insert_rowid();
+        Ok(SshHostTrustRecord {
+            id,
+            host: norm_host,
+            port,
+            key_algorithm: key_algorithm.to_string(),
+            fingerprint_sha256: clean_fp,
+            trusted_at: now,
+            last_seen_at: now,
+            notes: notes.map(|s| s.to_string()),
+        })
+    }
+
+    pub fn update_ssh_host_last_seen(conn: &Connection, host: &str, port: u16) -> Result<bool> {
+        let norm_host = SshHostTrustRecord::normalize_host(host);
+        let now = current_timestamp() as i64;
+        let rows = conn.execute(
+            "UPDATE ssh_host_trust SET last_seen_at = ?1 WHERE host = ?2 AND port = ?3",
+            params![now, norm_host, port],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn revoke_ssh_host_trust(conn: &Connection, host: &str, port: u16) -> Result<bool> {
+        let norm_host = SshHostTrustRecord::normalize_host(host);
+        let rows = conn.execute(
+            "DELETE FROM ssh_host_trust WHERE host = ?1 AND port = ?2",
+            params![norm_host, port],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn list_ssh_host_trust(conn: &Connection) -> Result<Vec<SshHostTrustRecord>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, host, port, key_algorithm, fingerprint_sha256, trusted_at, last_seen_at, notes
+             FROM ssh_host_trust
+             ORDER BY host ASC, port ASC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(SshHostTrustRecord {
+                id: row.get(0)?,
+                host: row.get(1)?,
+                port: row.get(2)?,
+                key_algorithm: row.get(3)?,
+                fingerprint_sha256: row.get(4)?,
+                trusted_at: row.get(5)?,
+                last_seen_at: row.get(6)?,
+                notes: row.get(7)?,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
 }

@@ -1,0 +1,254 @@
+{
+  "name": "Anime4K",
+  "version": "4.0.1",
+  "author": "bloc97",
+  "upstream_url": "https://github.com/bloc97/Anime4K",
+  "license": "MIT",
+  "qualities": [
+    {
+      "id": "S",
+      "tier": "Fast",
+      "suffix": "S",
+      "description": "Optimized for lower-power GPUs and integrated graphics"
+    },
+    {
+      "id": "M",
+      "tier": "Balanced",
+      "suffix": "M",
+      "description": "Optimal balance of visual fidelity and rendering latency"
+    },
+    {
+      "id": "L",
+      "tier": "High",
+      "suffix": "L",
+      "description": "Maximum CNN depth for discrete GPUs"
+    }
+  ],
+  "shaders": [
+    {
+      "filename": "Anime4K_AutoDownscalePre_x2.glsl",
+      "size_bytes": 1560,
+      "sha256": "8c58291740146bd766a4d73f132775a797fe80f7d07919b5d767e27a5dc85656",
+      "category": "Downscaling Pre-pass"
+    },
+    {
+      "filename": "Anime4K_Clamp_Highlights.glsl",
+      "size_bytes": 2795,
+      "sha256": "a2a9bf7fbc1d75d09660ca2e701e4d7fb0cf5457b94da47e1825032fa2b3671a",
+      "category": "Highlight Clamping & De-ringing"
+    },
+    {
+      "filename": "Anime4K_Restore_CNN_S.glsl",
+      "size_bytes": 17136,
+      "sha256": "97c24dc370ab300c108bfaa09db7f175aeff343674842c299cf3940a3d330427",
+      "category": "Line Restoration (Fast / Small)"
+    },
+    {
+      "filename": "Anime4K_Restore_CNN_M.glsl",
+      "size_bytes": 35916,
+      "sha256": "67ea3ed26539e8de3b7d307688535d2ff17e8d147e11dda0247da7770dbecf41",
+      "category": "Line Restoration (Balanced / Medium)"
+    },
+    {
+      "filename": "Anime4K_Restore_CNN_L.glsl",
+      "size_bytes": 69921,
+      "sha256": "d6efe215e6ee8af1ec560478a91afc1df83fac4ba43b2c806ee61ca2267ed674",
+      "category": "Line Restoration (High / Large)"
+    },
+    {
+      "filename": "Anime4K_Restore_CNN_Pass2_S.glsl",
+      "size_bytes": 17136,
+      "sha256": "97c24dc370ab300c108bfaa09db7f175aeff343674842c299cf3940a3d330427",
+      "category": "Line Restoration Pass 2 (Fast / Small)"
+    },
+    {
+      "filename": "Anime4K_Restore_CNN_Pass2_M.glsl",
+      "size_bytes": 35916,
+      "sha256": "67ea3ed26539e8de3b7d307688535d2ff17e8d147e11dda0247da7770dbecf41",
+      "category": "Line Restoration Pass 2 (Balanced / Medium)"
+    },
+    {
+      "filename": "Anime4K_Restore_CNN_Pass2_L.glsl",
+      "size_bytes": 69921,
+      "sha256": "d6efe215e6ee8af1ec560478a91afc1df83fac4ba43b2c806ee61ca2267ed674",
+      "category": "Line Restoration Pass 2 (High / Large)"
+    },
+    {
+      "filename": "Anime4K_Restore_CNN_Soft_S.glsl",
+      "size_bytes": 17198,
+      "sha256": "9f6867f2ef42786729522d86fe24147cb4ea145418e3974df70496acf52dc392",
+      "category": "Soft Line Restoration (Fast / Small)"
+    },
+    {
+      "filename": "Anime4K_Restore_CNN_Soft_M.glsl",
+      "size_bytes": 36016,
+      "sha256": "a78a2c76898e08e09e442a9628c64208c26e8e15789649b8755223f009794c02",
+      "category": "Soft Line Restoration (Balanced / Medium)"
+    },
+    {
+      "filename": "Anime4K_Restore_CNN_Soft_L.glsl",
+      "size_bytes": 70020,
+      "sha256": "8f2a5c73b526c6e4c67bce0366f7dcd7410bfa4a31e718240d86f53660788e63",
+      "category": "Soft Line Restoration (High / Large)"
+    },
+    {
+      "filename": "Anime4K_Restore_CNN_Soft_Pass2_S.glsl",
+      "size_bytes": 17198,
+      "sha256": "9f6867f2ef42786729522d86fe24147cb4ea145418e3974df70496acf52dc392",
+      "category": "Soft Line Restoration Pass 2 (Fast / Small)"
+    },
+    {
+      "filename": "Anime4K_Restore_CNN_Soft_Pass2_M.glsl",
+      "size_bytes": 36016,
+      "sha256": "a78a2c76898e08e09e442a9628c64208c26e8e15789649b8755223f009794c02",
+      "category": "Soft Line Restoration Pass 2 (Balanced / Medium)"
+    },
+    {
+      "filename": "Anime4K_Restore_CNN_Soft_Pass2_L.glsl",
+      "size_bytes": 70020,
+      "sha256": "8f2a5c73b526c6e4c67bce0366f7dcd7410bfa4a31e718240d86f53660788e63",
+      "category": "Soft Line Restoration Pass 2 (High / Large)"
+    },
+    {
+      "filename": "Anime4K_Upscale_CNN_x2_S.glsl",
+      "size_bytes": 18638,
+      "sha256": "4c53ec2e287908f7ee7bcb266b0170421626d663576468b7d7dafc62962649a4",
+      "category": "CNN 2x Upscaling (Fast / Small)"
+    },
+    {
+      "filename": "Anime4K_Upscale_CNN_x2_M.glsl",
+      "size_bytes": 37685,
+      "sha256": "716e02098a68f0d648761f2b96b4dd139e1cb09b174bb369fca3aa34328fff7e",
+      "category": "CNN 2x Upscaling (Balanced / Medium)"
+    },
+    {
+      "filename": "Anime4K_Upscale_CNN_x2_L.glsl",
+      "size_bytes": 73443,
+      "sha256": "db1fedf7be82f6fd9034e6bf39b64daf2b7576988bb584ec38f24f5236b1cd97",
+      "category": "CNN 2x Upscaling (High / Large)"
+    },
+    {
+      "filename": "Anime4K_Upscale_CNN_x2_Pass2_S.glsl",
+      "size_bytes": 18638,
+      "sha256": "4c53ec2e287908f7ee7bcb266b0170421626d663576468b7d7dafc62962649a4",
+      "category": "CNN 2x Upscaling Pass 2 (Fast / Small)"
+    },
+    {
+      "filename": "Anime4K_Upscale_CNN_x2_Pass2_M.glsl",
+      "size_bytes": 37685,
+      "sha256": "716e02098a68f0d648761f2b96b4dd139e1cb09b174bb369fca3aa34328fff7e",
+      "category": "CNN 2x Upscaling Pass 2 (Balanced / Medium)"
+    },
+    {
+      "filename": "Anime4K_Upscale_CNN_x2_Pass2_L.glsl",
+      "size_bytes": 73443,
+      "sha256": "db1fedf7be82f6fd9034e6bf39b64daf2b7576988bb584ec38f24f5236b1cd97",
+      "category": "CNN 2x Upscaling Pass 2 (High / Large)"
+    },
+    {
+      "filename": "Anime4K_Upscale_Denoise_CNN_x2_S.glsl",
+      "size_bytes": 18667,
+      "sha256": "1a45ad3aa20d8368399f2fd46791deed957c2fd0a4afd131cc92516827abab93",
+      "category": "Denoise & 2x Upscale (Fast / Small)"
+    },
+    {
+      "filename": "Anime4K_Upscale_Denoise_CNN_x2_M.glsl",
+      "size_bytes": 37714,
+      "sha256": "8c72b042e2301fe66a45c3089720459148e2504cd72af16f9c0d5017ff14181e",
+      "category": "Denoise & 2x Upscale (Balanced / Medium)"
+    },
+    {
+      "filename": "Anime4K_Upscale_Denoise_CNN_x2_L.glsl",
+      "size_bytes": 73584,
+      "sha256": "6cc4604c9544fd4fd9e3a75fd797511bf5fe1e626e9e1dbcee03302823a63207",
+      "category": "Denoise & 2x Upscale (High / Large)"
+    }
+  ],
+  "modes": [
+    {
+      "id": "mode_a",
+      "preset": "ModeA",
+      "label": "Mode A (Sharp Line Restoration & Upscale)",
+      "shader_count": 5,
+      "scaling_factor": "4x",
+      "shaders": [
+        "Anime4K_Clamp_Highlights.glsl",
+        "Anime4K_Restore_CNN_{Q}.glsl",
+        "Anime4K_Upscale_CNN_x2_{Q}.glsl",
+        "Anime4K_AutoDownscalePre_x2.glsl",
+        "Anime4K_Upscale_CNN_x2_Pass2_{Q}.glsl"
+      ]
+    },
+    {
+      "id": "mode_b",
+      "preset": "ModeB",
+      "label": "Mode B (Soft Line Restoration & Upscale)",
+      "shader_count": 5,
+      "scaling_factor": "4x",
+      "shaders": [
+        "Anime4K_Clamp_Highlights.glsl",
+        "Anime4K_Restore_CNN_Soft_{Q}.glsl",
+        "Anime4K_Upscale_CNN_x2_{Q}.glsl",
+        "Anime4K_AutoDownscalePre_x2.glsl",
+        "Anime4K_Upscale_CNN_x2_Pass2_{Q}.glsl"
+      ]
+    },
+    {
+      "id": "mode_c",
+      "preset": "ModeC",
+      "label": "Mode C (Denoise & Upscale)",
+      "shader_count": 4,
+      "scaling_factor": "4x",
+      "shaders": [
+        "Anime4K_Clamp_Highlights.glsl",
+        "Anime4K_Upscale_Denoise_CNN_x2_{Q}.glsl",
+        "Anime4K_AutoDownscalePre_x2.glsl",
+        "Anime4K_Upscale_CNN_x2_{Q}.glsl"
+      ]
+    },
+    {
+      "id": "mode_aa",
+      "preset": "ModeAA",
+      "label": "Mode A+A (Deep Restoration)",
+      "shader_count": 6,
+      "scaling_factor": "4x",
+      "shaders": [
+        "Anime4K_Clamp_Highlights.glsl",
+        "Anime4K_Restore_CNN_{Q}.glsl",
+        "Anime4K_Upscale_CNN_x2_{Q}.glsl",
+        "Anime4K_AutoDownscalePre_x2.glsl",
+        "Anime4K_Restore_CNN_Pass2_{Q}.glsl",
+        "Anime4K_Upscale_CNN_x2_Pass2_{Q}.glsl"
+      ]
+    },
+    {
+      "id": "mode_bb",
+      "preset": "ModeBB",
+      "label": "Mode B+B (Soft Deep Restoration)",
+      "shader_count": 6,
+      "scaling_factor": "4x",
+      "shaders": [
+        "Anime4K_Clamp_Highlights.glsl",
+        "Anime4K_Restore_CNN_Soft_{Q}.glsl",
+        "Anime4K_Upscale_CNN_x2_{Q}.glsl",
+        "Anime4K_AutoDownscalePre_x2.glsl",
+        "Anime4K_Restore_CNN_Soft_Pass2_{Q}.glsl",
+        "Anime4K_Upscale_CNN_x2_Pass2_{Q}.glsl"
+      ]
+    },
+    {
+      "id": "mode_ca",
+      "preset": "ModeCA",
+      "label": "Mode C+A (Denoise + Restoration)",
+      "shader_count": 5,
+      "scaling_factor": "4x",
+      "shaders": [
+        "Anime4K_Clamp_Highlights.glsl",
+        "Anime4K_Upscale_Denoise_CNN_x2_{Q}.glsl",
+        "Anime4K_AutoDownscalePre_x2.glsl",
+        "Anime4K_Restore_CNN_{Q}.glsl",
+        "Anime4K_Upscale_CNN_x2_{Q}.glsl"
+      ]
+    }
+  ]
+}

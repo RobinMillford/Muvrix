@@ -15,7 +15,10 @@ use muvrix_core::network::{
     WebDavProvider,
 };
 use muvrix_player::equalizer::{EqualizerManager, EqualizerPreset, EQ_FREQUENCIES};
-use muvrix_player::shader::{Anime4KPreset, VideoAdjustmentSettings};
+use muvrix_player::shader::{
+    Anime4KPreset, GamutMappingMode, ShaderQuality, TargetPrimaries, TargetTrc,
+    ToneMappingAlgorithm, VideoAdjustmentSettings,
+};
 use muvrix_player::{
     AssOverrideMode, HttpRangeStream, PlaybackState, ReadAheadStream, SeekMode, SubtitleStyling,
     TrackInfo, TrackType,
@@ -2784,15 +2787,54 @@ impl MuvrixApp {
                         );
                         ui.label(
                             RichText::new(
-                                "Configure Anime4K high-quality upscaling shaders, hardware color adjustments, debanding, and sharpening.",
+                                "Configure authentic Anime4K v4.0.1 GLSL shaders, framing geometry, color adjustments, and libplacebo tone mapping.",
                             )
                             .size(12.0)
                             .color(Color32::from_gray(160)),
                         );
 
+                        ui.add_space(6.0);
+
+                        // Capability Diagnostics Badges
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Engine:").size(11.0).color(Color32::from_gray(140)));
+                            ui.label(
+                                RichText::new(format!("libmpv {}", self.media_capabilities.libmpv_version))
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(Color32::from_rgb(147, 197, 253)),
+                            );
+                            let placebo_str = if self.media_capabilities.libplacebo_available {
+                                "libplacebo: Active"
+                            } else {
+                                "libplacebo: Unavailable"
+                            };
+                            ui.label(
+                                RichText::new(placebo_str)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(if self.media_capabilities.libplacebo_available {
+                                        Color32::from_rgb(134, 239, 172)
+                                    } else {
+                                        Color32::from_rgb(252, 165, 165)
+                                    }),
+                            );
+                            let shader_str = if self.media_capabilities.shader_support {
+                                "GLSL Shaders: Enabled"
+                            } else {
+                                "GLSL Shaders: Disabled"
+                            };
+                            ui.label(
+                                RichText::new(shader_str)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(Color32::from_rgb(216, 180, 254)),
+                            );
+                        });
+
                         ui.add_space(8.0);
 
-                        // Anime4K Preset
+                        // Anime4K Preset & Quality
                         ui.horizontal(|ui| {
                             ui.label("Anime4K Upscaler Preset: ");
                             let preset_label = self.anime4k_preset.as_str();
@@ -2805,10 +2847,35 @@ impl MuvrixApp {
                                         Anime4KPreset::ModeB,
                                         Anime4KPreset::ModeC,
                                         Anime4KPreset::ModeAA,
+                                        Anime4KPreset::ModeBB,
+                                        Anime4KPreset::ModeCA,
                                     ];
                                     for p in presets {
                                         if ui.selectable_label(self.anime4k_preset == p, p.as_str()).clicked() {
                                             self.anime4k_preset = p;
+                                            self.apply_video_enhancements();
+                                        }
+                                    }
+                                });
+
+                            ui.add_space(10.0);
+                            ui.label("Quality Level: ");
+                            let quality_label = match self.anime4k_quality {
+                                ShaderQuality::Fast => "Fast (S)",
+                                ShaderQuality::Balanced => "Balanced (M)",
+                                ShaderQuality::High => "High Quality (L)",
+                            };
+                            egui::ComboBox::from_id_salt("anime4k_quality_combo")
+                                .selected_text(quality_label)
+                                .show_ui(ui, |ui| {
+                                    let qualities = [
+                                        (ShaderQuality::Fast, "Fast (S - Low GPU Load)"),
+                                        (ShaderQuality::Balanced, "Balanced (M - Recommended)"),
+                                        (ShaderQuality::High, "High Quality (L - Best Fidelity)"),
+                                    ];
+                                    for (q, label) in qualities {
+                                        if ui.selectable_label(self.anime4k_quality == q, label).clicked() {
+                                            self.anime4k_quality = q;
                                             self.apply_video_enhancements();
                                         }
                                     }
@@ -2867,14 +2934,216 @@ impl MuvrixApp {
                             adj_changed = true;
                         }
 
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.label(RichText::new("Video Framing & Geometry:").strong().size(12.5));
+
+                        ui.horizontal(|ui| {
+                            ui.label("Aspect Ratio: ");
+                            let cur_aspect = self.video_settings.aspect_ratio.clone();
+                            egui::ComboBox::from_id_salt("video_aspect_combo")
+                                .selected_text(&cur_aspect)
+                                .show_ui(ui, |ui| {
+                                    let ratios = [
+                                        ("auto", "Auto / Native"),
+                                        ("16:9", "16:9 Widescreen"),
+                                        ("4:3", "4:3 Standard"),
+                                        ("2.35:1", "2.35:1 Cinematic"),
+                                        ("1:1", "1:1 Square"),
+                                    ];
+                                    for (val, desc) in ratios {
+                                        let sel = cur_aspect == val;
+                                        if ui.selectable_label(sel, desc).clicked() {
+                                            self.video_settings.aspect_ratio = val.to_string();
+                                            adj_changed = true;
+                                        }
+                                    }
+                                });
+
+                            ui.add_space(8.0);
+                            ui.label("Zoom: ");
+                            if ui.add(egui::Slider::new(&mut self.video_settings.zoom, -1.0..=2.0).step_by(0.05)).changed() {
+                                adj_changed = true;
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Pan X:        ");
+                            if ui.add(egui::Slider::new(&mut self.video_settings.pan_x, -0.5..=0.5).step_by(0.01)).changed() {
+                                adj_changed = true;
+                            }
+                            ui.add_space(8.0);
+                            ui.label("Pan Y: ");
+                            if ui.add(egui::Slider::new(&mut self.video_settings.pan_y, -0.5..=0.5).step_by(0.01)).changed() {
+                                adj_changed = true;
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Rotation:     ");
+                            for deg in [0, 90, 180, 270] {
+                                if ui.selectable_label(self.video_settings.rotate == deg, format!("{deg}°")).clicked() {
+                                    self.video_settings.rotate = deg;
+                                    adj_changed = true;
+                                }
+                            }
+                        });
+
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.label(RichText::new("libplacebo Color Management & HDR Tone-Mapping:").strong().size(12.5));
+
+                        ui.horizontal(|ui| {
+                            ui.label("Tone-Mapping: ");
+                            let tm_label = self.video_settings.tone_mapping.as_str();
+                            egui::ComboBox::from_id_salt("tone_mapping_combo")
+                                .selected_text(tm_label)
+                                .show_ui(ui, |ui| {
+                                    let algorithms = [
+                                        ToneMappingAlgorithm::Auto,
+                                        ToneMappingAlgorithm::Clip,
+                                        ToneMappingAlgorithm::Mobius,
+                                        ToneMappingAlgorithm::Reinhard,
+                                        ToneMappingAlgorithm::Hable,
+                                        ToneMappingAlgorithm::Bt2390,
+                                        ToneMappingAlgorithm::Spline,
+                                    ];
+                                    for alg in algorithms {
+                                        if ui.selectable_label(self.video_settings.tone_mapping == alg, alg.as_str()).clicked() {
+                                            self.video_settings.tone_mapping = alg;
+                                            adj_changed = true;
+                                        }
+                                    }
+                                });
+
+                            ui.add_space(8.0);
+                            ui.label("Gamut Mapping: ");
+                            let gm_label = self.video_settings.gamut_mapping.as_str();
+                            egui::ComboBox::from_id_salt("gamut_mapping_combo")
+                                .selected_text(gm_label)
+                                .show_ui(ui, |ui| {
+                                    let modes = [
+                                        GamutMappingMode::Auto,
+                                        GamutMappingMode::Clip,
+                                        GamutMappingMode::Perceptual,
+                                        GamutMappingMode::Relative,
+                                        GamutMappingMode::Saturation,
+                                        GamutMappingMode::Desaturate,
+                                        GamutMappingMode::Linear,
+                                    ];
+                                    for m in modes {
+                                        if ui.selectable_label(self.video_settings.gamut_mapping == m, m.as_str()).clicked() {
+                                            self.video_settings.gamut_mapping = m;
+                                            adj_changed = true;
+                                        }
+                                    }
+                                });
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Target TRC:   ");
+                            let trc_label = match self.video_settings.target_trc {
+                                TargetTrc::Auto => "Auto (SDR Default)",
+                                TargetTrc::Srgb => "sRGB (Standard)",
+                                TargetTrc::Bt1886 => "BT.1886 (HDTV)",
+                                TargetTrc::Gamma22 => "Gamma 2.2",
+                                TargetTrc::Linear => "Linear Light",
+                                TargetTrc::Pq => "PQ (Native HDR - Deferred)",
+                                TargetTrc::Hlg => "HLG (Native HDR - Deferred)",
+                                _ => self.video_settings.target_trc.as_str(),
+                            };
+                            egui::ComboBox::from_id_salt("target_trc_combo")
+                                .selected_text(trc_label)
+                                .show_ui(ui, |ui| {
+                                    ui.label(egui::RichText::new("SDR Display Targets (Active FBO)").small().strong());
+                                    let sdr_trcs = [
+                                        (TargetTrc::Auto, "Auto (SDR Default)"),
+                                        (TargetTrc::Srgb, "sRGB (Standard PC)"),
+                                        (TargetTrc::Bt1886, "BT.1886 (Rec.709 Video)"),
+                                        (TargetTrc::Gamma22, "Gamma 2.2"),
+                                        (TargetTrc::Linear, "Linear Light"),
+                                    ];
+                                    for (trc, lbl) in sdr_trcs {
+                                        if ui.selectable_label(self.video_settings.target_trc == trc, lbl).clicked() {
+                                            self.video_settings.target_trc = trc;
+                                            adj_changed = true;
+                                        }
+                                    }
+
+                                    ui.separator();
+                                    ui.label(egui::RichText::new("Native HDR (Deferred — requires FP16/scRGB)").small().weak());
+                                    let hdr_trcs = [
+                                        (TargetTrc::Pq, "PQ / ST 2084 (Deferred)"),
+                                        (TargetTrc::Hlg, "HLG / BT.2100 (Deferred)"),
+                                    ];
+                                    for (trc, lbl) in hdr_trcs {
+                                        let btn = ui.add_enabled(
+                                            false,
+                                            egui::Button::new(lbl)
+                                                .selected(self.video_settings.target_trc == trc),
+                                        );
+                                        btn.on_disabled_hover_text("Native HDR presentation is deferred while rendering to GL_RGBA8 SDR FBO. HDR sources are tone-mapped to SDR targets above.");
+                                    }
+                                });
+
+                            ui.add_space(8.0);
+                            ui.label("Target Primaries: ");
+                            let prim_label = self.video_settings.target_prim.as_str();
+                            egui::ComboBox::from_id_salt("target_primaries_combo")
+                                .selected_text(prim_label)
+                                .show_ui(ui, |ui| {
+                                    let prims = [
+                                        TargetPrimaries::Auto,
+                                        TargetPrimaries::Bt709,
+                                        TargetPrimaries::Bt2020,
+                                        TargetPrimaries::DciP3,
+                                        TargetPrimaries::DisplayP3,
+                                        TargetPrimaries::AdobeRgb,
+                                    ];
+                                    for prim in prims {
+                                        if ui.selectable_label(self.video_settings.target_prim == prim, prim.as_str()).clicked() {
+                                            self.video_settings.target_prim = prim;
+                                            adj_changed = true;
+                                        }
+                                    }
+                                });
+                        });
+
+                        ui.add_space(2.0);
+                        ui.label(
+                            egui::RichText::new("ℹ GL_RGBA8 SDR Compositor active: HDR10/HLG inputs are tone-mapped via libplacebo into SDR.")
+                                .small()
+                                .weak(),
+                        );
+
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut self.video_settings.hdr_compute_peak, "Compute Dynamic Peak Luminance").changed() {
+                                adj_changed = true;
+                            }
+                            ui.add_space(8.0);
+                            ui.label("Max Boost: ");
+                            if ui.add(egui::Slider::new(&mut self.video_settings.tone_mapping_max_boost, 1.0..=3.0).step_by(0.1)).changed() {
+                                adj_changed = true;
+                            }
+                        });
+
+                        ui.label(
+                            RichText::new(
+                                "ℹ Tone-mapping processes wide color gamut and HDR10/HLG dynamic ranges into standard 8-bit GL_RGBA8 SDR framebuffers via libplacebo shaders. True 10-bit scRGB/HDR passthrough is deferred to Phase 1.3.",
+                            )
+                            .size(10.5)
+                            .color(Color32::from_gray(140)),
+                        );
+
                         if adj_changed {
                             self.apply_video_enhancements();
                         }
 
                         ui.add_space(6.0);
-                        if ui.button("Reset Picture Adjustments to Flat (0)").clicked() {
+                        if ui.button("Reset Picture Adjustments & Shaders to Defaults").clicked() {
                             self.video_settings = VideoAdjustmentSettings::default();
                             self.anime4k_preset = Anime4KPreset::Disabled;
+                            self.anime4k_quality = ShaderQuality::Balanced;
                             self.apply_video_enhancements();
                         }
                     });
@@ -2883,30 +3152,60 @@ impl MuvrixApp {
                     // Section 4: Audio Equalizer & Output Device Routing
                     ui.group(|ui| {
                         ui.label(
-                            RichText::new("4. 10-Band Graphic Equalizer & Audio Routing")
+                            RichText::new("4. 10-Band Parametric Equalizer & Audio DSP Routing")
                                 .strong()
                                 .size(14.0)
                                 .color(Color32::from_rgb(95, 185, 255)),
                         );
                         ui.label(
                             RichText::new(
-                                "Configure 10-band peaking biquad equalizer filters, dynamic range compression (dynaudnorm), and physical output device selection.",
+                                "Configure 10-band peaking biquad equalizer filters with Q-factor shaping, dynamic audio normalization, delay synchronization, and physical output routing.",
                             )
                             .size(12.0)
                             .color(Color32::from_gray(160)),
                         );
 
+                        ui.add_space(6.0);
+
+                        // Capability Diagnostics Badges
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("DSP Engine:").size(11.0).color(Color32::from_gray(140)));
+                            ui.label(
+                                RichText::new("FFmpeg Biquad / libmpv af")
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(Color32::from_rgb(147, 197, 253)),
+                            );
+                            if self.equalizer_settings.has_clipping_risk() {
+                                ui.label(
+                                    RichText::new("⚠️ Digital Clipping Risk")
+                                        .size(11.0)
+                                        .color(Color32::from_rgb(251, 191, 36)),
+                                );
+                            } else {
+                                ui.label(
+                                    RichText::new("✓ Headroom Safe")
+                                        .size(11.0)
+                                        .color(Color32::from_rgb(134, 239, 172)),
+                                );
+                            }
+                        });
+
                         ui.add_space(8.0);
 
                         let mut eq_changed = false;
 
-                        if ui.checkbox(&mut self.equalizer_settings.is_enabled, "Enable 10-Band Graphic Equalizer").changed() {
-                            eq_changed = true;
-                        }
-
-                        if ui.checkbox(&mut self.equalizer_settings.dynaudnorm, "Dynamic Audio Normalizer (dynaudnorm)").changed() {
-                            eq_changed = true;
-                        }
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut self.equalizer_settings.is_enabled, "Enable 10-Band Equalizer").changed() {
+                                eq_changed = true;
+                            }
+                            if ui.checkbox(&mut self.equalizer_settings.dynaudnorm, "Dynamic Audio Normalizer (dynaudnorm)").changed() {
+                                eq_changed = true;
+                            }
+                            if ui.checkbox(&mut self.equalizer_settings.pitch_correction, "Preserve Pitch (scaletempo2)").changed() {
+                                eq_changed = true;
+                            }
+                        });
 
                         ui.add_space(4.0);
 
@@ -2927,6 +3226,7 @@ impl MuvrixApp {
                                         EqualizerPreset::Rock,
                                         EqualizerPreset::Classical,
                                         EqualizerPreset::Electronic,
+                                        EqualizerPreset::Cinema,
                                     ];
                                     for p in presets {
                                         if ui.selectable_label(self.equalizer_settings.active_preset == p, p.as_str()).clicked() {
@@ -2943,6 +3243,22 @@ impl MuvrixApp {
 
                         ui.add_space(4.0);
 
+                        // Headroom Warning and Auto-Attenuate button
+                        if self.equalizer_settings.has_clipping_risk() {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("⚠️ Positive EQ gains may cause digital clipping with current preamp.")
+                                        .color(Color32::from_rgb(251, 191, 36))
+                                        .size(11.5),
+                                );
+                                let safe_preamp = self.equalizer_settings.calculate_safe_preamp();
+                                if ui.button(format!("Auto-Attenuate Preamp ({:.1} dB)", safe_preamp)).clicked() {
+                                    self.equalizer_settings.preamp_db = safe_preamp;
+                                    eq_changed = true;
+                                }
+                            });
+                        }
+
                         // Preamp Slider
                         ui.horizontal(|ui| {
                             ui.label("Preamp Gain: ");
@@ -2952,6 +3268,8 @@ impl MuvrixApp {
                                 }
                                 eq_changed = true;
                             }
+                            ui.add_space(10.0);
+                            ui.checkbox(&mut self.eq_show_q_factors, "Show Parametric Q Controls");
                         });
 
                         ui.add_space(6.0);
@@ -2976,6 +3294,56 @@ impl MuvrixApp {
                                     ui.label(RichText::new(format!("{:.1}", self.equalizer_settings.gains[i])).size(9.5));
                                 });
                             }
+                        });
+
+                        // Parametric Q Controls (when toggled)
+                        if self.eq_show_q_factors {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new("Band Q-Factors (Bandwidth: Higher = Sharper peak):").size(11.0).color(Color32::from_gray(160)));
+                            ui.horizontal(|ui| {
+                                for (i, &freq) in EQ_FREQUENCIES.iter().enumerate() {
+                                    ui.vertical(|ui| {
+                                        let label = if freq >= 1000.0 {
+                                            format!("{:.0}k", freq / 1000.0)
+                                        } else {
+                                            format!("{:.0}", freq)
+                                        };
+                                        ui.label(RichText::new(&label).size(9.5));
+                                        let mut q = self.equalizer_settings.bands.get(i).map(|b| b.q_factor).unwrap_or(1.414);
+                                        if ui.add(egui::DragValue::new(&mut q).range(0.1..=10.0).speed(0.05)).changed() {
+                                            if let Some(b) = self.equalizer_settings.bands.get_mut(i) {
+                                                b.q_factor = q;
+                                                self.equalizer_settings.active_preset = EqualizerPreset::Custom;
+                                                eq_changed = true;
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                        }
+
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.label(RichText::new("Audio DSP & Synchronization:").strong().size(12.5));
+
+                        ui.horizontal(|ui| {
+                            ui.label("Audio Delay: ");
+                            if ui.add(egui::Slider::new(&mut self.equalizer_settings.audio_delay, -2.0..=2.0).step_by(0.05).text("seconds")).changed() {
+                                eq_changed = true;
+                            }
+                            ui.add_space(10.0);
+                            ui.label("Channel Layout: ");
+                            let cur_layout = self.equalizer_settings.channel_layout.clone();
+                            egui::ComboBox::from_id_salt("eq_channel_layout_combo")
+                                .selected_text(&cur_layout)
+                                .show_ui(ui, |ui| {
+                                    for layout in ["auto", "stereo", "5.1", "7.1"] {
+                                        if ui.selectable_label(cur_layout == layout, layout).clicked() {
+                                            self.equalizer_settings.channel_layout = layout.to_string();
+                                            eq_changed = true;
+                                        }
+                                    }
+                                });
                         });
 
                         if eq_changed {
@@ -3009,7 +3377,7 @@ impl MuvrixApp {
                                     for dev in &self.audio_devices {
                                         if ui.selectable_label(self.selected_audio_device == dev.name, &dev.description).clicked() {
                                             self.selected_audio_device = dev.name.clone();
-                                            let _ = EqualizerManager::set_audio_device(self.controller.handle(), &dev.name);
+                                            let _ = EqualizerManager::set_audio_device_with_fallback(self.controller.handle(), &dev.name);
                                         }
                                     }
                                 });
@@ -3181,6 +3549,36 @@ impl MuvrixApp {
                             let _ = self.db.delete_connection(id);
                         }
 
+                        // Trusted SSH Host Fingerprints (TOFU Database)
+                        let trusted_hosts = self.db.list_ssh_host_trust().unwrap_or_default();
+                        if !trusted_hosts.is_empty() {
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.label(RichText::new("Trusted SSH Host Fingerprints (TOFU Database):").strong().size(12.5));
+                            let mut revoke_target: Option<(String, u16)> = None;
+                            egui::Grid::new("ssh_trusted_hosts_grid").striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
+                                ui.label(RichText::new("Host:Port").strong());
+                                ui.label(RichText::new("Algorithm").strong());
+                                ui.label(RichText::new("Fingerprint (SHA256)").strong());
+                                ui.label(RichText::new("Action").strong());
+                                ui.end_row();
+
+                                for trust in &trusted_hosts {
+                                    ui.label(format!("{}:{}", trust.host, trust.port));
+                                    ui.label(&trust.key_algorithm);
+                                    ui.label(RichText::new(&trust.fingerprint_sha256).monospace().size(11.0));
+                                    if ui.button("Revoke").clicked() {
+                                        revoke_target = Some((trust.host.clone(), trust.port));
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                            if let Some((h, p)) = revoke_target {
+                                let _ = self.db.revoke_ssh_host_trust(&h, p);
+                                self.network_status_msg = Some("SSH host fingerprint trust revoked.".to_string());
+                            }
+                        }
+
                         ui.add_space(6.0);
 
                         let add_label = if self.add_network_open { "Hide Add Connection Form" } else { "➕ Add Network Connection" };
@@ -3262,7 +3660,59 @@ impl MuvrixApp {
                                     ui.horizontal(|ui| {
                                         ui.label("Host Key:   ");
                                         ui.add(egui::TextEdit::singleline(&mut self.network_host_key_input).hint_text("SHA256:... (pinned server fingerprint)"));
+                                        if ui.button("Probe Host Key").clicked() && !self.network_host_input.trim().is_empty() {
+                                            match SftpProvider::inspect_host_key(&self.network_host_input, self.network_port_input) {
+                                                Ok(presented) => {
+                                                    self.pending_ssh_host_trust = Some(presented);
+                                                    self.ssh_host_trust_error = None;
+                                                }
+                                                Err(e) => {
+                                                    self.ssh_host_trust_error = Some(format!("Failed to probe host key: {e}"));
+                                                }
+                                            }
+                                        }
                                     });
+
+                                    if let Some(presented) = self.pending_ssh_host_trust.clone() {
+                                        let mut clear_trust_prompt = false;
+                                        let mut approved = false;
+                                        ui.group(|ui| {
+                                            ui.label(RichText::new("⚠️ SSH Host Key Verification (Trust On First Use)").strong().color(Color32::from_rgb(251, 191, 36)));
+                                            ui.label(format!("Endpoint: {}:{}", presented.host, presented.port));
+                                            ui.label(format!("Key Type: {}", presented.algorithm));
+                                            ui.label(RichText::new(format!("SHA-256 Fingerprint: {}", presented.fingerprint)).monospace().strong());
+                                            ui.label(RichText::new("CRITICAL: Verify this fingerprint matches your server's host key using a trusted out-of-band channel (e.g. server console, physical terminal, or verified administrator call). Never approve an unexpected fingerprint. Approving stores persistent trust in the local database.").size(11.0).color(Color32::from_rgb(240, 200, 120)));
+
+                                            ui.horizontal(|ui| {
+                                                if ui.button(RichText::new("✓ Approve & Trust Host").strong().color(Color32::from_rgb(74, 222, 128))).clicked() {
+                                                    approved = true;
+                                                    clear_trust_prompt = true;
+                                                }
+                                                if ui.button("✗ Reject").clicked() {
+                                                    clear_trust_prompt = true;
+                                                    self.network_status_msg = Some("SSH Host verification rejected by user.".to_string());
+                                                }
+                                            });
+                                        });
+                                        if approved {
+                                            let _ = self.db.record_ssh_host_trust(
+                                                &presented.host,
+                                                presented.port,
+                                                &presented.algorithm,
+                                                &presented.fingerprint,
+                                                None,
+                                            );
+                                            self.network_host_key_input = presented.fingerprint.clone();
+                                            self.network_status_msg = Some(format!("SSH Host {}:{} trusted in database.", presented.host, presented.port));
+                                        }
+                                        if clear_trust_prompt {
+                                            self.pending_ssh_host_trust = None;
+                                        }
+                                    }
+
+                                    if let Some(ref err) = self.ssh_host_trust_error {
+                                        ui.label(RichText::new(format!("⚠️ {}", err)).color(Color32::from_rgb(255, 120, 120)).size(11.5));
+                                    }
                                 }
 
                                 ui.horizontal(|ui| {
@@ -3336,7 +3786,7 @@ impl MuvrixApp {
                                                     None,
                                                     fp,
                                                     self.network_vault.clone(),
-                                                );
+                                                ).with_database(self.db.clone());
                                                 match provider.test_connection() {
                                                     Ok(true) => {
                                                         self.network_status_msg = Some(format!("Success: SFTP endpoint {}:{} verified with host-key security", self.network_host_input, self.network_port_input));

@@ -11,6 +11,7 @@ pub mod metadata;
 pub mod playlist;
 pub mod property;
 pub mod render;
+pub mod settings;
 pub mod shader;
 pub mod stream;
 pub mod thumbnail;
@@ -18,13 +19,15 @@ pub mod track;
 pub mod version;
 
 pub use capability::{
-    EngineCapabilities, HdrPresentationMode, HwdecMemoryPath, HwdecStatus, PlaybackDiagnostics,
+    EngineCapabilities, HdrPresentationMode, HwdecMemoryPath, HwdecStatus, MediaCapabilities,
+    PlaybackDiagnostics,
 };
 
 pub use command::{LoadFileMode, SeekMode};
 pub use controller::{PlaybackController, PlaybackState};
 pub use equalizer::{
-    AudioDeviceInfo, EqualizerManager, EqualizerPreset, EqualizerSettings, EQ_FREQUENCIES,
+    AudioDeviceInfo, AudioOutputDevice, EqBand, EqualizerManager, EqualizerPreset,
+    EqualizerSettings, EQ_FREQUENCIES,
 };
 pub use error::MpvError;
 pub use event::{EndFileReason, Event};
@@ -33,7 +36,11 @@ pub use metadata::MpvMetadataExtractor;
 pub use playlist::PlaylistItem;
 pub use property::{GetProperty, PropertyFormat, SetProperty};
 pub use render::MpvRenderContext;
-pub use shader::{Anime4KPreset, ShaderManager, VideoAdjustmentSettings};
+pub use settings::{PersistedMediaSettings, CURRENT_SETTINGS_VERSION};
+pub use shader::{
+    Anime4KPreset, GamutMappingMode, ShaderManager, ShaderProfile, ShaderQuality, TargetPrimaries,
+    TargetTrc, ToneMappingAlgorithm, VideoAdjustmentSettings,
+};
 pub use stream::{
     HttpRangeStream, IoSeekableStream, MemoryStream, MpvStreamBridge, ReadAheadStream,
     SeekableStream, SftpSeekableStream, SmbSeekableStream, StreamRegistry,

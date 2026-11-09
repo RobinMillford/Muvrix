@@ -17,13 +17,11 @@ use muvrix_core::lyrics::{find_sidecar_lrc, LrcFile};
 use muvrix_core::network::CredentialVault;
 use muvrix_core::scanner::{ScanOptions, ScanProgress, ScannerService};
 use muvrix_core::thumbnails::ThumbnailCache;
-use muvrix_player::equalizer::{
-    AudioDeviceInfo, EqualizerManager, EqualizerPreset, EqualizerSettings,
-};
-use muvrix_player::shader::{Anime4KPreset, ShaderManager, VideoAdjustmentSettings};
+use muvrix_player::equalizer::{AudioDeviceInfo, EqualizerManager, EqualizerSettings};
+use muvrix_player::shader::{Anime4KPreset, ShaderManager, ShaderQuality, VideoAdjustmentSettings};
 use muvrix_player::{
-    Event, MpvHandle, MpvRenderContext, MpvStreamBridge, PlaybackController, PlaybackState,
-    SeekMode, SubtitleStyling, TrackInfo, TrackType,
+    Event, MediaCapabilities, MpvHandle, MpvRenderContext, MpvStreamBridge, PlaybackController,
+    PlaybackState, SeekMode, SubtitleStyling, TrackInfo, TrackType,
 };
 
 use crate::gl_loader;
@@ -83,9 +81,14 @@ pub struct MuvrixApp {
     pub(crate) scan_progress: Option<ScanProgress>,
     pub(crate) video_settings: VideoAdjustmentSettings,
     pub(crate) anime4k_preset: Anime4KPreset,
+    pub(crate) anime4k_quality: ShaderQuality,
     pub(crate) equalizer_settings: EqualizerSettings,
+    pub(crate) eq_show_q_factors: bool,
     pub(crate) audio_devices: Vec<AudioDeviceInfo>,
     pub(crate) selected_audio_device: String,
+    pub(crate) media_capabilities: MediaCapabilities,
+    pub(crate) pending_ssh_host_trust: Option<muvrix_core::network::PresentedHostKey>,
+    pub(crate) ssh_host_trust_error: Option<String>,
     pub(crate) network_vault: CredentialVault,
     pub(crate) add_network_open: bool,
     pub(crate) network_name_input: String,
@@ -186,6 +189,7 @@ impl MuvrixApp {
 
         // 6. Wrap in PlaybackController
         let controller = PlaybackController::new(mpv)?;
+        let media_capabilities = controller.handle().detect_media_capabilities();
 
         let db_path = if let Ok(custom) = std::env::var("MUVRIX_DATABASE_PATH") {
             std::path::PathBuf::from(custom)
@@ -222,6 +226,13 @@ impl MuvrixApp {
         let show_playlist_drawer = std::env::var("MUVRIX_OPEN_DRAWER")
             .map(|v| v == "1")
             .unwrap_or(false);
+
+        let initial_audio_devices = vec![AudioDeviceInfo {
+            name: "auto".to_string(),
+            description: "Auto-select device".to_string(),
+        }];
+        let mut persisted = muvrix_player::PersistedMediaSettings::load(None);
+        persisted.validate_and_fallback(&initial_audio_devices);
 
         let mut app = Self {
             controller,
@@ -279,44 +290,34 @@ impl MuvrixApp {
                     sharpen: 1.2,
                     deband: true,
                     active_shaders: Vec::new(),
+                    ..Default::default()
                 }
             } else {
-                VideoAdjustmentSettings::default()
+                persisted.video_adjustments
             },
             anime4k_preset: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("enhancement")
             {
                 Anime4KPreset::ModeA
             } else {
-                Anime4KPreset::Disabled
+                persisted.anime4k_preset
             },
+            anime4k_quality: persisted.anime4k_quality,
             equalizer_settings: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref()
                 == Ok("equalizer")
             {
                 EqualizerSettings {
                     is_enabled: true,
-                    preamp_db: 0.0,
-                    gains: [0.0; 10],
-                    dynaudnorm: false,
-                    active_preset: EqualizerPreset::Flat,
+                    ..Default::default()
                 }
             } else {
-                EqualizerSettings::default()
+                persisted.equalizer
             },
-            audio_devices: vec![
-                AudioDeviceInfo {
-                    name: "auto".to_string(),
-                    description: "Auto-select device".to_string(),
-                },
-                AudioDeviceInfo {
-                    name: "alsa/default".to_string(),
-                    description: "ALSA Default PCM Audio Sink".to_string(),
-                },
-                AudioDeviceInfo {
-                    name: "pulse/alsa_output.pci-0000_00_1f.3.analog-stereo".to_string(),
-                    description: "Built-in Audio Analog Stereo (PipeWire-Pulse)".to_string(),
-                },
-            ],
-            selected_audio_device: "pulse/alsa_output.pci-0000_00_1f.3.analog-stereo".to_string(),
+            eq_show_q_factors: false,
+            audio_devices: initial_audio_devices,
+            selected_audio_device: persisted.selected_audio_device,
+            media_capabilities,
+            pending_ssh_host_trust: None,
+            ssh_host_trust_error: None,
             network_vault: CredentialVault::new(),
             add_network_open: std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network")
                 || std::env::var("MUVRIX_OPEN_NETWORK_FORM").is_ok(),
@@ -381,6 +382,12 @@ impl MuvrixApp {
 
         app.refresh_library();
         app.refresh_audio_devices();
+        app.apply_video_enhancements();
+        app.apply_equalizer_settings();
+        let _ = app
+            .controller
+            .set_volume_boost(app.equalizer_settings.volume_boost);
+        let _ = app.controller.set_volume(persisted.volume);
 
         if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network") {
             if let Ok(conns) = app.db.list_connections() {
@@ -1007,11 +1014,34 @@ impl MuvrixApp {
 
     pub fn apply_video_enhancements(&mut self) {
         let _ = ShaderManager::apply_adjustments(self.controller.handle(), &self.video_settings);
+        let _ = ShaderManager::apply_anime4k_mode(
+            self.controller.handle(),
+            self.anime4k_preset,
+            self.anime4k_quality,
+            None,
+        );
+        self.save_media_settings();
     }
 
     pub fn apply_equalizer_settings(&mut self) {
+        self.equalizer_settings.sync_gains_to_bands();
         let _ =
             EqualizerManager::apply_to_handle(self.controller.handle(), &self.equalizer_settings);
+        self.save_media_settings();
+    }
+
+    pub fn save_media_settings(&self) {
+        let current_volume = self.controller.volume();
+        let settings = muvrix_player::PersistedMediaSettings {
+            schema_version: muvrix_player::CURRENT_SETTINGS_VERSION,
+            video_adjustments: self.video_settings.clone(),
+            anime4k_preset: self.anime4k_preset,
+            anime4k_quality: self.anime4k_quality,
+            equalizer: self.equalizer_settings.clone(),
+            selected_audio_device: self.selected_audio_device.clone(),
+            volume: current_volume,
+        };
+        let _ = settings.save(None);
     }
 }
 
@@ -2541,6 +2571,7 @@ impl eframe::App for MuvrixApp {
                 let _ = self.history_store.save();
             }
         }
+        self.save_media_settings();
         if let Ok(mut engine) = self.render_engine.lock() {
             if let Some(gl_ctx) = gl {
                 unsafe {

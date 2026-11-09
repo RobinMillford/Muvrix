@@ -74,6 +74,31 @@ fn wait_for_file_loaded(player: &MpvHandle, timeout: Duration) {
 }
 
 #[test]
+fn test_media_capabilities_detection() {
+    let player = create_player("auto-safe");
+    let caps = player.detect_media_capabilities();
+
+    println!("Detected Media Capabilities:");
+    println!(" - libmpv Version:       {}", caps.libmpv_version);
+    println!(" - Client API Version:   {}", caps.client_api_version);
+    println!(" - FFmpeg Version:       {}", caps.ffmpeg_version);
+    println!(" - Shader Support:       {}", caps.shader_support);
+    println!(" - gpu-next Available:   {}", caps.gpu_next_available);
+    println!(" - libplacebo Available: {}", caps.libplacebo_available);
+    println!(" - HDR Metadata:         {}", caps.hdr_metadata_available);
+    println!(" - Tone Mapping:         {}", caps.tone_mapping_available);
+    println!(" - Audio Device Enum:    {}", caps.audio_device_enumeration);
+    println!(" - Audio Filter Support: {}", caps.audio_filter_support);
+
+    assert_eq!(caps.client_api_version, 2);
+    assert!(caps.shader_support);
+    assert!(caps.tone_mapping_available);
+    assert!(caps.libplacebo_available);
+    assert!(caps.audio_device_enumeration);
+    assert!(caps.audio_filter_support);
+}
+
+#[test]
 fn test_distro_parsing_across_distributions() {
     // Fedora 45
     let fedora_content = r#"
