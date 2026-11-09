@@ -11,12 +11,14 @@ use muvrix_core::database::{
     LibraryItemView, LibraryRoot, LibrarySortField, MediaType, SortDirection,
 };
 use muvrix_core::network::{
-    redact_credentials_from_url, NetworkConnection, NetworkProvider, WebDavProvider,
+    redact_credentials_from_url, NetworkConnection, NetworkProvider, SftpProvider, SmbProvider,
+    WebDavProvider,
 };
 use muvrix_player::equalizer::{EqualizerManager, EqualizerPreset, EQ_FREQUENCIES};
 use muvrix_player::shader::{Anime4KPreset, VideoAdjustmentSettings};
 use muvrix_player::{
-    AssOverrideMode, PlaybackState, SeekMode, SubtitleStyling, TrackInfo, TrackType,
+    AssOverrideMode, HttpRangeStream, PlaybackState, ReadAheadStream, SeekMode, SubtitleStyling,
+    TrackInfo, TrackType,
 };
 
 use crate::app::{format_timestamp, format_track_label, MuvrixApp};
@@ -3044,21 +3046,18 @@ impl MuvrixApp {
                             ui.label(RichText::new("No network connections configured.").italics().color(Color32::from_gray(140)));
                         } else {
                             let mut stream_target: Option<String> = None;
+                            let mut browse_toggle: Option<(i64, String)> = None;
+
                             for conn in &connections {
                                 ui.group(|ui| {
                                     ui.horizontal(|ui| {
                                         ui.vertical(|ui| {
                                             let proto_str = conn.protocol.to_lowercase();
-                                            let is_webdav = proto_str == "webdav" || proto_str == "http" || proto_str == "https";
-                                            let badge_text = if is_webdav {
-                                                format!("[{}]", conn.protocol.to_uppercase())
-                                            } else {
-                                                format!("[{} - Scaffolded]", conn.protocol.to_uppercase())
-                                            };
-                                            let badge_color = if is_webdav {
-                                                Color32::from_rgb(125, 211, 252)
-                                            } else {
-                                                Color32::from_rgb(251, 191, 36)
+                                            let (badge_text, badge_color) = match proto_str.as_str() {
+                                                "webdav" | "http" | "https" => ("[WEBDAV]", Color32::from_rgb(125, 211, 252)),
+                                                "smb" => ("[SMB2/3]", Color32::from_rgb(74, 222, 128)),
+                                                "sftp" => ("[SFTP]", Color32::from_rgb(192, 132, 252)),
+                                                _ => ("[REMOTE]", Color32::from_rgb(251, 191, 36)),
                                             };
 
                                             ui.horizontal(|ui| {
@@ -3079,27 +3078,101 @@ impl MuvrixApp {
                                             if ui.button("Delete").clicked() {
                                                 delete_conn_id = Some(conn.id);
                                             }
-                                            let proto_str = conn.protocol.to_lowercase();
-                                            let is_webdav = proto_str == "webdav" || proto_str == "http" || proto_str == "https";
-                                            if is_webdav {
-                                                if ui.button("▶ Stream").on_hover_text("Open network stream directly in Muvrix player").clicked() {
-                                                    let target = format!("{}://{}:{}{}", conn.protocol, conn.host, conn.port, conn.remote_path);
-                                                    stream_target = Some(target);
-                                                }
-                                            } else {
-                                                ui.add_enabled(false, egui::Button::new("▶ Stream (Scaffolded)"))
-                                                    .on_disabled_hover_text(format!(
-                                                        "{} streaming backend is scaffolded for schema validation. Remote playback requires future direct VFS driver.",
-                                                        conn.protocol.to_uppercase()
-                                                    ));
+                                            if ui.button("▶ Stream").on_hover_text("Open network stream directly in Muvrix player").clicked() {
+                                                let target = format!("{}://{}:{}{}", conn.protocol, conn.host, conn.port, conn.remote_path);
+                                                stream_target = Some(target);
+                                            }
+                                            let is_browsing = self.browsing_conn_id == Some(conn.id);
+                                            let b_label = if is_browsing { "Close Browser ✖" } else { "Browse 📂" };
+                                            if ui.button(b_label).clicked() {
+                                                browse_toggle = Some((conn.id, conn.remote_path.clone()));
                                             }
                                         });
                                     });
+
+                                    // Render Remote Media Browser when active for this connection
+                                    if self.browsing_conn_id == Some(conn.id) {
+                                        ui.add_space(4.0);
+                                        ui.separator();
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("Path:").monospace().color(Color32::from_gray(140)));
+                                            ui.label(RichText::new(&self.browsing_path).monospace().color(Color32::WHITE));
+
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if ui.button("🔄 Refresh").clicked() {
+                                                    self.refresh_remote_directory(conn);
+                                                }
+                                                if self.browsing_path != "/" && ui.button("⬆ Up").clicked() {
+                                                    if let Some(idx) = self.browsing_path.trim_end_matches('/').rfind('/') {
+                                                        let parent = &self.browsing_path[..idx];
+                                                        self.browsing_path = if parent.is_empty() { "/".to_string() } else { parent.to_string() };
+                                                    } else {
+                                                        self.browsing_path = "/".to_string();
+                                                    }
+                                                    self.refresh_remote_directory(conn);
+                                                }
+                                            });
+                                        });
+
+                                        if self.browsing_loading {
+                                            ui.horizontal(|ui| {
+                                                ui.spinner();
+                                                ui.label(RichText::new("Loading directory...").italics().color(Color32::from_gray(160)));
+                                            });
+                                        } else if let Some(ref err) = self.browsing_error {
+                                            ui.label(RichText::new(format!("⚠ {}", err)).color(Color32::from_rgb(255, 120, 120)).size(11.5));
+                                        } else if self.browsing_entries.is_empty() {
+                                            ui.label(RichText::new("No entries found in this directory.").italics().color(Color32::from_gray(140)));
+                                        } else {
+                                            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                                                for entry in &self.browsing_entries.clone() {
+                                                    ui.horizontal(|ui| {
+                                                        if entry.is_dir {
+                                                            if ui.button(format!("📁 {}", entry.name)).clicked() {
+                                                                self.browsing_path = entry.remote_path.clone();
+                                                                self.refresh_remote_directory(conn);
+                                                            }
+                                                        } else {
+                                                            ui.label(format!("🎬 {}", entry.name));
+                                                            ui.label(RichText::new(format_file_size(entry.size_bytes)).size(10.5).color(Color32::from_gray(140)));
+
+                                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                                if ui.button("▶ Play").clicked() {
+                                                                    let target = format!("{}://{}:{}{}", conn.protocol, conn.host, conn.port, entry.remote_path);
+                                                                    stream_target = Some(target);
+                                                                }
+                                                            });
+                                                        }
+                                                    });
+                                                }
+                                            });
+                                        }
+                                    }
                                 });
                                 ui.add_space(4.0);
                             }
+
+                            if let Some((id, path)) = browse_toggle {
+                                if self.browsing_conn_id == Some(id) {
+                                    self.browsing_conn_id = None;
+                                } else {
+                                    self.browsing_conn_id = Some(id);
+                                    self.browsing_path = if path.is_empty() { "/".to_string() } else { path };
+                                    if let Some(conn) = connections.iter().find(|c| c.id == id) {
+                                        self.refresh_remote_directory(conn);
+                                    }
+                                }
+                            }
+
                             if let Some(target) = stream_target {
-                                self.load_file(&target);
+                                // Direct stream bridge playback
+                                if let Ok(stream) = HttpRangeStream::from_url(&target, None) {
+                                    let buffered = ReadAheadStream::new(stream);
+                                    let uri = self.stream_bridge.register(buffered);
+                                    self.load_file(&uri);
+                                } else {
+                                    self.load_file(&target);
+                                }
                                 self.current_view = AppView::Player;
                             }
                         }
@@ -3185,6 +3258,13 @@ impl MuvrixApp {
                                     ui.add(egui::TextEdit::singleline(&mut self.network_path_input).hint_text(hint));
                                 });
 
+                                if self.network_protocol_input == "sftp" {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Host Key:   ");
+                                        ui.add(egui::TextEdit::singleline(&mut self.network_host_key_input).hint_text("SHA256:... (pinned server fingerprint)"));
+                                    });
+                                }
+
                                 ui.horizontal(|ui| {
                                     ui.label("Username:   ");
                                     ui.add(egui::TextEdit::singleline(&mut self.network_user_input));
@@ -3236,24 +3316,92 @@ impl MuvrixApp {
                                     }
 
                                     if ui.button("Test Endpoint").clicked() {
-                                        let provider = WebDavProvider::new(
-                                            &self.network_host_input,
-                                            self.network_port_input,
-                                            &self.network_path_input,
-                                            self.network_https_input,
-                                            if self.network_user_input.is_empty() { None } else { Some(self.network_user_input.clone()) },
-                                            None,
-                                            self.network_vault.clone(),
-                                        );
-                                        match provider.test_connection() {
-                                            Ok(true) => {
-                                                self.network_status_msg = Some(format!("Success: Endpoint {} verified", provider.base_url()));
+                                        match self.network_protocol_input.as_str() {
+                                            "sftp" => {
+                                                let fp = if self.network_host_key_input.trim().is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(self.network_host_key_input.trim().to_string())
+                                                };
+                                                let provider = SftpProvider::new(
+                                                    &self.network_host_input,
+                                                    self.network_port_input,
+                                                    &self.network_path_input,
+                                                    &self.network_user_input,
+                                                    if self.network_pass_input.is_empty() { None } else {
+                                                        let key = format!("sftp_{}_{}", self.network_host_input, self.network_user_input);
+                                                        self.network_vault.store(&key, &self.network_pass_input);
+                                                        Some(key)
+                                                    },
+                                                    None,
+                                                    fp,
+                                                    self.network_vault.clone(),
+                                                );
+                                                match provider.test_connection() {
+                                                    Ok(true) => {
+                                                        self.network_status_msg = Some(format!("Success: SFTP endpoint {}:{} verified with host-key security", self.network_host_input, self.network_port_input));
+                                                    }
+                                                    Ok(false) => {
+                                                        self.network_status_msg = Some("Connection test returned negative".to_string());
+                                                    }
+                                                    Err(e) => {
+                                                        self.network_status_msg = Some(format!("SFTP Error: {}", e));
+                                                    }
+                                                }
                                             }
-                                            Ok(false) => {
-                                                self.network_status_msg = Some("Connection test returned negative".to_string());
+                                            "smb" => {
+                                                let provider = SmbProvider::new(
+                                                    &self.network_host_input,
+                                                    self.network_port_input,
+                                                    if self.network_path_input.is_empty() { "Share" } else { &self.network_path_input },
+                                                    "/",
+                                                    if self.network_user_input.is_empty() { None } else { Some(self.network_user_input.clone()) },
+                                                    None,
+                                                    if self.network_pass_input.is_empty() { None } else {
+                                                        let key = format!("smb_{}_{}", self.network_host_input, self.network_user_input);
+                                                        self.network_vault.store(&key, &self.network_pass_input);
+                                                        Some(key)
+                                                    },
+                                                    self.network_pass_input.is_empty(),
+                                                    self.network_vault.clone(),
+                                                );
+                                                match provider.test_connection() {
+                                                    Ok(true) => {
+                                                        self.network_status_msg = Some(format!("Success: SMB share on {} verified", self.network_host_input));
+                                                    }
+                                                    Ok(false) => {
+                                                        self.network_status_msg = Some("Connection test returned negative".to_string());
+                                                    }
+                                                    Err(e) => {
+                                                        self.network_status_msg = Some(format!("SMB Error: {}", e));
+                                                    }
+                                                }
                                             }
-                                            Err(e) => {
-                                                self.network_status_msg = Some(format!("Error: {}", e));
+                                            _ => {
+                                                let provider = WebDavProvider::new(
+                                                    &self.network_host_input,
+                                                    self.network_port_input,
+                                                    &self.network_path_input,
+                                                    self.network_https_input,
+                                                    if self.network_user_input.is_empty() { None } else { Some(self.network_user_input.clone()) },
+                                                    if self.network_pass_input.is_empty() { None } else {
+                                                        let key = format!("webdav_{}_{}", self.network_host_input, self.network_user_input);
+                                                        self.network_vault.store(&key, &self.network_pass_input);
+                                                        Some(key)
+                                                    },
+                                                    self.network_vault.clone(),
+                                                );
+                                                match provider.test_connection() {
+                                                    Ok(true) => {
+                                                        self.network_status_msg = Some(format!("Success: WebDAV endpoint {} verified", provider.base_url()));
+                                                    }
+                                                    Ok(false) => {
+                                                        self.network_status_msg = Some("Connection test returned negative".to_string());
+                                                    }
+                                                    Err(e) => {
+                                                        self.network_status_msg = Some(format!("WebDAV Error: {}", e));
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -3612,5 +3760,96 @@ impl MuvrixApp {
                 });
             }
         });
+    }
+
+    /// Queries the remote host directory and populates `browsing_entries` for the remote browser view.
+    pub(crate) fn refresh_remote_directory(&mut self, conn: &NetworkConnection) {
+        let path = if self.browsing_path.is_empty() {
+            "/".to_string()
+        } else {
+            self.browsing_path.clone()
+        };
+
+        match conn.protocol.to_lowercase().as_str() {
+            "webdav" | "http" | "https" => {
+                let is_https = conn.protocol.to_lowercase() == "https" || conn.port == 443;
+                let provider = WebDavProvider::new(
+                    &conn.host,
+                    conn.port,
+                    &path,
+                    is_https,
+                    if conn.is_anonymous {
+                        None
+                    } else {
+                        Some("user".to_string())
+                    },
+                    conn.credential_ref.clone(),
+                    self.network_vault.clone(),
+                );
+                match provider.list_directory(&path) {
+                    Ok(entries) => {
+                        self.browsing_entries = entries;
+                        self.browsing_error = None;
+                    }
+                    Err(e) => {
+                        self.browsing_error = Some(format!("WebDAV: {e}"));
+                    }
+                }
+            }
+            "sftp" => {
+                let provider = SftpProvider::new(
+                    &conn.host,
+                    conn.port,
+                    &path,
+                    "ssh_user",
+                    conn.credential_ref.clone(),
+                    None,
+                    if self.network_host_key_input.is_empty() {
+                        None
+                    } else {
+                        Some(self.network_host_key_input.clone())
+                    },
+                    self.network_vault.clone(),
+                );
+                match provider.list_directory(&path) {
+                    Ok(entries) => {
+                        self.browsing_entries = entries;
+                        self.browsing_error = None;
+                    }
+                    Err(e) => {
+                        self.browsing_error = Some(format!("SFTP: {e}"));
+                    }
+                }
+            }
+            "smb" => {
+                let provider = SmbProvider::new(
+                    &conn.host,
+                    conn.port,
+                    "Media",
+                    &path,
+                    if conn.is_anonymous {
+                        None
+                    } else {
+                        Some("user".to_string())
+                    },
+                    None,
+                    conn.credential_ref.clone(),
+                    conn.is_anonymous,
+                    self.network_vault.clone(),
+                );
+                match provider.list_directory(&path) {
+                    Ok(entries) => {
+                        self.browsing_entries = entries;
+                        self.browsing_error = None;
+                    }
+                    Err(e) => {
+                        self.browsing_error = Some(format!("SMB: {e}"));
+                    }
+                }
+            }
+            _ => {
+                self.browsing_error = Some(format!("Unsupported protocol: {}", conn.protocol));
+            }
+        }
     }
 }

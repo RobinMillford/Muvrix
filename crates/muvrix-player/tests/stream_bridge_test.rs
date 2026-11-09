@@ -2,12 +2,12 @@
 
 use muvrix_player::{
     HttpRangeStream, IoSeekableStream, MemoryStream, MpvHandle, MpvStreamBridge,
-    PlaybackController, SeekMode, SeekableStream,
+    PlaybackController, ReadAheadStream, SeekMode, SeekableStream,
 };
-use std::io::{BufRead, BufReader, Cursor, Write};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -394,4 +394,358 @@ fn test_c_ffi_stream_callbacks_panic_and_error_handling() {
     std::panic::set_hook(prev_hook);
 
     let _ = handle.command(&["stop"]);
+}
+
+struct NonSeekableStream {
+    data: Vec<u8>,
+    pos: usize,
+    cancelled: bool,
+}
+
+impl SeekableStream for NonSeekableStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.cancelled {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Cancelled",
+            ));
+        }
+        if self.pos >= self.data.len() {
+            return Ok(0);
+        }
+        let available = &self.data[self.pos..];
+        let n = available.len().min(buf.len());
+        buf[..n].copy_from_slice(&available[..n]);
+        self.pos += n;
+        Ok(n)
+    }
+
+    fn seek(&mut self, _pos: u64) -> std::io::Result<u64> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Seeking unsupported on live stream",
+        ))
+    }
+
+    fn total_size(&self) -> Option<u64> {
+        None // Indeterminate stream length
+    }
+
+    fn cancel(&mut self) {
+        self.cancelled = true;
+    }
+}
+
+#[test]
+fn test_stream_bridge_concurrent_streams_and_independent_seeking() {
+    let bridge = MpvStreamBridge::new();
+    let data1 = b"Stream One Payload AAAAAAAAAA".to_vec();
+    let data2 = b"Stream Two Payload BBBBBBBBBB".to_vec();
+
+    let uri1 = bridge.register(MemoryStream::new(data1.clone()));
+    let uri2 = bridge.register(MemoryStream::new(data2.clone()));
+
+    assert_ne!(uri1, uri2);
+
+    let key1 = uri1.strip_prefix("muvrix-stream://").unwrap();
+    let key2 = uri2.strip_prefix("muvrix-stream://").unwrap();
+
+    let mut stream1 = bridge.registry().take(key1).expect("Take stream 1");
+    let mut stream2 = bridge.registry().take(key2).expect("Take stream 2");
+
+    assert_eq!(stream1.total_size(), Some(data1.len() as u64));
+    assert_eq!(stream2.total_size(), Some(data2.len() as u64));
+
+    // Seek stream 1 forward, leave stream 2 at 0
+    stream1.seek(11).unwrap();
+    let mut buf1 = [0u8; 7];
+    let n1 = stream1.read(&mut buf1).unwrap();
+    assert_eq!(n1, 7);
+    assert_eq!(&buf1, b"Payload");
+
+    // Stream 2 should still be at 0
+    let mut buf2 = [0u8; 10];
+    let n2 = stream2.read(&mut buf2).unwrap();
+    assert_eq!(n2, 10);
+    assert_eq!(&buf2, b"Stream Two");
+
+    // Independent seek on stream 2
+    stream2.seek(19).unwrap();
+    let mut buf3 = [0u8; 5];
+    let n3 = stream2.read(&mut buf3).unwrap();
+    assert_eq!(n3, 5);
+    assert_eq!(&buf3, b"BBBBB");
+}
+
+#[test]
+fn test_stream_bridge_unseekable_stream_and_cancellation() {
+    let mut stream = NonSeekableStream {
+        data: b"Live radio broadcast chunk 12345".to_vec(),
+        pos: 0,
+        cancelled: false,
+    };
+
+    assert_eq!(stream.total_size(), None);
+    assert!(stream.seek(10).is_err());
+
+    let mut buf = [0u8; 4];
+    let n = stream.read(&mut buf).unwrap();
+    assert_eq!(n, 4);
+    assert_eq!(&buf, b"Live");
+
+    // Cancel stream and verify subsequent read fails with Interrupted
+    stream.cancel();
+    let err = stream.read(&mut buf).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+}
+
+/// Mock instrumented stream tracking physical read and seek invocations.
+struct InstrumentedStream {
+    data: Vec<u8>,
+    pos: usize,
+    read_calls: usize,
+    seek_calls: usize,
+}
+
+impl SeekableStream for InstrumentedStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.read_calls += 1;
+        if self.pos >= self.data.len() {
+            return Ok(0);
+        }
+        let avail = &self.data[self.pos..];
+        let n = avail.len().min(buf.len());
+        buf[..n].copy_from_slice(&avail[..n]);
+        self.pos += n;
+        Ok(n)
+    }
+
+    fn seek(&mut self, position: u64) -> std::io::Result<u64> {
+        self.seek_calls += 1;
+        self.pos = position as usize;
+        Ok(position)
+    }
+
+    fn total_size(&self) -> Option<u64> {
+        Some(self.data.len() as u64)
+    }
+}
+
+#[test]
+fn test_read_ahead_stream_caching_and_seeking() {
+    let raw_payload: Vec<u8> = (0..256).map(|i| (i % 256) as u8).collect();
+    let mock = InstrumentedStream {
+        data: raw_payload,
+        pos: 0,
+        read_calls: 0,
+        seek_calls: 0,
+    };
+
+    // 64-byte bounded buffer capacity
+    let mut buffered = ReadAheadStream::with_capacity(mock, 64);
+    assert_eq!(buffered.total_size(), Some(256));
+
+    // 1. Read first 16 bytes: fills 64 bytes into buffer in 1 underlying read
+    let mut buf = [0u8; 16];
+    let n1 = buffered.read(&mut buf).unwrap();
+    assert_eq!(n1, 16);
+    assert_eq!(
+        &buf[..],
+        &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    );
+
+    // 2. Read next 16 bytes: served entirely from memory buffer (no extra underlying read)
+    let n2 = buffered.read(&mut buf).unwrap();
+    assert_eq!(n2, 16);
+    assert_eq!(
+        &buf[..],
+        &[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+    );
+
+    // 3. Seek backward within buffered window [0..64)
+    let pos = buffered.seek(8).unwrap();
+    assert_eq!(pos, 8);
+    let mut small_buf = [0u8; 4];
+    let n3 = buffered.read(&mut small_buf).unwrap();
+    assert_eq!(n3, 4);
+    assert_eq!(&small_buf, &[8, 9, 10, 11]);
+
+    // 4. Seek forward beyond buffered window
+    let pos2 = buffered.seek(100).unwrap();
+    assert_eq!(pos2, 100);
+    let mut jump_buf = [0u8; 4];
+    let n4 = buffered.read(&mut jump_buf).unwrap();
+    assert_eq!(n4, 4);
+    assert_eq!(&jump_buf, &[100, 101, 102, 103]);
+}
+
+#[test]
+fn test_http_range_stream_from_url_resolution() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("Bind test port");
+    let port = listener.local_addr().unwrap().port();
+
+    let payload = b"MUVRIX_URL_SEEKABLE_RANGE_PAYLOAD_TEST_DATA";
+    let server_bytes = payload.to_vec();
+
+    thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut buffer = [0u8; 1024];
+            if let Ok(n) = stream.read(&mut buffer) {
+                let req_str = String::from_utf8_lossy(&buffer[..n]);
+                if req_str.starts_with("HEAD") {
+                    let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                            server_bytes.len()
+                        );
+                    let _ = stream.write_all(resp.as_bytes());
+                } else if req_str.starts_with("GET") {
+                    if let Some(range_idx) = req_str.find("Range: bytes=") {
+                        let range_part = &req_str[range_idx + 13..];
+                        if let Some(end_idx) = range_part.find("\r\n") {
+                            let spec = &range_part[..end_idx];
+                            let parts: Vec<&str> = spec.split('-').collect();
+                            let start: usize = parts[0].trim().parse().unwrap_or(0);
+                            let end: usize = if parts.len() > 1 && !parts[1].trim().is_empty() {
+                                parts[1].trim().parse().unwrap_or(server_bytes.len() - 1)
+                            } else {
+                                server_bytes.len() - 1
+                            };
+                            let end = end.min(server_bytes.len() - 1);
+                            if start <= end && start < server_bytes.len() {
+                                let chunk = &server_bytes[start..=end];
+                                let resp = format!(
+                                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                                        start, end, server_bytes.len(), chunk.len()
+                                    );
+                                let _ = stream.write_all(resp.as_bytes());
+                                let _ = stream.write_all(chunk);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let full_url = format!("http://127.0.0.1:{}/media/test_stream.mp4", port);
+    let mut range_stream =
+        HttpRangeStream::from_url(&full_url, None).expect("Initialize HttpRangeStream::from_url");
+
+    assert_eq!(range_stream.total_size(), Some(payload.len() as u64));
+
+    // Seek to offset 7 ("URL_S")
+    range_stream.seek(7).unwrap();
+    let mut buf = [0u8; 5];
+    let n = range_stream.read(&mut buf).unwrap();
+    assert_eq!(n, 5);
+    assert_eq!(&buf, b"URL_S");
+}
+
+struct TrackedLifecycleStream {
+    data: Vec<u8>,
+    pos: usize,
+    drop_count: Arc<AtomicUsize>,
+}
+
+impl TrackedLifecycleStream {
+    fn new(data: Vec<u8>, drop_count: Arc<AtomicUsize>) -> Self {
+        Self {
+            data,
+            pos: 0,
+            drop_count,
+        }
+    }
+}
+
+impl Drop for TrackedLifecycleStream {
+    fn drop(&mut self) {
+        self.drop_count.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl SeekableStream for TrackedLifecycleStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.data.len() {
+            return Ok(0);
+        }
+        let avail = &self.data[self.pos..];
+        let n = avail.len().min(buf.len());
+        buf[..n].copy_from_slice(&avail[..n]);
+        self.pos += n;
+        Ok(n)
+    }
+
+    fn seek(&mut self, position: u64) -> std::io::Result<u64> {
+        if position as usize > self.data.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Seek beyond EOF",
+            ));
+        }
+        self.pos = position as usize;
+        Ok(position)
+    }
+
+    fn total_size(&self) -> Option<u64> {
+        Some(self.data.len() as u64)
+    }
+}
+
+#[test]
+fn test_stream_bridge_repeated_open_read_seek_close_lifecycle_regression() {
+    let bridge = MpvStreamBridge::new();
+    let drop_counter = Arc::new(AtomicUsize::new(0));
+    const ITERATIONS: usize = 50;
+
+    for i in 0..ITERATIONS {
+        let payload =
+            format!("STREAM_PAYLOAD_LIFECYCLE_ITERATION_{i}_DATA_BLOCK_PADDING").into_bytes();
+        let stream = TrackedLifecycleStream::new(payload.clone(), drop_counter.clone());
+        let buffered = ReadAheadStream::with_capacity(stream, 512);
+
+        let uri = bridge.register(buffered);
+        let key = uri.strip_prefix("muvrix-stream://").unwrap();
+
+        // 1. Emulate libmpv stream open via registry.take()
+        let mut active_stream = bridge
+            .registry()
+            .take(key)
+            .expect("Retrieve registered stream");
+        assert_eq!(active_stream.total_size(), Some(payload.len() as u64));
+
+        // 2. Read first chunk
+        let mut buf = [0u8; 14];
+        let n = active_stream.read(&mut buf).unwrap();
+        assert_eq!(n, 14);
+        assert_eq!(&buf, b"STREAM_PAYLOAD");
+
+        // 3. Seek forward and read
+        active_stream.seek(15).unwrap();
+        let mut buf2 = [0u8; 9];
+        let n2 = active_stream.read(&mut buf2).unwrap();
+        assert_eq!(n2, 9);
+        assert_eq!(&buf2, b"LIFECYCLE");
+
+        // 4. Seek backward within buffered window
+        active_stream.seek(0).unwrap();
+        let mut buf3 = [0u8; 6];
+        let n3 = active_stream.read(&mut buf3).unwrap();
+        assert_eq!(n3, 6);
+        assert_eq!(&buf3, b"STREAM");
+
+        // 5. Emulate stream close / teardown by explicitly dropping active_stream
+        drop(active_stream);
+
+        // Verify drop occurred
+        assert_eq!(drop_counter.load(Ordering::SeqCst), i + 1);
+    }
+
+    assert_eq!(drop_counter.load(Ordering::SeqCst), ITERATIONS);
+
+    // Verify registry is completely empty (no lingering handles)
+    let registry_map = bridge.registry();
+    for i in 1..=ITERATIONS {
+        let key = format!("stream-{i}");
+        assert!(registry_map.take(&key).is_none());
+    }
 }
