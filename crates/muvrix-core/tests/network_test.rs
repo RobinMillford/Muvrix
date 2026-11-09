@@ -116,6 +116,20 @@ fn test_http_range_and_webdav_streaming_simulation() {
                         line.clear();
                     }
 
+                    // Consume the request body (e.g. PROPFIND's XML payload)
+                    // before responding. Closing a socket with unread received
+                    // bytes makes Windows send a RST instead of FIN, aborting
+                    // the response before the client can read it (10053).
+                    if let Some(content_length) = headers.iter().find_map(|h| {
+                        let lower = h.to_ascii_lowercase();
+                        lower
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    }) {
+                        let mut body = vec![0u8; content_length];
+                        let _ = reader.read_exact(&mut body);
+                    }
+
                     // Check for Authorization
                     let has_auth = headers
                         .iter()

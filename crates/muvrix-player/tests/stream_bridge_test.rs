@@ -214,15 +214,26 @@ fn test_webdav_range_server_and_mpv_stream_playback() {
                     }
 
                     let mut range_header = None;
+                    let mut content_length: usize = 0;
                     let mut line = String::new();
                     while let Ok(n) = reader.read_line(&mut line) {
                         if n == 0 || line.trim().is_empty() {
                             break;
                         }
-                        if line.to_lowercase().starts_with("range:") {
+                        let lower = line.to_ascii_lowercase();
+                        if lower.starts_with("range:") {
                             range_header = Some(line.trim().to_string());
+                        } else if let Some(v) = lower.strip_prefix("content-length:") {
+                            content_length = v.trim().parse::<usize>().unwrap_or(0);
                         }
                         line.clear();
+                    }
+
+                    // Consume any request body before responding; closing with
+                    // unread received bytes aborts the response on Windows/macOS.
+                    if content_length > 0 {
+                        let mut body = vec![0u8; content_length];
+                        let _ = reader.read_exact(&mut body);
                     }
 
                     if req_line.starts_with("HEAD") {
