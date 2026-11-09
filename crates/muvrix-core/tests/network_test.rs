@@ -673,6 +673,36 @@ fn test_sftp_fingerprint_generation_and_padding_tolerance() {
     assert!(provider.verify_host_key(&tampered).is_err());
 }
 
+/// Polls the sshd port until it accepts connections (or the deadline passes).
+/// A fixed sleep races slow/loaded CI runners where sshd hasn't bound yet,
+/// surfacing later as "Connection refused" during the first probe.
+fn wait_for_sshd_port(port: u16, child: &mut std::process::Child) -> bool {
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(status) = child.try_wait() {
+            if status.is_some() {
+                return false;
+            }
+        }
+        if TcpStream::connect_timeout(
+            &format!("127.0.0.1:{port}")
+                .parse()
+                .expect("parse localhost addr"),
+            Duration::from_millis(200),
+        )
+        .is_ok()
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn test_sftp_real_openssh_tofu_approval_and_rejection_lifecycle() {
     let sshd_path = if std::path::Path::new("/usr/sbin/sshd").exists() {
@@ -743,7 +773,13 @@ fn test_sftp_real_openssh_tofu_approval_and_rejection_lifecycle() {
         .spawn()
         .expect("Spawn ephemeral sshd");
 
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    if !wait_for_sshd_port(port, &mut sshd_proc) {
+        let log = std::fs::read_to_string(temp_dir.join("sshd1.log")).unwrap_or_default();
+        panic!(
+            "sshd did not start listening on port {port} within 5s (log: {})",
+            log
+        );
+    }
 
     let db_path = temp_dir.join("test_ssh_trust.db");
     let db = muvrix_core::database::DatabaseManager::open(&db_path).expect("Open SQLite DB");
@@ -843,7 +879,13 @@ fn test_sftp_real_openssh_tofu_approval_and_rejection_lifecycle() {
         .spawn()
         .expect("Spawn tampered sshd");
 
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    if !wait_for_sshd_port(port, &mut sshd_proc2) {
+        let log = std::fs::read_to_string(temp_dir.join("sshd2.log")).unwrap_or_default();
+        panic!(
+            "tampered sshd did not start listening on port {port} within 5s (log: {})",
+            log
+        );
+    }
 
     let mitm_err = provider_reopened.test_connection().unwrap_err();
     match mitm_err {
