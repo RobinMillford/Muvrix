@@ -1,0 +1,97 @@
+{
+  "version": "4.0.1",
+  "author": "bloc97",
+  "license": "MIT",
+  "qualities": [
+    { "id": "S", "label": "Fast (S)", "description": "Optimized for lower-power GPUs and integrated graphics" },
+    { "id": "M", "label": "Balanced (M)", "description": "Optimal balance of visual fidelity and rendering latency" },
+    { "id": "L", "label": "High Quality (L)", "description": "Maximum CNN depth for discrete GPUs" }
+  ],
+  "modes": [
+    {
+      "id": "mode_a",
+      "label": "Mode A (Sharp Line Restoration & Upscale)",
+      "description": "Restores blurry line-art and upscales by 4x via dual 2x CNN passes with highlight de-ringing and auto-downscale; 5 unique shaders",
+      "shader_count": 5,
+      "scaling_factor": "4x",
+      "shaders": [
+        "Anime4K_Clamp_Highlights.glsl",
+        "Anime4K_Restore_CNN_{Q}.glsl",
+        "Anime4K_Upscale_CNN_x2_{Q}.glsl",
+        "Anime4K_AutoDownscalePre_x2.glsl",
+        "Anime4K_Upscale_CNN_x2_Pass2_{Q}.glsl"
+      ]
+    },
+    {
+      "id": "mode_b",
+      "label": "Mode B (Soft Line Restoration & Upscale)",
+      "description": "Softer line reconstruction with dual 2x CNN upscaling reaching 4x total scaling; 5 unique shaders",
+      "shader_count": 5,
+      "scaling_factor": "4x",
+      "shaders": [
+        "Anime4K_Clamp_Highlights.glsl",
+        "Anime4K_Restore_CNN_Soft_{Q}.glsl",
+        "Anime4K_Upscale_CNN_x2_{Q}.glsl",
+        "Anime4K_AutoDownscalePre_x2.glsl",
+        "Anime4K_Upscale_CNN_x2_Pass2_{Q}.glsl"
+      ]
+    },
+    {
+      "id": "mode_c",
+      "label": "Mode C (Denoise & Upscale)",
+      "description": "Suppresses compression artifacts and noise before dual 2x upscaling reaching 4x total scaling; 4 unique shaders",
+      "shader_count": 4,
+      "scaling_factor": "4x",
+      "shaders": [
+        "Anime4K_Clamp_Highlights.glsl",
+        "Anime4K_Upscale_Denoise_CNN_x2_{Q}.glsl",
+        "Anime4K_AutoDownscalePre_x2.glsl",
+        "Anime4K_Upscale_CNN_x2_{Q}.glsl"
+      ]
+    },
+    {
+      "id": "mode_aa",
+      "label": "Mode A+A (Deep Restoration)",
+      "description": "Two sequential passes of line restoration and upscaling reaching 4x total scaling with unique pass-2 assets; 6 unique shaders",
+      "shader_count": 6,
+      "scaling_factor": "4x",
+      "shaders": [
+        "Anime4K_Clamp_Highlights.glsl",
+        "Anime4K_Restore_CNN_{Q}.glsl",
+        "Anime4K_Upscale_CNN_x2_{Q}.glsl",
+        "Anime4K_AutoDownscalePre_x2.glsl",
+        "Anime4K_Restore_CNN_Pass2_{Q}.glsl",
+        "Anime4K_Upscale_CNN_x2_Pass2_{Q}.glsl"
+      ]
+    },
+    {
+      "id": "mode_bb",
+      "label": "Mode B+B (Soft Deep Restoration)",
+      "description": "Two passes of soft line reconstruction and upscaling reaching 4x total scaling with unique pass-2 assets; 6 unique shaders",
+      "shader_count": 6,
+      "scaling_factor": "4x",
+      "shaders": [
+        "Anime4K_Clamp_Highlights.glsl",
+        "Anime4K_Restore_CNN_Soft_{Q}.glsl",
+        "Anime4K_Upscale_CNN_x2_{Q}.glsl",
+        "Anime4K_AutoDownscalePre_x2.glsl",
+        "Anime4K_Restore_CNN_Soft_Pass2_{Q}.glsl",
+        "Anime4K_Upscale_CNN_x2_Pass2_{Q}.glsl"
+      ]
+    },
+    {
+      "id": "mode_ca",
+      "label": "Mode C+A (Denoise + Restoration)",
+      "description": "Denoises first pass, then applies line reconstruction on upscaled frame reaching 4x total scaling; 5 unique shaders",
+      "shader_count": 5,
+      "scaling_factor": "4x",
+      "shaders": [
+        "Anime4K_Clamp_Highlights.glsl",
+        "Anime4K_Upscale_Denoise_CNN_x2_{Q}.glsl",
+        "Anime4K_AutoDownscalePre_x2.glsl",
+        "Anime4K_Restore_CNN_{Q}.glsl",
+        "Anime4K_Upscale_CNN_x2_{Q}.glsl"
+      ]
+    }
+  ]
+}

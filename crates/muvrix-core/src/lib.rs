@@ -26,7 +26,8 @@ pub use metadata::{
 };
 pub use network::{
     redact_credentials_from_url, CredentialVault, MockNetworkProvider, NetworkError,
-    NetworkProvider, NetworkResult, RemoteFileEntry, SftpProvider, SmbProvider, WebDavProvider,
+    NetworkProvider, NetworkResult, PresentedHostKey, RemoteFileEntry, SftpProvider, SmbProvider,
+    WebDavProvider,
 };
 pub use path::{
     expand_tilde, find_project_root, is_streaming_url, resolve_media_path, resolve_preset,

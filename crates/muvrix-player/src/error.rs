@@ -72,6 +72,9 @@ pub enum MpvError {
     #[error("API version incompatibility: required {required}, runtime found {found}")]
     IncompatibleApiVersion { required: String, found: String },
 
+    #[error("Security violation: {0}")]
+    SecurityViolation(String),
+
     #[error("Mpv error ({code}): {description}")]
     Raw { code: i32, description: String },
 }

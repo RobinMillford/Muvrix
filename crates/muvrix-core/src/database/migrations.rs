@@ -3,7 +3,7 @@
 use rusqlite::{Connection, Result, Transaction};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const LATEST_SCHEMA_VERSION: u32 = 2;
+pub const LATEST_SCHEMA_VERSION: u32 = 3;
 
 /// Apply all pending database migrations within a transaction.
 pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
@@ -36,6 +36,13 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
         let tx = conn.transaction()?;
         migration_002_user_bookmarks(&tx)?;
         record_migration(&tx, 2, "User bookmarks schema with foreign key cascade")?;
+        tx.commit()?;
+    }
+
+    if current_version < 3 {
+        let tx = conn.transaction()?;
+        migration_003_ssh_host_trust(&tx)?;
+        record_migration(&tx, 3, "Persistent SSH host key trust store")?;
         tx.commit()?;
     }
 
@@ -229,6 +236,28 @@ fn migration_002_user_bookmarks(tx: &Transaction) -> Result<()> {
 
         CREATE INDEX idx_user_bookmarks_media_id ON user_bookmarks(media_id);
         CREATE INDEX idx_user_bookmarks_timestamp ON user_bookmarks(media_id, timestamp_ms);
+        ",
+    )?;
+
+    Ok(())
+}
+
+fn migration_003_ssh_host_trust(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
+        "
+        CREATE TABLE ssh_host_trust (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            host TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            key_algorithm TEXT NOT NULL,
+            fingerprint_sha256 TEXT NOT NULL,
+            trusted_at INTEGER NOT NULL,
+            last_seen_at INTEGER NOT NULL,
+            notes TEXT,
+            UNIQUE(host, port)
+        );
+
+        CREATE INDEX idx_ssh_host_trust_lookup ON ssh_host_trust(host, port);
         ",
     )?;
 

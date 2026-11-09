@@ -349,3 +349,23 @@ impl Bookmark {
         self.timestamp_ms as f64 / 1000.0
     }
 }
+
+/// Persistent SSH host-fingerprint trust record for MITM protection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshHostTrustRecord {
+    pub id: i64,
+    pub host: String, // Normalized lowercase hostname or IP
+    pub port: u16,
+    pub key_algorithm: String,      // e.g. "ssh-ed25519", "rsa-sha2-512"
+    pub fingerprint_sha256: String, // OpenSSH format: "SHA256:<base64-unpadded>"
+    pub trusted_at: i64,            // Unix epoch seconds
+    pub last_seen_at: i64,          // Unix epoch seconds
+    pub notes: Option<String>,
+}
+
+impl SshHostTrustRecord {
+    /// Normalizes host strings for consistent scoping.
+    pub fn normalize_host(host: &str) -> String {
+        host.trim().to_ascii_lowercase()
+    }
+}

@@ -157,15 +157,27 @@ fn test_video_adjustment_defaults_and_presets() {
     assert_eq!(settings.hue, 0);
     assert_eq!(settings.sharpen, 0.0);
     assert!(!settings.deband);
+    assert_eq!(settings.aspect_ratio, "auto");
+    assert_eq!(settings.zoom, 0.0);
+    assert_eq!(settings.pan_x, 0.0);
+    assert_eq!(settings.pan_y, 0.0);
+    assert_eq!(settings.rotate, 0);
 
     settings.brightness = 15;
     settings.contrast = -10;
     settings.deband = true;
+    settings.aspect_ratio = "16:9".to_string();
+    settings.zoom = 1.25;
     assert_eq!(settings.brightness, 15);
     assert!(settings.deband);
+    assert_eq!(settings.aspect_ratio, "16:9");
 
     let anime_preset = Anime4KPreset::ModeA;
-    assert_eq!(anime_preset.as_str(), "Mode A (Sharp Upscale)");
+    assert_eq!(
+        anime_preset.as_str(),
+        "Mode A (Sharp Line Restoration & Upscale)"
+    );
+    assert_eq!(anime_preset.short_name(), "Mode A");
 }
 
 #[test]
@@ -175,12 +187,27 @@ fn test_equalizer_settings_and_presets() {
     assert_eq!(eq.preamp_db, 0.0);
     assert_eq!(eq.gains, [0.0; 10]);
     assert_eq!(eq.active_preset, EqualizerPreset::Flat);
+    assert_eq!(eq.audio_delay, 0.0);
+    assert_eq!(eq.channel_layout, "auto");
+    assert!(!eq.has_clipping_risk());
 
     let rock_gains = EqualizerPreset::Rock.default_gains();
     eq.gains = rock_gains;
     eq.active_preset = EqualizerPreset::Rock;
     assert_eq!(eq.gains[0], 4.0); // 31.25Hz
     assert_eq!(eq.active_preset.as_str(), "Rock");
+
+    let cinema_gains = EqualizerPreset::Cinema.default_gains();
+    eq.gains = cinema_gains;
+    eq.active_preset = EqualizerPreset::Cinema;
+    assert_eq!(eq.active_preset.as_str(), "Cinema");
+
+    // Headroom safety calculation
+    eq.gains = [6.0; 10];
+    eq.sync_gains_to_bands();
+    eq.preamp_db = 0.0;
+    assert!(eq.has_clipping_risk());
+    assert!(eq.calculate_safe_preamp() <= -6.0);
 
     assert_eq!(EQ_FREQUENCIES.len(), 10);
     assert_eq!(EQ_FREQUENCIES[0], 31.25);

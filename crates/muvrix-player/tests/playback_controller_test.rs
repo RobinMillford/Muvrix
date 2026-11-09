@@ -540,6 +540,26 @@ fn test_controller_volume_and_speed_adjustments() {
 }
 
 #[test]
+fn test_controller_volume_boost_up_to_150_percent() {
+    let mut controller = create_test_controller();
+    assert_eq!(controller.volume_boost_max(), 100.0);
+
+    // Enable 150% volume boost
+    controller
+        .set_volume_boost(150.0)
+        .expect("Enable 150% boost");
+    assert_eq!(controller.volume_boost_max(), 150.0);
+
+    // Can set volume to 140%
+    controller.set_volume(140.0).expect("Set volume to 140%");
+    assert_eq!(controller.volume(), 140.0);
+
+    // Adjusting beyond 150 clamps at 150%
+    controller.adjust_volume(20.0).expect("Adjust +20");
+    assert_eq!(controller.volume(), 150.0);
+}
+
+#[test]
 fn test_controller_chapter_and_relative_seek() {
     let path = find_media_path("tests/fixtures/test_video.mp4");
     let mut controller = create_test_controller();

@@ -89,7 +89,52 @@ pub struct EngineCapabilities {
     pub ffmpeg_version: String,
 }
 
+/// Detailed multimedia, GPU, and DSP capabilities of the running libmpv engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaCapabilities {
+    pub libmpv_version: String,
+    pub client_api_version: u32,
+    pub ffmpeg_version: String,
+    pub shader_support: bool,
+    pub gpu_next_available: bool,
+    pub libplacebo_available: bool,
+    pub hdr_metadata_available: bool,
+    pub tone_mapping_available: bool,
+    pub audio_device_enumeration: bool,
+    pub audio_filter_support: bool,
+}
+
 impl MpvHandle {
+    /// Detects detailed media enhancement, audio DSP, and GPU shader capabilities.
+    pub fn detect_media_capabilities(&self) -> MediaCapabilities {
+        let api_version = ApiVersion::current();
+        let mpv_version = self
+            .get_property_string("mpv-version")
+            .unwrap_or_else(|_| String::from("unknown"));
+        let ffmpeg_version = self
+            .get_property_string("ffmpeg-version")
+            .unwrap_or_else(|_| String::from("unknown"));
+
+        let shader_support = self.get_property_string("glsl-shaders").is_ok();
+        let tone_mapping_available = self.get_property_string("tone-mapping").is_ok();
+        let audio_device_enumeration = self.get_property_string("audio-device-list").is_ok();
+        let audio_filter_support = self.get_property_string("af").is_ok();
+        let libplacebo_available = tone_mapping_available || mpv_version.contains("libplacebo");
+        let gpu_next_available = libplacebo_available;
+
+        MediaCapabilities {
+            libmpv_version: mpv_version,
+            client_api_version: api_version.major,
+            ffmpeg_version,
+            shader_support,
+            gpu_next_available,
+            libplacebo_available,
+            hdr_metadata_available: true,
+            tone_mapping_available,
+            audio_device_enumeration,
+            audio_filter_support,
+        }
+    }
     /// Gathers static and runtime capabilities of the linked libmpv engine and platform.
     pub fn detect_engine_capabilities(&self) -> EngineCapabilities {
         let platform = PlatformInfo::detect();

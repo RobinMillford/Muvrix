@@ -9,6 +9,80 @@ fn test_database_initialization_and_schema_version() {
 }
 
 #[test]
+fn test_ssh_host_trust_crud_and_port_isolation() {
+    let db = DatabaseManager::open_in_memory().expect("In-memory DB open");
+
+    // 1. Initially no trust records
+    assert!(db
+        .get_ssh_host_trust("sftp.example.com", 22)
+        .unwrap()
+        .is_none());
+
+    // 2. Record trust for host on port 22
+    let record1 = db
+        .record_ssh_host_trust(
+            "sftp.example.com",
+            22,
+            "ssh-ed25519",
+            "SHA256:abcd1234efgh5678ijkl9012mnop3456qrst7890uvw",
+            Some("Production SFTP server"),
+        )
+        .expect("Record host trust");
+    assert_eq!(record1.host, "sftp.example.com");
+    assert_eq!(record1.port, 22);
+    assert_eq!(record1.key_algorithm, "ssh-ed25519");
+
+    // 3. Normalized case lookup (SFTP.EXAMPLE.COM should match sftp.example.com)
+    let fetched = db
+        .get_ssh_host_trust("SFTP.EXAMPLE.COM", 22)
+        .expect("Get trust")
+        .expect("Record should exist");
+    assert_eq!(fetched.fingerprint_sha256, record1.fingerprint_sha256);
+
+    // 4. Port isolation: same hostname on port 2222 should NOT match port 22
+    assert!(db
+        .get_ssh_host_trust("sftp.example.com", 2222)
+        .unwrap()
+        .is_none());
+
+    // 5. Record trust for same host on port 2222 with different key
+    let _record2 = db
+        .record_ssh_host_trust(
+            "sftp.example.com",
+            2222,
+            "ssh-ed25519",
+            "SHA256:DIFF9999KEY000000000000000000000000000000",
+            Some("Staging SFTP server"),
+        )
+        .expect("Record host trust for port 2222");
+
+    let list = db.list_ssh_host_trust().expect("List host trust");
+    assert_eq!(list.len(), 2);
+
+    // 6. Update last seen timestamp
+    let updated = db
+        .update_ssh_host_last_seen("sftp.example.com", 22)
+        .expect("Update last seen");
+    assert!(updated);
+
+    // 7. Revoke trust
+    let revoked = db
+        .revoke_ssh_host_trust("sftp.example.com", 22)
+        .expect("Revoke trust");
+    assert!(revoked);
+    assert!(db
+        .get_ssh_host_trust("sftp.example.com", 22)
+        .unwrap()
+        .is_none());
+
+    // Port 2222 should still be trusted
+    assert!(db
+        .get_ssh_host_trust("sftp.example.com", 2222)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
 fn test_library_root_crud() {
     let db = DatabaseManager::open_in_memory().expect("DB open");
     let root = LibraryRoot {
@@ -804,4 +878,122 @@ fn test_user_bookmarks_crud_and_foreign_key_cascade() {
         "Media item B bookmarks must remain untouched when media item A is deleted"
     );
     assert_eq!(post_delete_b[0].id, bm_b1);
+}
+
+#[test]
+fn test_database_migration_from_phase_1_1_preserves_bookmarks_and_adds_ssh_trust() {
+    let temp_dir = std::env::temp_dir();
+    let db_path = temp_dir.join(format!(
+        "muvrix_migration_test_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+
+    // 1. Manually build a genuine Phase 1.1 database (Schema version 2)
+    {
+        let conn = rusqlite::Connection::open(&db_path).expect("Open raw sqlite");
+        conn.execute_batch(
+            "
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at INTEGER NOT NULL,
+                description TEXT NOT NULL
+            );
+            INSERT INTO schema_migrations (version, applied_at, description)
+            VALUES (1, 1700000000, 'Initial core schema'),
+                   (2, 1700000100, 'User bookmarks schema');
+
+            CREATE TABLE library_roots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_name TEXT NOT NULL,
+                root_path TEXT NOT NULL UNIQUE,
+                source_type TEXT NOT NULL DEFAULT 'local',
+                is_recursive INTEGER NOT NULL DEFAULT 1,
+                is_enabled INTEGER NOT NULL DEFAULT 1,
+                exclusion_patterns TEXT NOT NULL DEFAULT '[]',
+                last_scanned_at INTEGER NOT NULL DEFAULT 0,
+                scan_status TEXT NOT NULL DEFAULT 'idle'
+            );
+
+            CREATE TABLE media_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                root_id INTEGER NOT NULL REFERENCES library_roots(id) ON DELETE CASCADE,
+                relative_path TEXT NOT NULL,
+                canonical_path TEXT NOT NULL UNIQUE,
+                file_name TEXT NOT NULL,
+                file_extension TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                modified_time INTEGER NOT NULL,
+                added_time INTEGER NOT NULL,
+                duration_seconds REAL,
+                is_available INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE user_bookmarks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                media_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+                timestamp_ms INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                note TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            INSERT INTO library_roots (id, display_name, root_path)
+            VALUES (1, 'Archive', '/media/archive');
+
+            INSERT INTO media_items (id, root_id, relative_path, canonical_path, file_name, file_extension, media_type, file_size, modified_time, added_time)
+            VALUES (1, 1, 'video.mp4', '/media/archive/video.mp4', 'video.mp4', 'mp4', 'video', 1048576, 1700000000, 1700000000);
+
+            INSERT INTO user_bookmarks (id, media_id, timestamp_ms, label, note, created_at, updated_at)
+            VALUES (101, 1, 125500, 'Phase 1.1 Bookmark', 'Key intro scene', 1700000200, 1700000200);
+            ",
+        ).expect("Create Phase 1.1 DB");
+    }
+
+    // 2. Open via DatabaseManager::open, which runs apply_migrations()
+    let db = DatabaseManager::open(&db_path).expect("Open via DatabaseManager");
+    assert!(db.check_integrity().expect("Integrity check"));
+
+    // 3. Verify schema upgraded from 2 to 3
+    let version = db.get_schema_version().expect("Get schema version");
+    assert_eq!(
+        version, 3,
+        "Database must successfully upgrade to Schema Version 3"
+    );
+
+    // 4. Verify existing Phase 1.1 bookmarks are preserved intact
+    let bookmarks = db.list_bookmarks_for_media(1).expect("Query bookmarks");
+    assert_eq!(bookmarks.len(), 1);
+    assert_eq!(bookmarks[0].id, 101);
+    assert_eq!(bookmarks[0].label, "Phase 1.1 Bookmark");
+    assert_eq!(bookmarks[0].timestamp_seconds(), 125.5);
+
+    // 5. Verify new migration 003 table (ssh_host_trust) is fully operational
+    let trust = db
+        .record_ssh_host_trust(
+            "sftp.legacy-migrated.com",
+            22,
+            "ssh-ed25519",
+            "SHA256:MIGRATED000000000000000000000000000000000",
+            Some("Migrated server"),
+        )
+        .expect("Record trust in upgraded DB");
+    assert_eq!(trust.host, "sftp.legacy-migrated.com");
+
+    let queried = db
+        .get_ssh_host_trust("sftp.legacy-migrated.com", 22)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        queried.fingerprint_sha256,
+        "SHA256:MIGRATED000000000000000000000000000000000"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
 }

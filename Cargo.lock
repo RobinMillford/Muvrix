@@ -2227,6 +2227,7 @@ dependencies = [
  "muvrix-core",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "smb2",
  "ssh2",
  "tempfile",
