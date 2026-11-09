@@ -237,21 +237,43 @@ fn test_http_range_and_webdav_streaming_simulation() {
     let send_request = |req: &str| -> (String, Vec<u8>) {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("Connect to mock server");
         stream.write_all(req.as_bytes()).expect("Write request");
-        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        // Half-close write side (best-effort): on macOS the server may close
+        // the connection with a RST after responding, surfacing as ENOTCONN
+        // (57) on shutdown or ConnectionReset (54) while reading. Both mean
+        // "peer gone" and are benign since headers/body are already buffered.
+        let _ = stream.shutdown(std::net::Shutdown::Write);
 
         let mut reader = BufReader::new(stream);
         let mut header_text = String::new();
         let mut line = String::new();
-        while reader.read_line(&mut line).unwrap() > 0 {
-            header_text.push_str(&line);
-            if line == "\r\n" || line == "\n" {
-                break;
+        loop {
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    header_text.push_str(&line);
+                    if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ConnectionReset
+                        || e.kind() == std::io::ErrorKind::NotConnected =>
+                {
+                    break;
+                }
+                Err(e) => panic!("read_line: {e}"),
             }
-            line.clear();
         }
 
         let mut body = Vec::new();
-        reader.read_to_end(&mut body).expect("Read body");
+        match reader.read_to_end(&mut body) {
+            Ok(_) => {}
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ConnectionReset
+                    || e.kind() == std::io::ErrorKind::NotConnected => {}
+            Err(e) => panic!("Read body: {e}"),
+        }
         (header_text, body)
     };
 

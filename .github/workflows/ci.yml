@@ -9,6 +9,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Force OS keyring bypass in CI. On macOS runners, Security.framework calls
+  # can block indefinitely waiting for a keychain unlock prompt that no one
+  # can answer in a headless environment, hanging every test that stores
+  # credentials. The in-memory vault remains fully functional.
+  MUVRIX_DISABLE_KEYRING: "1"
 
 jobs:
   # =========================================================================
@@ -36,6 +41,10 @@ jobs:
             libxkbcommon-dev \
             libwayland-dev \
             libgl1-mesa-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            libssh2-1-dev \
+            zlib1g-dev \
             pkg-config
 
       - name: Verify libmpv pkg-config
@@ -81,7 +90,11 @@ jobs:
             mesa-libGL-devel \
             libX11-devel \
             libxkbcommon-devel \
-            wayland-devel
+            wayland-devel \
+            dbus-devel \
+            openssl-devel \
+            libssh2-devel \
+            zlib-devel
 
       - name: Checkout repository
         uses: actions/checkout@v4
