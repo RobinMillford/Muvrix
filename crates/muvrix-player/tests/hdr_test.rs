@@ -6,7 +6,9 @@ use muvrix_player::shader::{
     GamutMappingMode, ShaderManager, TargetPrimaries, TargetTrc, ToneMappingAlgorithm,
     VideoAdjustmentSettings,
 };
+use muvrix_player::Event;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 fn get_fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -23,10 +25,48 @@ fn create_mpv_player(vo: &str) -> MpvHandle {
     handle
 }
 
+/// Waits for `Event::FileLoaded` plus populated `video-params/*` metadata.
+/// A fixed sleep races on slow/headless runners (notably macOS paravirt,
+/// where `vo=gpu` fails and properties stay `PropertyUnavailable`).
+fn wait_for_video_params(handle: &MpvHandle, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let mut file_loaded = false;
+    while Instant::now() < deadline && !file_loaded {
+        match handle.wait_event(0.1) {
+            Event::FileLoaded => file_loaded = true,
+            Event::EndFile {
+                error: Some(err), ..
+            } => panic!("File ended prematurely with error: {err:?}"),
+            _ => {}
+        }
+    }
+    assert!(
+        file_loaded,
+        "Event::FileLoaded not received within {timeout:?}"
+    );
+
+    let params_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let primaries = handle
+            .get_property_string("video-params/primaries")
+            .unwrap_or_default();
+        if !primaries.is_empty() || Instant::now() >= params_deadline {
+            assert!(
+                !primaries.is_empty(),
+                "video-params/primaries still unavailable after FileLoaded; property readback would fail"
+            );
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn test_hdr10_pq_metadata_detection_and_tone_mapping() {
     let fixture = get_fixture_path("hdr10_pq_bt2020.mp4");
-    let handle = create_mpv_player("gpu");
+    // vo=null: metadata detection does not need a real GPU; vo=gpu fails on
+    // headless runners (e.g. macOS paravirt AppleM2ScalerParavirtDriver).
+    let handle = create_mpv_player("null");
 
     // Configure HDR-to-SDR tone-mapping pipeline via libplacebo
     let settings = VideoAdjustmentSettings {
@@ -45,7 +85,7 @@ fn test_hdr10_pq_metadata_detection_and_tone_mapping() {
         .expect("Load HDR10 fixture");
 
     // Wait for stream demuxing and header decoding
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    wait_for_video_params(&handle, Duration::from_secs(5));
 
     // Verify HDR metadata readback from libmpv
     let primaries = handle
@@ -104,7 +144,7 @@ fn test_hdr10_pq_metadata_detection_and_tone_mapping() {
 #[test]
 fn test_hdr_hlg_metadata_detection_and_tone_mapping() {
     let fixture = get_fixture_path("hdr_hlg_bt2020.mp4");
-    let handle = create_mpv_player("gpu");
+    let handle = create_mpv_player("null");
 
     // Configure HLG-to-SDR tone-mapping
     let settings = VideoAdjustmentSettings {
@@ -122,7 +162,7 @@ fn test_hdr_hlg_metadata_detection_and_tone_mapping() {
         .command(&["loadfile", fixture.to_str().unwrap()])
         .expect("Load HLG fixture");
 
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    wait_for_video_params(&handle, Duration::from_secs(5));
 
     // Verify HLG metadata readback
     let primaries = handle
