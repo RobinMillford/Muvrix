@@ -310,10 +310,15 @@ fn test_live_secret_service_native_methods() {
 
     let vault = CredentialVault::new();
 
-    // 1. Store via explicit native method
-    vault
-        .store_native(&test_uuid, secret)
-        .expect("Explicit store_native to native keyring");
+    // 1. Store via explicit native method (skip gracefully when the
+    // Secret Service daemon is unavailable, matching the CRUD test above)
+    match vault.store_native(&test_uuid, secret) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("Secret Service not accessible in this environment: {e}; skipping");
+            return;
+        }
+    }
 
     // 2. Retrieve via explicit native method
     let retrieved = vault
@@ -351,12 +356,16 @@ fn test_live_secret_service_restart_lifecycle() {
     let secret_v1 = "InitialSecretAfterReboot_111";
     let secret_v2 = "UpdatedSecretAfterReboot_222";
 
-    // Session 1: Store secret
+    // Session 1: Store secret (skip gracefully when no Secret Service)
     {
         let vault_session1 = CredentialVault::new();
-        vault_session1
-            .store_native(&test_uuid, secret_v1)
-            .expect("Session 1 store_native");
+        match vault_session1.store_native(&test_uuid, secret_v1) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Secret Service not accessible in this environment: {e}; skipping");
+                return;
+            }
+        }
         assert_eq!(vault_session1.get(&test_uuid).as_deref(), Some(secret_v1));
     } // vault_session1 dropped, in-memory cache gone
 
