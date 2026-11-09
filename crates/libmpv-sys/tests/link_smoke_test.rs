@@ -49,7 +49,7 @@ fn test_native_symbol_link_and_invocation() {
                 nSize: u32,
             ) -> u32;
         }
-        let h_mod = GetModuleHandleA(b"libmpv-2.dll\0".as_ptr() as *const _);
+        let h_mod = GetModuleHandleA(c"libmpv-2.dll".as_ptr());
         if !h_mod.is_null() {
             let mut buf = [0u8; 1024];
             let len = GetModuleFileNameA(h_mod, buf.as_mut_ptr() as *mut _, buf.len() as u32);
