@@ -75,6 +75,7 @@ fn wait_for_video_params(handle: &MpvHandle, timeout: Duration) -> bool {
 }
 
 #[test]
+#[ignore = "Requires GPU-backed vo=gpu/libplacebo (video-params); no GPU (/dev/dri / paravirt driver) in headless CI containers. Run on GPU hardware with: cargo test -p muvrix-player --test hdr_test -- --ignored --nocapture"]
 fn test_hdr10_pq_metadata_detection_and_tone_mapping() {
     let fixture = get_fixture_path("hdr10_pq_bt2020.mp4");
     let handle = create_mpv_player(default_vo());
@@ -157,6 +158,7 @@ fn test_hdr10_pq_metadata_detection_and_tone_mapping() {
 }
 
 #[test]
+#[ignore = "Requires GPU-backed vo=gpu/libplacebo (video-params); no GPU (/dev/dri / paravirt driver) in headless CI containers. Run on GPU hardware with: cargo test -p muvrix-player --test hdr_test -- --ignored --nocapture"]
 fn test_hdr_hlg_metadata_detection_and_tone_mapping() {
     let fixture = get_fixture_path("hdr_hlg_bt2020.mp4");
     let handle = create_mpv_player(default_vo());

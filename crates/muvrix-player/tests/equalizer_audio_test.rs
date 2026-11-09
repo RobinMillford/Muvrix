@@ -57,6 +57,9 @@ fn test_parametric_equalizer_q_factor_and_filter_formatting() {
 }
 
 fn goertzel_magnitude(samples: &[f64], target_freq: f64, sample_rate: f64) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
     let omega = 2.0 * std::f64::consts::PI * target_freq / sample_rate;
     let coeff = 2.0 * omega.cos();
     let mut s1 = 0.0;
@@ -67,7 +70,29 @@ fn goertzel_magnitude(samples: &[f64], target_freq: f64, sample_rate: f64) -> f6
         s1 = s0;
     }
     let power = s1 * s1 + s2 * s2 - coeff * s1 * s2;
-    power.sqrt() / (samples.len() as f64)
+    power.max(0.0).sqrt() / (samples.len() as f64)
+}
+
+/// Computes 20*log10(num/den) after explicitly validating both magnitudes.
+/// Silent/empty captures (e.g. a PCM file that exists but holds no samples)
+/// have magnitude exactly 0, which would otherwise produce NaN/-inf and mask
+/// the real failure. Genuine missing-signal captures must fail loudly with
+/// the capture sizes in the message, never as NaN dB.
+fn magnitude_ratio_db(numerator: f64, denominator: f64, context: &str) -> f64 {
+    const MIN_MAGNITUDE: f64 = 1e-12;
+    assert!(
+        numerator.is_finite() && numerator > MIN_MAGNITUDE,
+        "Zero/invalid magnitude failed: {} numerator = {:?}",
+        context,
+        numerator
+    );
+    assert!(
+        denominator.is_finite() && denominator > MIN_MAGNITUDE,
+        "Zero/invalid magnitude failed: {} denominator = {:?}",
+        context,
+        denominator
+    );
+    20.0 * (numerator / denominator).log10()
 }
 
 fn synthesize_wav(path: &std::path::Path, duration_secs: f64, freqs_and_amps: &[(f64, f64)]) {
@@ -187,7 +212,15 @@ fn test_frequency_response_boost_and_cut_deterministic_measurement() {
     // 2. Capture +6.0 dB boost at 1000 Hz
     let boost_samples = capture_pcm_output("equalizer=f=1000.00:t=q:w=1.414:g=6.0");
     let mag_boost = goertzel_magnitude(&boost_samples, 1000.0, 44100.0);
-    let boost_db = 20.0 * (mag_boost / mag_flat).log10();
+    let boost_db = magnitude_ratio_db(
+        mag_boost,
+        mag_flat,
+        &format!(
+            "frequency response boost (flat = {} samples, boost = {} samples)",
+            flat_samples.len(),
+            boost_samples.len()
+        ),
+    );
     assert!(
         (boost_db - 6.0).abs() < 0.5,
         "Measured boost should be ~+6.0 dB, got {:.2} dB",
@@ -197,7 +230,15 @@ fn test_frequency_response_boost_and_cut_deterministic_measurement() {
     // 3. Capture -6.0 dB attenuation at 1000 Hz
     let cut_samples = capture_pcm_output("equalizer=f=1000.00:t=q:w=1.414:g=-6.0");
     let mag_cut = goertzel_magnitude(&cut_samples, 1000.0, 44100.0);
-    let cut_db = 20.0 * (mag_cut / mag_flat).log10();
+    let cut_db = magnitude_ratio_db(
+        mag_cut,
+        mag_flat,
+        &format!(
+            "frequency response cut (flat = {} samples, cut = {} samples)",
+            flat_samples.len(),
+            cut_samples.len()
+        ),
+    );
     assert!(
         (cut_db - -6.0).abs() < 0.5,
         "Measured cut should be ~-6.0 dB, got {:.2} dB",
@@ -559,7 +600,17 @@ fn test_all_10_parametric_eq_bands_independent_boost_and_cut() {
         let boost_filter = format!("equalizer=f={:.2}:t=q:w=1.414:g=6.0", f);
         let boost_samples = capture_pcm_output_advanced(&temp_wav, &boost_filter, &[], 500);
         let mag_boost = goertzel_magnitude(&boost_samples, f, 44100.0);
-        let boost_db = 20.0 * (mag_boost / mag_flat).log10();
+        let boost_db = magnitude_ratio_db(
+            mag_boost,
+            mag_flat,
+            &format!(
+                "band {} ({:.2} Hz) boost (flat = {} samples, boost = {} samples)",
+                i,
+                f,
+                flat_samples.len(),
+                boost_samples.len()
+            ),
+        );
         assert!(
             (boost_db - 6.0).abs() < 0.6,
             "Band {} ({:.2} Hz) boost should be ~+6.0 dB, got {:.2} dB",
@@ -572,7 +623,17 @@ fn test_all_10_parametric_eq_bands_independent_boost_and_cut() {
         let cut_filter = format!("equalizer=f={:.2}:t=q:w=1.414:g=-6.0", f);
         let cut_samples = capture_pcm_output_advanced(&temp_wav, &cut_filter, &[], 500);
         let mag_cut = goertzel_magnitude(&cut_samples, f, 44100.0);
-        let cut_db = 20.0 * (mag_cut / mag_flat).log10();
+        let cut_db = magnitude_ratio_db(
+            mag_cut,
+            mag_flat,
+            &format!(
+                "band {} ({:.2} Hz) cut (flat = {} samples, cut = {} samples)",
+                i,
+                f,
+                flat_samples.len(),
+                cut_samples.len()
+            ),
+        );
         assert!(
             (cut_db - -6.0).abs() < 0.6,
             "Band {} ({:.2} Hz) cut should be ~-6.0 dB, got {:.2} dB",
@@ -848,20 +909,27 @@ fn synthesize_multichannel_5_1_wav(path: &std::path::Path, duration_secs: f64) {
     std::fs::write(path, full).expect("Write synthesized 5.1 WAV");
 }
 
-/// Waits for mpv to create/defer-open the ao-pcm output file before teardown.
+/// Waits for mpv to create/defer-open the ao-pcm output file before teardown,
+/// and for it to contain actual PCM payload beyond the 44-byte WAV header.
 /// On slower runners (notably Windows MSVC) the backend opens its output later
-/// than the fixed capture sleep, and dropping the handle too early makes the
-/// subsequent read fail with NotFound.
+/// than the fixed capture sleep; stopping at file existence can read a
+/// header-only file whose decoded samples are empty (magnitude 0 → NaN dB).
 fn wait_for_pcm_file(out_file: &std::path::Path) {
+    const MIN_PCM_FILE_BYTES: u64 = 48;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !out_file.exists() && std::time::Instant::now() < deadline {
+    loop {
+        let size = std::fs::metadata(out_file).map(|m| m.len()).unwrap_or(0);
+        if size >= MIN_PCM_FILE_BYTES {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "PCM output file had no payload within 10s: {:?} (size = {} bytes)",
+            out_file,
+            size
+        );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert!(
-        out_file.exists(),
-        "PCM output file was not created within 10s: {:?}",
-        out_file
-    );
 }
 
 fn capture_pcm_file_info(
