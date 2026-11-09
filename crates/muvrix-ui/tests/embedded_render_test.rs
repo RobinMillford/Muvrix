@@ -7,6 +7,10 @@
 //! - Pixel-level validation of Anime4K shader enhancement inside the embedded FBO
 //! - libplacebo HDR-to-SDR tone-mapping inside the embedded FBO
 //! - SDR regression verification
+//!
+//! Unix-only: this test dlopens `libEGL.so.1` via `libc::dlopen`/`dlsym`,
+//! which do not exist on Windows. On Windows the binary compiles to zero tests.
+#![cfg(not(target_os = "windows"))]
 
 use glow::HasContext as _;
 use muvrix_player::shader::{Anime4KPreset, ShaderManager, ShaderQuality, ToneMappingAlgorithm};

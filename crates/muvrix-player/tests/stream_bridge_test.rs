@@ -231,6 +231,7 @@ fn test_webdav_range_server_and_mpv_stream_playback() {
                             server_bytes.len()
                         );
                         let _ = stream.write_all(resp.as_bytes());
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
                     } else if req_line.starts_with("GET") {
                         if let Some(ref range) = range_header {
                             if let Some(spec) = range
@@ -256,6 +257,7 @@ fn test_webdav_range_server_and_mpv_stream_playback() {
                                     );
                                     let _ = stream.write_all(resp.as_bytes());
                                     let _ = stream.write_all(chunk);
+                                    let _ = stream.shutdown(std::net::Shutdown::Write);
                                 }
                             }
                         } else {
@@ -265,6 +267,7 @@ fn test_webdav_range_server_and_mpv_stream_playback() {
                             );
                             let _ = stream.write_all(resp.as_bytes());
                             let _ = stream.write_all(&server_bytes);
+                            let _ = stream.shutdown(std::net::Shutdown::Write);
                         }
                     }
                 }

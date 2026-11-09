@@ -233,25 +233,66 @@ fn test_http_range_and_webdav_streaming_simulation() {
         }
     });
 
-    // Helper to send HTTP request and read full response
+    // Helper to send HTTP request and read full response. No half-close
+    // (shutdown Write): sending FIN immediately after the request lets the
+    // mock server close with a RST that discards unread response bytes on
+    // macOS (delivered fine on Linux), which broke header reads there. The
+    // server stops parsing after the blank line, so it never needs the EOF.
     let send_request = |req: &str| -> (String, Vec<u8>) {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("Connect to mock server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("Set read timeout");
         stream.write_all(req.as_bytes()).expect("Write request");
-        stream.shutdown(std::net::Shutdown::Write).unwrap();
 
         let mut reader = BufReader::new(stream);
         let mut header_text = String::new();
         let mut line = String::new();
-        while reader.read_line(&mut line).unwrap() > 0 {
-            header_text.push_str(&line);
-            if line == "\r\n" || line == "\n" {
-                break;
+        loop {
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    header_text.push_str(&line);
+                    if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ConnectionReset
+                        || e.kind() == std::io::ErrorKind::NotConnected =>
+                {
+                    break;
+                }
+                Err(e) => panic!("read_line: {e}"),
             }
-            line.clear();
         }
 
-        let mut body = Vec::new();
-        reader.read_to_end(&mut body).expect("Read body");
+        // Read exactly Content-Length bytes instead of relying on connection
+        // close to signal EOF, so body reads are not timing-dependent.
+        let content_length = header_text
+            .lines()
+            .find_map(|l| {
+                let lower = l.to_ascii_lowercase();
+                if let Some(val) = lower.strip_prefix("content-length:") {
+                    val.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        let mut body = vec![0u8; content_length];
+        match reader.read_exact(&mut body) {
+            Ok(()) => {}
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ConnectionReset
+                    || e.kind() == std::io::ErrorKind::NotConnected
+                    || e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                body.clear();
+            }
+            Err(e) => panic!("Read body: {e}"),
+        }
         (header_text, body)
     };
 
@@ -632,6 +673,36 @@ fn test_sftp_fingerprint_generation_and_padding_tolerance() {
     assert!(provider.verify_host_key(&tampered).is_err());
 }
 
+/// Polls the sshd port until it accepts connections (or the deadline passes).
+/// A fixed sleep races slow/loaded CI runners where sshd hasn't bound yet,
+/// surfacing later as "Connection refused" during the first probe.
+fn wait_for_sshd_port(port: u16, child: &mut std::process::Child) -> bool {
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(status) = child.try_wait() {
+            if status.is_some() {
+                return false;
+            }
+        }
+        if TcpStream::connect_timeout(
+            &format!("127.0.0.1:{port}")
+                .parse()
+                .expect("parse localhost addr"),
+            Duration::from_millis(200),
+        )
+        .is_ok()
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn test_sftp_real_openssh_tofu_approval_and_rejection_lifecycle() {
     let sshd_path = if std::path::Path::new("/usr/sbin/sshd").exists() {
@@ -702,7 +773,13 @@ fn test_sftp_real_openssh_tofu_approval_and_rejection_lifecycle() {
         .spawn()
         .expect("Spawn ephemeral sshd");
 
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    if !wait_for_sshd_port(port, &mut sshd_proc) {
+        let log = std::fs::read_to_string(temp_dir.join("sshd1.log")).unwrap_or_default();
+        panic!(
+            "sshd did not start listening on port {port} within 5s (log: {})",
+            log
+        );
+    }
 
     let db_path = temp_dir.join("test_ssh_trust.db");
     let db = muvrix_core::database::DatabaseManager::open(&db_path).expect("Open SQLite DB");
@@ -802,7 +879,13 @@ fn test_sftp_real_openssh_tofu_approval_and_rejection_lifecycle() {
         .spawn()
         .expect("Spawn tampered sshd");
 
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    if !wait_for_sshd_port(port, &mut sshd_proc2) {
+        let log = std::fs::read_to_string(temp_dir.join("sshd2.log")).unwrap_or_default();
+        panic!(
+            "tampered sshd did not start listening on port {port} within 5s (log: {})",
+            log
+        );
+    }
 
     let mitm_err = provider_reopened.test_connection().unwrap_err();
     match mitm_err {

@@ -1,8 +1,10 @@
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use muvrix_core::platform::PlatformInfo;
-use muvrix_player::{HdrPresentationMode, HwdecMemoryPath, HwdecStatus, LoadFileMode, MpvHandle};
+use muvrix_player::{
+    Event, HdrPresentationMode, HwdecMemoryPath, HwdecStatus, LoadFileMode, MpvHandle,
+};
 
 fn get_test_video_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -30,6 +32,45 @@ fn create_player(hwdec: &str) -> MpvHandle {
     handle.set_option_string("hwdec", hwdec).unwrap();
     handle.initialize().unwrap();
     handle
+}
+
+/// Waits for `Event::FileLoaded` plus a non-empty `video-format` property,
+/// instead of relying on a fixed sleep. CI runners (notably Windows MSVC)
+/// demux more slowly than 200 ms, which otherwise leaves
+/// `query_playback_diagnostics` returning `HwdecStatus::Idle` even after a
+/// successful `load_file`.
+fn wait_for_file_loaded(player: &MpvHandle, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let mut file_loaded = false;
+    while Instant::now() < deadline && !file_loaded {
+        match player.wait_event(0.1) {
+            Event::FileLoaded => file_loaded = true,
+            Event::EndFile {
+                error: Some(err), ..
+            } => panic!("File ended prematurely with error: {err:?}"),
+            _ => {}
+        }
+    }
+    assert!(
+        file_loaded,
+        "Event::FileLoaded not received within {timeout:?}"
+    );
+
+    // video-format may briefly lag FileLoaded on slow runners; poll briefly.
+    let format_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let fmt = player
+            .get_property_string("video-format")
+            .unwrap_or_default();
+        if !fmt.is_empty() || Instant::now() >= format_deadline {
+            assert!(
+                !fmt.is_empty(),
+                "video-format still empty after FileLoaded (got {fmt:?}); diagnostics would report Idle"
+            );
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
@@ -168,7 +209,7 @@ fn test_hwdec_active_copyback() {
     player
         .load_file(path.to_str().unwrap(), LoadFileMode::Replace)
         .unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    wait_for_file_loaded(&player, Duration::from_secs(5));
 
     let diag = player.query_playback_diagnostics("auto-safe").unwrap();
     println!("HWDEC Active Diagnostic: {:?}", diag.hwdec_status);
@@ -201,7 +242,7 @@ fn test_hwdec_software_fallback() {
     player
         .load_file(path.to_str().unwrap(), LoadFileMode::Replace)
         .unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    wait_for_file_loaded(&player, Duration::from_secs(5));
 
     let diag = player.query_playback_diagnostics("nvdec").unwrap();
     println!("HWDEC Fallback Diagnostic: {:?}", diag.hwdec_status);
@@ -227,7 +268,7 @@ fn test_hwdec_explicitly_disabled() {
     player
         .load_file(path.to_str().unwrap(), LoadFileMode::Replace)
         .unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    wait_for_file_loaded(&player, Duration::from_secs(5));
 
     let diag = player.query_playback_diagnostics("no").unwrap();
     assert_eq!(diag.hwdec_status, HwdecStatus::Disabled);
@@ -241,7 +282,7 @@ fn test_sdr_detection_and_presentation_mode() {
     player
         .load_file(path.to_str().unwrap(), LoadFileMode::Replace)
         .unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    wait_for_file_loaded(&player, Duration::from_secs(5));
 
     let diag = player.query_playback_diagnostics("auto-safe").unwrap();
     println!("SDR Diagnostic: {:?}", diag.hdr_mode);
@@ -263,7 +304,7 @@ fn test_hdr_detection_and_tonemapping_status() {
     player
         .load_file(path.to_str().unwrap(), LoadFileMode::Replace)
         .unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    wait_for_file_loaded(&player, Duration::from_secs(5));
 
     let diag = player.query_playback_diagnostics("auto-safe").unwrap();
     println!("HDR Diagnostic: {:?}", diag.hdr_mode);

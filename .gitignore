@@ -55,6 +55,9 @@ docs/phase-*
 !tests/fixtures/test_video.mp4
 !tests/fixtures/corrupted.mp4
 !tests/fixtures/unsupported.txt
+!tests/fixtures/audio_test_tone.wav
+!tests/fixtures/hdr10_pq_bt2020.mp4
+!tests/fixtures/hdr_hlg_bt2020.mp4
 
 # Ephemeral network integration test artifacts
 /tests/network-integration/openssh/ssh_host_*
