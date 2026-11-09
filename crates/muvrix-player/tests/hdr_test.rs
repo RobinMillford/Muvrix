@@ -21,6 +21,12 @@ fn create_mpv_player(vo: &str) -> MpvHandle {
     let handle = MpvHandle::new().expect("Create MpvHandle");
     handle.set_option_string("vo", vo).unwrap();
     handle.set_option_string("ao", "null").unwrap();
+    // pause + idle: the HDR fixtures are only 1.5 s long and headless vo=null
+    // plays them back faster than realtime, so without pause the stream can
+    // reach EOF (and clear video-params) before the test queries them.
+    // Paused, FileLoaded fires but playback never advances.
+    handle.set_option_string("pause", "yes").unwrap();
+    handle.set_option_string("idle", "yes").unwrap();
     handle.initialize().unwrap();
     handle
 }
@@ -206,7 +212,7 @@ fn test_sdr_playback_regression_safety_under_hdr_tone_mapping_options() {
         .command(&["loadfile", sdr_fixture.to_str().unwrap()])
         .expect("Load standard SDR video");
 
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    wait_for_video_params(&handle, Duration::from_secs(5));
 
     // SDR video properties must remain intact and not corrupted
     let primaries = handle

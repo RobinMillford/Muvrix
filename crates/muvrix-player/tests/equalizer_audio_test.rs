@@ -142,6 +142,7 @@ fn capture_pcm_output_advanced(
         .command(&["loadfile", fixture_path.to_str().unwrap()])
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+    wait_for_pcm_file(&out_file);
     drop(handle);
 
     let data = std::fs::read(&out_file).expect("Read PCM output file");
@@ -847,6 +848,22 @@ fn synthesize_multichannel_5_1_wav(path: &std::path::Path, duration_secs: f64) {
     std::fs::write(path, full).expect("Write synthesized 5.1 WAV");
 }
 
+/// Waits for mpv to create/defer-open the ao-pcm output file before teardown.
+/// On slower runners (notably Windows MSVC) the backend opens its output later
+/// than the fixed capture sleep, and dropping the handle too early makes the
+/// subsequent read fail with NotFound.
+fn wait_for_pcm_file(out_file: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !out_file.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        out_file.exists(),
+        "PCM output file was not created within 10s: {:?}",
+        out_file
+    );
+}
+
 fn capture_pcm_file_info(
     fixture_path: &std::path::Path,
     filter_str: &str,
@@ -881,6 +898,7 @@ fn capture_pcm_file_info(
         .command(&["loadfile", fixture_path.to_str().unwrap()])
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+    wait_for_pcm_file(&out_file);
     drop(handle);
 
     let data = std::fs::read(&out_file).expect("Read PCM output file");
