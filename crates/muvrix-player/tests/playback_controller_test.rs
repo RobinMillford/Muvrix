@@ -591,3 +591,147 @@ fn test_controller_chapter_and_relative_seek() {
     controller.stop().expect("Stop succeeds");
     assert_eq!(*controller.state(), PlaybackState::Idle);
 }
+
+#[test]
+fn test_playback_lifecycle_50_cycles_stress() {
+    let path = find_media_path("tests/fixtures/test_video.mp4");
+    let mut controller = create_test_controller();
+
+    fn get_process_metrics() -> (usize, usize, usize) {
+        #[cfg(target_os = "linux")]
+        {
+            let fd_count = std::fs::read_dir("/proc/self/fd")
+                .map(|entries| entries.count())
+                .unwrap_or(0);
+
+            let mut threads = 0;
+            let mut vmrss_kb = 0;
+            if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+                for line in status.lines() {
+                    if let Some(rest) = line.strip_prefix("Threads:") {
+                        threads = rest.trim().parse::<usize>().unwrap_or(0);
+                    } else if let Some(rest) = line.strip_prefix("VmRSS:") {
+                        let val_str = rest.trim().trim_end_matches(" kB").trim();
+                        vmrss_kb = val_str.parse::<usize>().unwrap_or(0);
+                    }
+                }
+            }
+            (fd_count, threads, vmrss_kb)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            (0, 0, 0)
+        }
+    }
+
+    let (initial_fds, initial_threads, initial_rss) = get_process_metrics();
+    println!(
+        "\n[Stress Test Baseline] FDs: {}, Threads: {}, VmRSS: {} kB",
+        initial_fds, initial_threads, initial_rss
+    );
+
+    let mut metrics_log = Vec::new();
+
+    for cycle in 1..=50 {
+        controller
+            .load_file(path.to_str().unwrap())
+            .expect("Load file in cycle succeeds");
+
+        let playing = wait_for_state(
+            &mut controller,
+            |s| matches!(s, PlaybackState::Playing),
+            Duration::from_millis(500),
+        );
+        assert!(playing, "Failed to reach Playing state in cycle {cycle}");
+
+        controller.stop().expect("Stop in cycle succeeds");
+
+        let stopped = wait_for_state(
+            &mut controller,
+            |s| matches!(s, PlaybackState::Idle),
+            Duration::from_millis(500),
+        );
+        assert!(stopped, "Failed to reach Idle state in cycle {cycle}");
+
+        if cycle % 10 == 0 || cycle == 1 {
+            let (fds, threads, rss) = get_process_metrics();
+            println!(
+                "  Cycle {:02}/50: FDs={}, Threads={}, VmRSS={} kB",
+                cycle, fds, threads, rss
+            );
+            metrics_log.push((cycle, fds, threads, rss));
+        }
+    }
+
+    let (c50_fds, c50_threads, c50_rss) = get_process_metrics();
+    println!(
+        "[Stress Test Cycle 50 State] FDs: {}, Threads: {}, VmRSS: {} kB",
+        c50_fds, c50_threads, c50_rss
+    );
+
+    // Drop the controller to exercise complete engine tear-down
+    drop(controller);
+    // Allow brief time for thread termination
+    std::thread::sleep(Duration::from_millis(100));
+
+    let (final_fds, final_threads, final_rss) = get_process_metrics();
+    println!(
+        "[Stress Test Post-Tear-down] FDs: {}, Threads: {}, VmRSS: {} kB",
+        final_fds, final_threads, final_rss
+    );
+
+    #[cfg(target_os = "linux")]
+    {
+        // 1. Thread stability across playback cycles: Worker threads must not accumulate
+        // Cycle 1 initialized mpv's internal thread pool; threads at cycle 50 must match cycle 1
+        if let Some(&(c1_cycle, _c1_fds, c1_threads, _c1_rss)) = metrics_log.first() {
+            assert_eq!(c1_cycle, 1);
+            assert!(
+                c50_threads <= c1_threads + 2,
+                "Thread leak across cycles: cycle 1 had {}, cycle 50 had {}",
+                c1_threads,
+                c50_threads
+            );
+        }
+
+        // Post tear-down: worker threads should terminate back near baseline
+        assert!(
+            final_threads <= initial_threads + 2,
+            "Worker threads failed to terminate on drop: initial={}, final={}",
+            initial_threads,
+            final_threads
+        );
+
+        // 2. File descriptors: must not accumulate across cycles
+        assert!(
+            c50_fds <= initial_fds + 4,
+            "File descriptor leak across cycles: initial={}, cycle50={}",
+            initial_fds,
+            c50_fds
+        );
+        assert!(
+            final_fds <= initial_fds + 2,
+            "File descriptor leak after tear-down: initial={}, final={}",
+            initial_fds,
+            final_fds
+        );
+
+        // 3. RSS growth check: RSS at cycle 50 compared to cycle 10 must plateau
+        if metrics_log.len() >= 2 {
+            let rss_c10 = metrics_log[1].3; // cycle 10
+            let rss_c50 = c50_rss; // cycle 50
+            let growth_kb = rss_c50.saturating_sub(rss_c10);
+            println!(
+                "  Memory stability delta (Cycle 10 -> Cycle 50): +{} kB ({:.2} MB)",
+                growth_kb,
+                growth_kb as f64 / 1024.0
+            );
+            // Must plateau within 25 MB between cycle 10 and cycle 50
+            assert!(
+                growth_kb < 25 * 1024,
+                "Monotonic memory leak detected: growth of {} kB between cycle 10 and 50",
+                growth_kb
+            );
+        }
+    }
+}

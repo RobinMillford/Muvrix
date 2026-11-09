@@ -55,6 +55,9 @@ jobs:
       - name: Core Path Resolution Test Suite
         run: cargo test -p muvrix-core
 
+      - name: Native Link Smoke Test & Strict ABI Assertion (libmpv C API 2.5)
+        run: cargo test -p libmpv-sys --test link_smoke_test -- --nocapture
+
       - name: Run Test Suite (Headless Runtime)
         run: cargo test --workspace --all-targets
 
@@ -98,6 +101,9 @@ jobs:
       - name: Core Path Resolution Test Suite
         run: cargo test -p muvrix-core
 
+      - name: Native Link Smoke Test & Strict ABI Assertion (libmpv C API 2.5)
+        run: cargo test -p libmpv-sys --test link_smoke_test -- --nocapture
+
       - name: Run Test Suite (Headless Runtime)
         run: cargo test --workspace --all-targets
 
@@ -137,6 +143,9 @@ jobs:
 
       - name: Core Path Resolution Test Suite
         run: cargo test -p muvrix-core
+
+      - name: Native Link Smoke Test & Strict ABI Assertion (libmpv C API 2.5)
+        run: cargo test -p libmpv-sys --test link_smoke_test -- --nocapture
 
       - name: Run Test Suite (Headless Runtime)
         run: cargo test --workspace --all-targets

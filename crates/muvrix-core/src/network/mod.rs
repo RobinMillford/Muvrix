@@ -8,7 +8,10 @@ pub mod webdav;
 pub mod webdav_xml;
 
 pub use crate::database::NetworkConnection;
-pub use credentials::{redact_credentials_from_url, CredentialVault, MUVRIX_KEYRING_SERVICE};
+pub use credentials::{
+    generate_credential_ref, redact_credentials_from_url, CredentialError, CredentialVault,
+    MUVRIX_KEYRING_SERVICE,
+};
 pub use provider::{
     MockNetworkProvider, NetworkError, NetworkProvider, NetworkResult, RemoteFileEntry,
 };

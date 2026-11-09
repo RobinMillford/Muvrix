@@ -7,6 +7,55 @@ use zeroize::{Zeroize, Zeroizing};
 /// Service name identifier for Muvrix in the operating system's native credential store.
 pub const MUVRIX_KEYRING_SERVICE: &str = "io.muvrix.desktop";
 
+/// Granular error types for native credential store interactions.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum CredentialError {
+    #[error("Keyring entry creation failed: {0}")]
+    Entry(String),
+    #[error("Native credential storage failed: {0}")]
+    NativeStore(String),
+    #[error("Native credential retrieval failed: {0}")]
+    NativeRetrieve(String),
+    #[error("Native credential deletion failed: {0}")]
+    NativeDelete(String),
+    #[error("Credential not found: {0}")]
+    NotFound(String),
+    #[error("Keyring is locked or unavailable: {0}")]
+    KeyringLockedOrUnavailable(String),
+}
+
+fn map_keyring_error(err: keyring::Error, op: &str) -> CredentialError {
+    match err {
+        keyring::Error::NoEntry => CredentialError::NotFound("Credential not found".to_string()),
+        keyring::Error::PlatformFailure(ref e) => {
+            let msg = e.to_string();
+            let lower = msg.to_lowercase();
+            if lower.contains("locked")
+                || lower.contains("denied")
+                || lower.contains("not available")
+                || lower.contains("cannot connect")
+                || lower.contains("no such interface")
+                || lower.contains("not supported")
+            {
+                CredentialError::KeyringLockedOrUnavailable(msg)
+            } else {
+                match op {
+                    "storage" => CredentialError::NativeStore(msg),
+                    "retrieval" => CredentialError::NativeRetrieve(msg),
+                    "deletion" => CredentialError::NativeDelete(msg),
+                    _ => CredentialError::NativeStore(msg),
+                }
+            }
+        }
+        other => match op {
+            "storage" => CredentialError::NativeStore(other.to_string()),
+            "retrieval" => CredentialError::NativeRetrieve(other.to_string()),
+            "deletion" => CredentialError::NativeDelete(other.to_string()),
+            _ => CredentialError::NativeStore(other.to_string()),
+        },
+    }
+}
+
 /// Thread-safe in-memory vault for network credentials (passwords, auth tokens)
 /// backed by the operating system native keyring (Secret Service, Windows Credential Manager, macOS Keychain)
 /// with transparent, infallible in-memory fallback.
@@ -86,6 +135,102 @@ impl CredentialVault {
             }
         }
     }
+
+    /// Explicitly persists a secret to the native platform credential store (Secret Service,
+    /// Windows Credential Manager, or Apple Keychain).
+    /// Returns `Ok(())` on successful native persistence, or a typed `CredentialError`
+    /// (e.g. if the native keyring is locked, missing a daemon, or permissions are denied).
+    pub fn store_native(&self, credential_ref: &str, secret: &str) -> Result<(), CredentialError> {
+        let entry = keyring::Entry::new(MUVRIX_KEYRING_SERVICE, credential_ref)
+            .map_err(|e| CredentialError::Entry(e.to_string()))?;
+        entry
+            .set_password(secret)
+            .map_err(|e| map_keyring_error(e, "storage"))?;
+
+        if let Ok(mut lock) = self.secrets.lock() {
+            lock.insert(
+                credential_ref.to_string(),
+                Zeroizing::new(secret.to_string()),
+            );
+        }
+        Ok(())
+    }
+
+    /// Directly retrieves a secret from the native platform credential store without
+    /// reading from the in-memory cache.
+    pub fn get_native(&self, credential_ref: &str) -> Result<String, CredentialError> {
+        let entry = keyring::Entry::new(MUVRIX_KEYRING_SERVICE, credential_ref)
+            .map_err(|e| CredentialError::Entry(e.to_string()))?;
+        entry
+            .get_password()
+            .map_err(|e| map_keyring_error(e, "retrieval"))
+    }
+
+    /// Explicitly deletes a secret from the native platform credential store.
+    pub fn remove_native(&self, credential_ref: &str) -> Result<(), CredentialError> {
+        let entry = keyring::Entry::new(MUVRIX_KEYRING_SERVICE, credential_ref)
+            .map_err(|e| CredentialError::Entry(e.to_string()))?;
+        entry
+            .delete_credential()
+            .map_err(|e| map_keyring_error(e, "deletion"))?;
+
+        if let Ok(mut lock) = self.secrets.lock() {
+            if let Some(mut val) = lock.remove(credential_ref) {
+                val.zeroize();
+            }
+        }
+        Ok(())
+    }
+
+    /// Stores a secret strictly in memory for session-only / ephemeral use (e.g. testing connection endpoints).
+    /// Does NOT persist the secret to the native OS keyring.
+    pub fn store_ephemeral(&self, credential_ref: &str, secret: &str) {
+        if let Ok(mut lock) = self.secrets.lock() {
+            lock.insert(
+                credential_ref.to_string(),
+                Zeroizing::new(secret.to_string()),
+            );
+        }
+    }
+
+    /// Retrieves an ephemeral secret stored exclusively in memory.
+    pub fn get_ephemeral(&self, credential_ref: &str) -> Option<String> {
+        if let Ok(lock) = self.secrets.lock() {
+            if let Some(secret) = lock.get(credential_ref) {
+                return Some((**secret).clone());
+            }
+        }
+        None
+    }
+
+    /// Removes an ephemeral secret from memory, securely zeroizing its buffer.
+    pub fn remove_ephemeral(&self, credential_ref: &str) {
+        if let Ok(mut lock) = self.secrets.lock() {
+            if let Some(mut val) = lock.remove(credential_ref) {
+                val.zeroize();
+            }
+        }
+    }
+
+    /// Probes if the native platform credential store is accessible in the current session.
+    pub fn is_native_available() -> bool {
+        let probe_key = format!("muvrix_probe_{}", std::process::id());
+        if let Ok(entry) = keyring::Entry::new(MUVRIX_KEYRING_SERVICE, &probe_key) {
+            match entry.get_password() {
+                Ok(_) => true,
+                Err(keyring::Error::NoEntry) => true,
+                Err(keyring::Error::PlatformFailure(ref e)) => {
+                    let msg = e.to_string().to_lowercase();
+                    !msg.contains("cannot connect")
+                        && !msg.contains("not available")
+                        && !msg.contains("no such interface")
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
+    }
 }
 
 /// Helper encoding byte buffers into standard RFC 4648 Base64 strings without external dependencies.
@@ -137,6 +282,15 @@ pub fn redact_credentials_from_url(url: &str) -> String {
     url.to_string()
 }
 
+/// Generates a deterministic, namespaced credential reference identifier based on non-secret connection identity.
+/// Strictly non-secret: contains no passwords, private keys, or secret tokens.
+pub fn generate_credential_ref(protocol: &str, host: &str, port: u16, username: &str) -> String {
+    let p = protocol.trim().to_lowercase();
+    let h = host.trim().to_lowercase();
+    let u = username.trim().to_lowercase();
+    format!("muvrix:{p}:{h}:{port}:{u}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +328,68 @@ mod tests {
         assert_eq!(&*secret, "temporary_sensitive_token");
         secret.zeroize();
         assert_eq!(&*secret, "");
+    }
+
+    #[test]
+    fn test_credential_error_mapping_and_display() {
+        let err_locked = map_keyring_error(
+            keyring::Error::PlatformFailure("The collection is locked".to_string().into()),
+            "storage",
+        );
+        assert!(matches!(
+            err_locked,
+            CredentialError::KeyringLockedOrUnavailable(_)
+        ));
+        assert!(err_locked.to_string().contains("locked or unavailable"));
+
+        let err_not_found = map_keyring_error(keyring::Error::NoEntry, "retrieval");
+        assert!(matches!(err_not_found, CredentialError::NotFound(_)));
+
+        let err_general = map_keyring_error(
+            keyring::Error::PlatformFailure("Disk I/O error".to_string().into()),
+            "storage",
+        );
+        assert!(matches!(err_general, CredentialError::NativeStore(_)));
+    }
+
+    #[test]
+    fn test_ephemeral_storage_lifecycle() {
+        let vault = CredentialVault::new();
+        vault.store_ephemeral("eph_1", "ephemeral_secret_abc");
+        assert_eq!(
+            vault.get_ephemeral("eph_1"),
+            Some("ephemeral_secret_abc".to_string())
+        );
+        assert_eq!(vault.get("eph_1"), Some("ephemeral_secret_abc".to_string()));
+
+        vault.remove_ephemeral("eph_1");
+        assert_eq!(vault.get_ephemeral("eph_1"), None);
+        assert_eq!(vault.get("eph_1"), None);
+    }
+
+    #[test]
+    fn test_generate_credential_ref_determinism_and_namespace() {
+        let ref1 = generate_credential_ref("SFTP", "Example.COM", 22, "Alice");
+        let ref2 = generate_credential_ref("sftp", "example.com", 22, "alice");
+        assert_eq!(ref1, "muvrix:sftp:example.com:22:alice");
+        assert_eq!(
+            ref1, ref2,
+            "Credential reference must be normalized and deterministic"
+        );
+
+        let ref3 = generate_credential_ref("smb", "example.com", 445, "alice");
+        assert_ne!(ref1, ref3, "Different protocols must not collide");
+
+        let ref4 = generate_credential_ref("sftp", "example.com", 2222, "alice");
+        assert_ne!(ref1, ref4, "Different ports must not collide");
+
+        let ref5 = generate_credential_ref("sftp", "example.com", 22, "bob");
+        assert_ne!(ref1, ref5, "Different users must not collide");
+    }
+
+    #[test]
+    fn test_native_availability_probe() {
+        // Probe should execute without panicking
+        let _ = CredentialVault::is_native_available();
     }
 }
