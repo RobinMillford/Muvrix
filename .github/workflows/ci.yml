@@ -36,6 +36,10 @@ jobs:
             libxkbcommon-dev \
             libwayland-dev \
             libgl1-mesa-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            libssh2-1-dev \
+            zlib1g-dev \
             pkg-config
 
       - name: Verify libmpv pkg-config
@@ -81,7 +85,11 @@ jobs:
             mesa-libGL-devel \
             libX11-devel \
             libxkbcommon-devel \
-            wayland-devel
+            wayland-devel \
+            dbus-devel \
+            openssl-devel \
+            libssh2-devel \
+            zlib-devel
 
       - name: Checkout repository
         uses: actions/checkout@v4
