@@ -233,15 +233,17 @@ fn test_http_range_and_webdav_streaming_simulation() {
         }
     });
 
-    // Helper to send HTTP request and read full response
+    // Helper to send HTTP request and read full response. No half-close
+    // (shutdown Write): sending FIN immediately after the request lets the
+    // mock server close with a RST that discards unread response bytes on
+    // macOS (delivered fine on Linux), which broke header reads there. The
+    // server stops parsing after the blank line, so it never needs the EOF.
     let send_request = |req: &str| -> (String, Vec<u8>) {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("Connect to mock server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("Set read timeout");
         stream.write_all(req.as_bytes()).expect("Write request");
-        // Half-close write side (best-effort): on macOS the server may close
-        // the connection with a RST after responding, surfacing as ENOTCONN
-        // (57) on shutdown or ConnectionReset (54) while reading. Both mean
-        // "peer gone" and are benign since headers/body are already buffered.
-        let _ = stream.shutdown(std::net::Shutdown::Write);
 
         let mut reader = BufReader::new(stream);
         let mut header_text = String::new();
@@ -266,12 +268,29 @@ fn test_http_range_and_webdav_streaming_simulation() {
             }
         }
 
-        let mut body = Vec::new();
-        match reader.read_to_end(&mut body) {
-            Ok(_) => {}
+        // Read exactly Content-Length bytes instead of relying on connection
+        // close to signal EOF, so body reads are not timing-dependent.
+        let content_length = header_text
+            .lines()
+            .find_map(|l| {
+                let lower = l.to_ascii_lowercase();
+                if let Some(val) = lower.strip_prefix("content-length:") {
+                    val.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        let mut body = vec![0u8; content_length];
+        match reader.read_exact(&mut body) {
+            Ok(()) => {}
             Err(e)
                 if e.kind() == std::io::ErrorKind::ConnectionReset
-                    || e.kind() == std::io::ErrorKind::NotConnected => {}
+                    || e.kind() == std::io::ErrorKind::NotConnected
+                    || e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                body.clear();
+            }
             Err(e) => panic!("Read body: {e}"),
         }
         (header_text, body)
