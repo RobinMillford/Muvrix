@@ -120,6 +120,19 @@ impl SmbProvider {
 
         Ok((client, tree))
     }
+
+    /// Opens a seekable, random-access file reader for the specified file on the share.
+    pub async fn open_reader_async(
+        &self,
+        file_path: &str,
+    ) -> NetworkResult<smb2::client::stream::FileReader> {
+        let (mut client, tree) = self.connect_share_async().await?;
+        let clean = file_path.trim_matches('/');
+        let reader = client.open_file_reader(&tree, clean).await.map_err(|e| {
+            NetworkError::NotFound(format!("Failed to open SMB file '{clean}': {e}"))
+        })?;
+        Ok(reader)
+    }
 }
 
 impl NetworkProvider for SmbProvider {

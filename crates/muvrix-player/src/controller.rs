@@ -81,6 +81,9 @@ pub struct PlaybackController {
     subtitle_styling: SubtitleStyling,
     stream_bridge: MpvStreamBridge,
     next_async_id: u64,
+    pending_resume_pos: Option<f64>,
+    pending_resume_audio: Option<Option<i64>>,
+    pending_resume_sub: Option<Option<i64>>,
 }
 
 impl PlaybackController {
@@ -143,6 +146,9 @@ impl PlaybackController {
             subtitle_styling: SubtitleStyling::default(),
             stream_bridge,
             next_async_id: 1000,
+            pending_resume_pos: None,
+            pending_resume_audio: None,
+            pending_resume_sub: None,
         };
 
         controller.refresh_metadata();
@@ -489,6 +495,9 @@ impl PlaybackController {
         self.tracks.clear();
         self.chapters.clear();
         self.current_chapter = None;
+        self.pending_resume_pos = None;
+        self.pending_resume_audio = None;
+        self.pending_resume_sub = None;
 
         self.handle.load_file(path, LoadFileMode::Replace)?;
         let _ = self.handle.play();
@@ -510,6 +519,9 @@ impl PlaybackController {
         self.tracks.clear();
         self.chapters.clear();
         self.current_chapter = None;
+        self.pending_resume_pos = None;
+        self.pending_resume_audio = None;
+        self.pending_resume_sub = None;
 
         let id = self.next_async_id;
         self.next_async_id += 1;
@@ -518,6 +530,31 @@ impl PlaybackController {
         let _ = self.handle.play();
         self.is_paused = false;
         Ok(id)
+    }
+
+    /// Reloads media from the given path or URI, restoring the playback position
+    /// and track selections once the file is loaded (Level B network recovery).
+    pub fn reload_with_resume(
+        &mut self,
+        path: &str,
+        resume_time: f64,
+        audio_track: Option<Option<i64>>,
+        sub_track: Option<Option<i64>>,
+    ) -> Result<(), MpvError> {
+        self.load_file(path)?;
+        self.pending_resume_pos = if resume_time > 0.0 {
+            Some(resume_time)
+        } else {
+            None
+        };
+        self.pending_resume_audio = audio_track;
+        self.pending_resume_sub = sub_track;
+        Ok(())
+    }
+
+    /// Returns the currently pending resume position, if any.
+    pub fn pending_resume_pos(&self) -> Option<f64> {
+        self.pending_resume_pos
     }
 
     /// Resumes playback.
@@ -727,6 +764,19 @@ impl PlaybackController {
                     if !p.is_empty() {
                         self.current_file = Some(p);
                     }
+                }
+                if let Some(pos) = self.pending_resume_pos.take() {
+                    log::info!(
+                        "Level B recovery: seeking to preserved position {:.2}s",
+                        pos
+                    );
+                    let _ = self.handle.seek(pos, SeekMode::Exact);
+                }
+                if let Some(audio_opt) = self.pending_resume_audio.take() {
+                    let _ = self.handle.set_audio_track(audio_opt);
+                }
+                if let Some(sub_opt) = self.pending_resume_sub.take() {
+                    let _ = self.handle.set_sub_track(sub_opt);
                 }
                 if self.is_paused {
                     self.state = PlaybackState::Paused;

@@ -1,0 +1,28 @@
+Port 2222
+ListenAddress 0.0.0.0
+HostKey /etc/ssh/ssh_host_ed25519_key
+
+# Subsystem definition
+Subsystem sftp internal-sftp
+
+# Authentication
+PasswordAuthentication yes
+PermitEmptyPasswords no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+ChallengeResponseAuthentication no
+
+# Access Control & Hardening
+PermitRootLogin no
+AllowUsers muvrix_sftp
+
+# Lockdown interactive access, shell and forwarding
+ForceCommand internal-sftp
+AllowTcpForwarding no
+X11Forwarding no
+AllowAgentForwarding no
+PermitTTY no
+PermitTunnel no
+GatewayPorts no
+
+LogLevel INFO

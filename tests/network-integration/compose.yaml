@@ -1,0 +1,31 @@
+services:
+  webdav:
+    build: ./webdav
+    image: muvrix-test-webdav:latest
+    container_name: muvrix-test-webdav
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - ./fixtures:/var/www/webdav:ro
+    restart: "no"
+
+  samba:
+    build: ./samba
+    image: muvrix-test-samba:latest
+    container_name: muvrix-test-samba
+    ports:
+      - "127.0.0.1:18445:445"
+    volumes:
+      - ./fixtures:/srv/media:ro
+      - ./fixtures:/srv/guest_media:ro
+    restart: "no"
+
+  openssh:
+    build: ./openssh
+    image: muvrix-test-openssh:latest
+    container_name: muvrix-test-openssh
+    ports:
+      - "127.0.0.1:18222:2222"
+    volumes:
+      - ./fixtures:/home/muvrix_sftp/media:ro
+    restart: "no"

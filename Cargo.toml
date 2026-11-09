@@ -34,3 +34,4 @@ ssh2 = "0.9"
 keyring = { version = "3", default-features = false, features = ["sync-secret-service", "windows-native", "apple-native"] }
 smb2 = "0.43"
 tokio = { version = "1.0", features = ["rt", "net", "io-util"] }
+zeroize = { version = "1.8", features = ["alloc"] }

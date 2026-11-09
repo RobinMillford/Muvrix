@@ -199,6 +199,19 @@ impl SftpProvider {
 
         Ok((sess, sftp))
     }
+
+    /// Opens a remote file handle for seekable streaming over a dedicated SFTP session.
+    pub fn open_file(&self, remote_file_path: &str) -> NetworkResult<(ssh2::Session, ssh2::File)> {
+        let (sess, sftp) = self.open_session()?;
+        let file = sftp
+            .open(std::path::Path::new(remote_file_path))
+            .map_err(|e| {
+                NetworkError::NotFound(format!(
+                    "Failed to open SFTP file '{remote_file_path}': {e}"
+                ))
+            })?;
+        Ok((sess, file))
+    }
 }
 
 impl NetworkProvider for SftpProvider {
