@@ -69,6 +69,14 @@ impl RenderEngine {
             return;
         }
 
+        // 0. Capture GL state *before* libmpv renders into the FBO.
+        // libmpv's render call may mutate viewport/scissor/etc. internally
+        // (it sizes its own rendering target to the FBO), so capturing only
+        // around the quad composite would restore the post-render state
+        // instead of the true pre-paint state. Holding the guard for the
+        // whole of `paint()` makes the paint operation state-neutral.
+        let _state_guard = GlStateGuard::capture(gl);
+
         // 1. Framebuffer Restoration Contract: Query active FBO
         let prev_fbo = gl.get_parameter_i32(glow::FRAMEBUFFER_BINDING);
 
@@ -124,9 +132,9 @@ impl RenderEngine {
         gl.bind_framebuffer(glow::FRAMEBUFFER, restore_target);
 
         // 5. Composite video quad into the target viewport with RAII state isolation
+        // (the guard captured above stays held across the whole render so the
+        // quad's state mutations are also undone on drop at the end of paint).
         {
-            let _state_guard = GlStateGuard::capture(gl);
-
             gl.viewport(left, bottom, width, height);
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::DEPTH_TEST);
@@ -158,7 +166,10 @@ impl RenderEngine {
 /// RAII guard that captures and isolates OpenGL pipeline state during video quad compositing.
 /// Restores viewport, scissor box & test, depth test, cull face, blend state, active texture unit,
 /// bound texture, shader program, and vertex array object upon drop or explicit restoration.
-struct GlStateGuard<'a> {
+///
+/// Exposed publicly for regression tests (`gl_state_guard_test.rs`) that verify
+/// the framebuffer compositing contract headlessly.
+pub struct GlStateGuard<'a> {
     gl: &'a glow::Context,
     prev_viewport: [i32; 4],
     prev_scissor_box: [i32; 4],
@@ -173,7 +184,12 @@ struct GlStateGuard<'a> {
 }
 
 impl<'a> GlStateGuard<'a> {
-    unsafe fn capture(gl: &'a glow::Context) -> Self {
+    /// Captures the GL state tuples restored by this guard when dropped.
+    ///
+    /// # Safety
+    ///
+    /// Must be called with the OpenGL context current on the calling thread.
+    pub unsafe fn capture(gl: &'a glow::Context) -> Self {
         let mut prev_viewport = [0i32; 4];
         gl.get_parameter_i32_slice(glow::VIEWPORT, &mut prev_viewport);
 
@@ -204,7 +220,12 @@ impl<'a> GlStateGuard<'a> {
         }
     }
 
-    unsafe fn restore(&self) {
+    /// Explicitly restores the previously captured GL state.
+    ///
+    /// # Safety
+    ///
+    /// Must be called with the OpenGL context current on the calling thread.
+    pub unsafe fn restore(&self) {
         let gl = self.gl;
         gl.viewport(
             self.prev_viewport[0],

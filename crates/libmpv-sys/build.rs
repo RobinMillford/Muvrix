@@ -72,7 +72,7 @@ fn main() {
 
     // 3. Probe via pkg-config
     match pkg_config::Config::new()
-        .atleast_version("2.0")
+        .atleast_version("2.6")
         .probe("mpv")
     {
         Ok(library) => {

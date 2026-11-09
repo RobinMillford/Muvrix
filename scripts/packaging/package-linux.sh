@@ -30,10 +30,46 @@ mkdir -p "$DIST_DIR/share/icons/hicolor/scalable/apps"
 cp "$REPO_ROOT/target/release/muvrix-ui" "$DIST_DIR/bin/muvrix-bin"
 
 # 3b. Bundle libmpv runtime if available in local prefix or system
+# Phase 1.4 (0.42.0): copy ONLY the exact SONAME-resolved 0.42.0 artifacts,
+# plus libplacebo and other direct runtime deps used by the built libmpv,
+# so the package runs outside ~/.local.
+#
+# Why not `libmpv.so*`: the old glob also staged the obsolete pre-migration
+# backup `libmpv.so.2.5.0` (kept in ~/.local/lib64 for rollback). The glob
+# was replaced by exact names below; the dev-environment backup is untouched.
+stage_lib() {
+    # $1 = file name under source dir; $2 = source dir
+    local src="$2"
+    if [ -e "$src/$1" ] || [ -L "$src/$1" ]; then
+        cp -d "$src/$1" "$DIST_DIR/lib64/"
+    fi
+}
+
+MPV_SRC=""
 if [ -f "$HOME/.local/lib64/libmpv.so.2" ]; then
-    cp -d "$HOME/.local/lib64"/libmpv.so* "$DIST_DIR/lib64/" 2>/dev/null || true
+    MPV_SRC="$HOME/.local/lib64"
 elif [ -f "/usr/lib64/libmpv.so.2" ]; then
-    cp -d /usr/lib64/libmpv.so* "$DIST_DIR/lib64/" 2>/dev/null || true
+    MPV_SRC="/usr/lib64"
+fi
+
+if [ -n "$MPV_SRC" ]; then
+    # Resolve the exact file behind the libmpv.so.2 SONAME and stage it plus
+    # its soname symlinks. This never picks up libmpv.so.2.5.0 leftovers.
+    MPV_REAL="$(readlink -f "$MPV_SRC/libmpv.so.2")"
+    MPV_REAL_NAME="$(basename "$MPV_REAL")"
+    echo "Staging libmpv runtime: ${MPV_REAL_NAME} (SONAME libmpv.so.2)"
+    cp "$MPV_REAL" "$DIST_DIR/lib64/$MPV_REAL_NAME"
+    ln -sf "$MPV_REAL_NAME" "$DIST_DIR/lib64/libmpv.so.2"
+    ln -sf "$MPV_REAL_NAME" "$DIST_DIR/lib64/libmpv.so"
+    # Direct transitive deps of the 0.42.0 build (bundled so the package
+    # runs outside ~/.local; the long tail of FFmpeg-family libs must be
+    # provided by the target system — see DEPENDENCIES.md staged below).
+    for lib in libplacebo.so.387 libplacebo.so libluajit-5.1.so.2 \
+               libluajit-5.1.so libluajit-5.1.so.2.1.1767980792 \
+               libdisplay-info.so.3 libdisplay-info.so.0.3.0 \
+               libdisplay-info.so; do
+        stage_lib "$lib" "$MPV_SRC"
+    done
 fi
 
 # 4. Create launcher wrapper script
@@ -64,6 +100,33 @@ cp -r "$REPO_ROOT/assets/shaders" "$DIST_DIR/share/muvrix/assets/"
 cp "$REPO_ROOT/LICENSE" "$DIST_DIR/"
 cp "$REPO_ROOT/THIRD-PARTY-NOTICES.md" "$DIST_DIR/"
 cp "$REPO_ROOT/README.md" "$DIST_DIR/"
+
+# 6b. Stage the exact system prerequisite list for this package.
+cat << 'EOF' > "$DIST_DIR/DEPENDENCIES.md"
+# Muvrix Linux package — runtime dependencies
+
+## Bundled in `lib64/`
+- `libmpv.so.2.6.0` (SONAME `libmpv.so.2`) — exact pinned libmpv 0.42.0 runtime
+- `libplacebo.so.387` — libplacebo 7.387.0
+- `libdisplay-info.so.0.3.0` / `libdisplay-info.so.3`
+- `libluajit-5.1.so.2.1.1767980792` / `libluajit-5.1.so.2`
+
+## Required from the target system (not bundled)
+The bundled `libmpv` still links a long transitive tail that this package
+does **not** vendor. On the build host these come from Fedora 45 RPMs
+(`ffmpeg-libs`, `libass`, `libva`, `wayland-libs`, `libdrm`, `libasound`,
+`libX11`, `libxkbcommon`, `libxss`, `vulkan-loader`, `libxxhash`,
+`libunibreak`, `harfbuzz`, `fribidi`, `freetype`, `fontconfig`,
+`libcdio`, `libdvdnav`, `libdvdread`, `libarchive`, `libbluray`,
+`liblcms2`, `libmujs`, `libuchardet`, `librubberband`, `libvapoursynth`,
+`libzimg`, `libdovi`, `zlib`, `libjpeg`, `libgomp`, `libstdc++`,
+plus glibc/libm/pthread and the Intel/Mesa GPU stack).
+
+Install the ffmpeg-libs family for your distribution, or re-run the
+packaging script on a host where those are present. The package must
+therefore be described as **launcher-portable with system prerequisites**,
+not as fully self-contained.
+EOF
 
 # 7. Create desktop entry file
 cat << 'EOF' > "$DIST_DIR/share/applications/io.muvrix.Muvrix.desktop"

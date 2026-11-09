@@ -21,27 +21,61 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Record runner environment
+        run: |
+          echo "Host: $(uname -a)"
+          echo "Architecture: $(uname -m)"
+          rustc --version
+          cargo --version
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Install system dependencies & libmpv-dev
+      - name: Install engine build dependencies (Phase 1.4 pinned source build)
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libmpv-dev \
+            git \
+            meson \
+            ninja-build \
+            pkg-config \
+            libavcodec-dev \
+            libavformat-dev \
+            libavfilter-dev \
+            libavutil-dev \
+            libswresample-dev \
+            libswscale-dev \
+            libavdevice-dev \
+            libass-dev \
+            libwayland-dev \
+            wayland-protocols \
+            libxkbcommon-dev \
+            libx11-dev \
+            libvulkan-dev \
+            vulkan-headers \
+            libdrm-dev \
+            libva-dev \
             libasound2-dev \
             libx11-xcb-dev \
-            libxkbcommon-dev \
-            libwayland-dev \
             libgl1-mesa-dev \
-            pkg-config
+            python3
 
-      - name: Verify libmpv pkg-config
+      - name: Build pinned libmpv 0.42.0 from upstream tag
+        run: |
+          sudo mkdir -p /opt/mpv042
+          sudo chown "$USER" /opt/mpv042
+          MPV_PREFIX=/opt/mpv042 WORKDIR="$RUNNER_TEMP/engine" ./scripts/ci/build-mpv-0.42.sh "$RUNNER_TEMP/engine"
+          echo "PKG_CONFIG_PATH=/opt/mpv042/lib64/pkgconfig:/opt/mpv042/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/opt/mpv042/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+      - name: Verify pinned engine (API 2.6)
         run: |
           pkg-config --modversion mpv
+          pkg-config --modversion libplacebo libavcodec libavformat
           pkg-config --cflags --libs mpv
+          grep "MPV_CLIENT_API_VERSION" /opt/mpv042/include/mpv/client.h
 
       - name: Format Check
         run: cargo fmt --check
@@ -55,7 +89,7 @@ jobs:
       - name: Core Path Resolution Test Suite
         run: cargo test -p muvrix-core
 
-      - name: Native Link Smoke Test & Strict ABI Assertion (libmpv C API 2.5)
+      - name: Native Link Smoke Test & Strict ABI Assertion (libmpv C API 2.6)
         run: cargo test -p libmpv-sys --test link_smoke_test -- --nocapture
 
       - name: Run Test Suite (Headless Runtime)
@@ -70,24 +104,54 @@ jobs:
     container:
       image: fedora:45
     steps:
-      - name: Install distribution packages
+      - name: Install engine build dependencies (Phase 1.4 pinned source build)
         run: |
           dnf install -y \
             git \
             gcc \
+            meson \
+            ninja-build \
+            pkgconf-pkg-config \
+            python3 \
+            ffmpeg-devel \
+            libass-devel \
+            wayland-devel \
+            wayland-protocols-devel \
+            libdisplay-info-devel \
+            libxkbcommon-devel \
+            libX11-devel \
+            libXss-devel \
+            vulkan-headers \
+            vulkan-loader-devel \
+            libdrm-devel \
+            libva-devel \
+            mesa-libGL-devel \
             rust \
             cargo \
             clippy \
-            rustfmt \
-            pkgconf-pkg-config \
-            mpv-libs-devel \
-            mesa-libGL-devel \
-            libX11-devel \
-            libxkbcommon-devel \
-            wayland-devel
+            rustfmt
 
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Record runner environment
+        run: |
+          echo "Host: $(uname -a)"
+          echo "Architecture: $(uname -m)"
+          rustc --version
+          cargo --version
+
+      - name: Build pinned libmpv 0.42.0 from upstream tag
+        run: |
+          MPV_PREFIX=/opt/mpv042 WORKDIR=/tmp/engine ./scripts/ci/build-mpv-0.42.sh /tmp/engine
+          echo "PKG_CONFIG_PATH=/opt/mpv042/lib64/pkgconfig:/opt/mpv042/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/opt/mpv042/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+      - name: Verify pinned engine (API 2.6)
+        run: |
+          pkg-config --modversion mpv
+          pkg-config --modversion libplacebo libavcodec libavformat
+          grep "MPV_CLIENT_API_VERSION" /opt/mpv042/include/mpv/client.h
 
       - name: Format Check
         run: cargo fmt --check
@@ -101,7 +165,7 @@ jobs:
       - name: Core Path Resolution Test Suite
         run: cargo test -p muvrix-core
 
-      - name: Native Link Smoke Test & Strict ABI Assertion (libmpv C API 2.5)
+      - name: Native Link Smoke Test & Strict ABI Assertion (libmpv C API 2.6)
         run: cargo test -p libmpv-sys --test link_smoke_test -- --nocapture
 
       - name: Run Test Suite (Headless Runtime)
@@ -117,20 +181,45 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Record runner environment
+        run: |
+          echo "Host: $(uname -a)"
+          echo "Architecture: $(uname -m)"
+          rustc --version
+          cargo --version
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Install Homebrew dependencies
+      - name: Install Homebrew dependencies (Phase 1.4)
         run: |
-          brew install mpv pkg-config
+          # Homebrew's `mpv` formula tracks the latest upstream release and
+          # cannot be version-pinned to 0.42.0 in the formula itself. The
+          # medium-term target is a pinned source build (as for Linux); the
+          # immediate guard is the strict 2.6 ABI assertion in the next step,
+          # which fails the job if Homebrew ships any other API level.
+          brew install --formula mpv pkg-config
           echo "PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
 
-      - name: Verify libmpv linkage
+      - name: Verify libmpv linkage and record pinned versions
         run: |
           pkg-config --modversion mpv
           pkg-config --cflags --libs mpv
+          brew list --versions mpv
+          brew info --json=v2 mpv | jq -r '.formulae[0].versions'
+          pkg-config --modversion libplacebo libavcodec libavformat || true
+          grep "MPV_CLIENT_API_VERSION" /opt/homebrew/include/mpv/client.h || true
+
+      - name: Enforce pinned engine version (fail on drift)
+        run: |
+          INSTALLED_VERSION=$(brew list --versions mpv | awk '{print $2}')
+          echo "Installed mpv version: ${INSTALLED_VERSION}"
+          if [ "${INSTALLED_VERSION}" != "0.42.0" ]; then
+            echo "::error::Homebrew mpv version is ${INSTALLED_VERSION}, not 0.42.0. The CI contract requires the pinned 0.42.0 engine (see docs/phase-1.4/phase-1.4-engine-baseline-manifest.md)."
+            exit 1
+          fi
 
       - name: Format Check
         run: cargo fmt --check
@@ -144,7 +233,7 @@ jobs:
       - name: Core Path Resolution Test Suite
         run: cargo test -p muvrix-core
 
-      - name: Native Link Smoke Test & Strict ABI Assertion (libmpv C API 2.5)
+      - name: Native Link Smoke Test & Strict ABI Assertion (libmpv C API 2.6)
         run: cargo test -p libmpv-sys --test link_smoke_test -- --nocapture
 
       - name: Run Test Suite (Headless Runtime)
@@ -159,6 +248,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Record runner environment
+        run: |
+          Write-Host "OS: $env:OS"
+          Write-Host "Arch: $env:PROCESSOR_ARCHITECTURE"
+          Write-Host "Rust: $(rustc --version)"
+          Write-Host "Cargo: $(cargo --version)"
 
       - name: Install Rust stable (MSVC target)
         uses: dtolnay/rust-toolchain@stable
@@ -176,8 +272,16 @@ jobs:
         run: |
           $destDir = "C:\mpv-dev"
           $archivePath = "C:\mpv-dev.7z"
-          $url = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261107/mpv-dev-x86_64-20261107-git-9028187538.7z"
-          $expectedSha256 = "df7c433a2d481fdaf6163b201f26abbb0eff0c215c51368397088c6d8f7a001b"
+          # Phase 1.4: libmpv 0.42.0 (Client API 2.6) dev kit.
+          # shinchiro's daily build dated 2026-11-05 is git-3138fc8eea,
+          # which is the upstream v0.42.0 release commit (b0841e8c) plus
+          # the single "Update MPV_VERSION" post-release commit. Its
+          # headers were verified to declare MPV_CLIENT_API_VERSION 2.6
+          # before being pinned below. No shinchiro release asset is built
+          # from the exact v0.42.0 tag commit; the deviation is recorded
+          # in docs/phase-1.4/phase-1.4-engine-baseline-manifest.md.
+          $url = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261105/mpv-dev-x86_64-20261105-git-3138fc8eea.7z"
+          $expectedSha256 = "f463cc69a7a1610937688b837be9f005cf163c26f2e35e50aec8cc7bde2894b4"
 
           New-Item -ItemType Directory -Force -Path $destDir | Out-Null
           Write-Host "Downloading pinned libmpv development archive from $url..."
@@ -198,6 +302,7 @@ jobs:
             "$destDir\include\mpv\client.h",
             "$destDir\include\mpv\render.h",
             "$destDir\include\mpv\render_gl.h",
+            "$destDir\include\mpv\render_d3d11.h",
             "$destDir\libmpv-2.dll"
           )
           foreach ($file in $requiredFiles) {
@@ -236,7 +341,7 @@ jobs:
       - name: Workspace Clippy Linter
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: Native Link Smoke Test (libmpv C API Symbol Resolution)
+      - name: Native Link Smoke Test & Strict ABI Assertion (libmpv C API 2.6)
         run: cargo test -p libmpv-sys --test link_smoke_test -- --nocapture
 
       - name: Core Path Resolution Test Suite

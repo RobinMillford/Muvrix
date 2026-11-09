@@ -2,13 +2,13 @@
 //!
 //! Verifies:
 //! 1. Native linker successfully resolves C API symbols against the target import lib / shared object.
-//! 2. Strict Phase 1.3 Client API baseline: 0x00020005 (Client API 2.5).
+//! 2. Strict Phase 1.4 Client API baseline: 0x00020006 (Client API 2.6).
 //! 3. Inspection and logging of loaded library path, engine version, and architecture.
 //! 4. Basic handle lifecycle creation and destruction.
 
 use libmpv_sys::{
     mpv_client_api_version, mpv_create, mpv_error_string, mpv_free, mpv_get_property_string,
-    mpv_make_version, mpv_terminate_destroy,
+    mpv_initialize, mpv_make_version, mpv_terminate_destroy,
 };
 use std::ffi::CStr;
 
@@ -72,23 +72,31 @@ fn test_native_symbol_link_and_invocation() {
     unsafe {
         let handle = mpv_create();
         assert!(!handle.is_null(), "mpv_create returned null handle");
+        assert_eq!(mpv_initialize(handle), 0, "mpv_initialize failed");
 
         let ver_prop = std::ffi::CString::new("mpv-version").unwrap();
         let ver_ptr = mpv_get_property_string(handle, ver_prop.as_ptr());
-        if !ver_ptr.is_null() {
-            let mpv_ver = CStr::from_ptr(ver_ptr).to_string_lossy();
-            println!("Engine Version:      {mpv_ver}");
-            mpv_free(ver_ptr as *mut _);
-        }
+        assert!(
+            !ver_ptr.is_null(),
+            "mpv-version property unavailable; engine is not a libmpv >= 0.42 build"
+        );
+
+        let mpv_ver = CStr::from_ptr(ver_ptr).to_string_lossy().into_owned();
+        println!("Engine Version:      {mpv_ver}");
+        assert!(
+            mpv_ver.starts_with("mpv v0.42.0"),
+            "Engine version drift: expected mpv v0.42.0 (post-release describe suffix allowed), got: {mpv_ver}"
+        );
+        mpv_free(ver_ptr as *mut _);
 
         mpv_terminate_destroy(handle);
     }
 
-    // 5. Strict Phase 1.3 ABI assertion: Client API 2.5 (0x00020005)
-    let expected_version = mpv_make_version(2, 5);
+    // 5. Strict Phase 1.4 ABI assertion: Client API 2.6 (0x00020006)
+    let expected_version = mpv_make_version(2, 6);
     assert_eq!(
         version, expected_version,
-        "Strict Phase 1.3 ABI assertion failed: expected Client API 2.5 (0x00020005), got {major}.{minor} ({version:#010x})"
+        "Strict Phase 1.4 ABI assertion failed: expected Client API 2.6 (0x00020006), got {major}.{minor} ({version:#010x})"
     );
-    println!("ABI Baseline Check:  PASSED (Strict Client API 2.5 Pinned)");
+    println!("ABI Baseline Check:  PASSED (Strict Client API 2.6 Pinned)");
 }
