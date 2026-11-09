@@ -6,10 +6,23 @@ use std::sync::{Arc, Mutex};
 /// Service name identifier for Muvrix in the operating system's native credential store.
 pub const MUVRIX_KEYRING_SERVICE: &str = "io.muvrix.desktop";
 
+/// Returns true when OS keyring access must be skipped entirely, leaving the
+/// vault purely in-memory. Set `MUVRIX_DISABLE_KEYRING=1` for headless runs.
+///
+/// This exists because on macOS `security-framework` calls can block
+/// indefinitely waiting for a keychain unlock/approval prompt that no one can
+/// answer in CI (or any headless context), which otherwise hangs every test
+/// touching `CredentialVault::store/get/remove`.
+fn keyring_disabled() -> bool {
+    std::env::var_os("MUVRIX_DISABLE_KEYRING").is_some()
+}
+
 /// Thread-safe in-memory vault for network credentials (passwords, auth tokens)
 /// backed by the operating system native keyring (Secret Service, Windows Credential Manager, macOS Keychain)
 /// with transparent, infallible in-memory fallback.
 /// Prevents plaintext credential leakage into SQLite, history files, or console logs.
+/// Set `MUVRIX_DISABLE_KEYRING=1` to skip all OS keyring access (required for
+/// headless CI on macOS, where keychain prompts would otherwise block forever).
 #[derive(Debug, Default, Clone)]
 pub struct CredentialVault {
     secrets: Arc<Mutex<HashMap<String, String>>>,
@@ -26,8 +39,10 @@ impl CredentialVault {
     /// Attempts persistence in the native OS keyring, while maintaining an in-memory
     /// cache for fast lookups and headless/unsupported fallback.
     pub fn store(&self, credential_ref: &str, secret: &str) {
-        if let Ok(entry) = keyring::Entry::new(MUVRIX_KEYRING_SERVICE, credential_ref) {
-            let _ = entry.set_password(secret);
+        if !keyring_disabled() {
+            if let Ok(entry) = keyring::Entry::new(MUVRIX_KEYRING_SERVICE, credential_ref) {
+                let _ = entry.set_password(secret);
+            }
         }
         if let Ok(mut lock) = self.secrets.lock() {
             lock.insert(credential_ref.to_string(), secret.to_string());
@@ -44,12 +59,14 @@ impl CredentialVault {
         }
 
         // Try OS keyring
-        if let Ok(entry) = keyring::Entry::new(MUVRIX_KEYRING_SERVICE, credential_ref) {
-            if let Ok(secret) = entry.get_password() {
-                if let Ok(mut lock) = self.secrets.lock() {
-                    lock.insert(credential_ref.to_string(), secret.clone());
+        if !keyring_disabled() {
+            if let Ok(entry) = keyring::Entry::new(MUVRIX_KEYRING_SERVICE, credential_ref) {
+                if let Ok(secret) = entry.get_password() {
+                    if let Ok(mut lock) = self.secrets.lock() {
+                        lock.insert(credential_ref.to_string(), secret.clone());
+                    }
+                    return Some(secret);
                 }
-                return Some(secret);
             }
         }
 
@@ -58,8 +75,10 @@ impl CredentialVault {
 
     /// Removes a secret credential from both the in-memory vault and native OS keyring.
     pub fn remove(&self, credential_ref: &str) {
-        if let Ok(entry) = keyring::Entry::new(MUVRIX_KEYRING_SERVICE, credential_ref) {
-            let _ = entry.delete_credential();
+        if !keyring_disabled() {
+            if let Ok(entry) = keyring::Entry::new(MUVRIX_KEYRING_SERVICE, credential_ref) {
+                let _ = entry.delete_credential();
+            }
         }
         if let Ok(mut lock) = self.secrets.lock() {
             lock.remove(credential_ref);

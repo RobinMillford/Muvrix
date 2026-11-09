@@ -9,6 +9,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Force OS keyring bypass in CI. On macOS runners, Security.framework calls
+  # can block indefinitely waiting for a keychain unlock prompt that no one
+  # can answer in a headless environment, hanging every test that stores
+  # credentials. The in-memory vault remains fully functional.
+  MUVRIX_DISABLE_KEYRING: "1"
 
 jobs:
   # =========================================================================
