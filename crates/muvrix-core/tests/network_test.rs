@@ -116,6 +116,20 @@ fn test_http_range_and_webdav_streaming_simulation() {
                         line.clear();
                     }
 
+                    // Consume the request body (e.g. PROPFIND's XML payload)
+                    // before responding. Closing a socket with unread received
+                    // bytes makes Windows send a RST instead of FIN, aborting
+                    // the response before the client can read it (10053).
+                    if let Some(content_length) = headers.iter().find_map(|h| {
+                        let lower = h.to_ascii_lowercase();
+                        lower
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    }) {
+                        let mut body = vec![0u8; content_length];
+                        let _ = reader.read_exact(&mut body);
+                    }
+
                     // Check for Authorization
                     let has_auth = headers
                         .iter()
@@ -225,10 +239,12 @@ fn test_http_range_and_webdav_streaming_simulation() {
                         let _ = stream.write_all(&payload_clone);
                     }
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(_) => {
+                    // Transient accept errors (e.g. ECONNABORTED on macOS)
+                    // must not kill the server thread; only the shutdown
+                    // flag stops the loop.
                     thread::sleep(Duration::from_millis(5));
                 }
-                Err(_) => break,
             }
         }
     });
@@ -296,8 +312,19 @@ fn test_http_range_and_webdav_streaming_simulation() {
         (header_text, body)
     };
 
-    // 1. Full content request (no Range)
-    let (head, body) = send_request("GET /video.mp4 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    // 1. Full content request (no Range). Retry on an empty response: under
+    // parallel load a fresh connection can race the server's accept loop on
+    // macOS, yielding an empty header instead of the buffered reply.
+    let mut first = None;
+    for _ in 0..3 {
+        let r = send_request("GET /video.mp4 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+        if r.0.contains("200 OK") {
+            first = Some(r);
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let (head, body) = first.expect("mock server answered after 3 attempts");
     assert!(head.contains("200 OK"));
     assert!(head.contains("Accept-Ranges: bytes"));
     assert_eq!(body.len(), 256);

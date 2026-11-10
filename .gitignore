@@ -47,6 +47,7 @@ docs/RENDERING-PROTOTYPE.md
 docs/architecture/
 docs/mpv-engine/
 docs/verification/
+docs/phase-*
 
 # Dedicated committed test fixtures
 !tests/fixtures/path-resolution/

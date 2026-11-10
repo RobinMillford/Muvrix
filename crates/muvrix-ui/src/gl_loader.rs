@@ -39,5 +39,21 @@ pub unsafe extern "C" fn gl_get_proc_address_trampoline(
         }
     }
 
+    // Windows opengl32.dll symbol lookup fallback for core GL 1.1 symbols
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn GetModuleHandleA(lpModuleName: *const c_char) -> *mut c_void;
+            fn GetProcAddress(hModule: *mut c_void, lpProcName: *const c_char) -> *mut c_void;
+        }
+        let h_gl = GetModuleHandleA(c"opengl32.dll".as_ptr());
+        if !h_gl.is_null() {
+            let proc = GetProcAddress(h_gl, name);
+            if !proc.is_null() {
+                return proc;
+            }
+        }
+    }
+
     std::ptr::null_mut()
 }

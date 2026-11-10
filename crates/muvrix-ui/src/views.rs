@@ -3546,6 +3546,11 @@ impl MuvrixApp {
                         }
 
                         if let Some(id) = delete_conn_id {
+                            if let Some(conn) = connections.iter().find(|c| c.id == id) {
+                                if let Some(ref cred_ref) = conn.credential_ref {
+                                    let _ = self.network_vault.remove_native(cred_ref);
+                                }
+                            }
                             let _ = self.db.delete_connection(id);
                         }
 
@@ -3733,9 +3738,19 @@ impl MuvrixApp {
                                     {
                                         let proto = self.network_protocol_input.clone();
                                         let cred_ref = if !self.network_pass_input.is_empty() {
-                                            let key = format!("{}_{}_{}", proto, self.network_host_input, self.network_user_input);
-                                            self.network_vault.store(&key, &self.network_pass_input);
-                                            Some(key)
+                                            let key = muvrix_core::network::generate_credential_ref(
+                                                &proto,
+                                                self.network_host_input.trim(),
+                                                self.network_port_input,
+                                                self.network_user_input.trim(),
+                                            );
+                                            match self.network_vault.store_native(&key, &self.network_pass_input) {
+                                                Ok(()) => Some(key),
+                                                Err(e) => {
+                                                    self.network_status_msg = Some(format!("Failed to save credential to secure storage: {e}"));
+                                                    return;
+                                                }
+                                            }
                                         } else {
                                             None
                                         };
@@ -3779,8 +3794,13 @@ impl MuvrixApp {
                                                     &self.network_path_input,
                                                     &self.network_user_input,
                                                     if self.network_pass_input.is_empty() { None } else {
-                                                        let key = format!("sftp_{}_{}", self.network_host_input, self.network_user_input);
-                                                        self.network_vault.store(&key, &self.network_pass_input);
+                                                        let key = muvrix_core::network::generate_credential_ref(
+                                                            "sftp",
+                                                            self.network_host_input.trim(),
+                                                            self.network_port_input,
+                                                            self.network_user_input.trim(),
+                                                        );
+                                                        self.network_vault.store_ephemeral(&key, &self.network_pass_input);
                                                         Some(key)
                                                     },
                                                     None,
@@ -3808,8 +3828,13 @@ impl MuvrixApp {
                                                     if self.network_user_input.is_empty() { None } else { Some(self.network_user_input.clone()) },
                                                     None,
                                                     if self.network_pass_input.is_empty() { None } else {
-                                                        let key = format!("smb_{}_{}", self.network_host_input, self.network_user_input);
-                                                        self.network_vault.store(&key, &self.network_pass_input);
+                                                        let key = muvrix_core::network::generate_credential_ref(
+                                                            "smb",
+                                                            self.network_host_input.trim(),
+                                                            self.network_port_input,
+                                                            self.network_user_input.trim(),
+                                                        );
+                                                        self.network_vault.store_ephemeral(&key, &self.network_pass_input);
                                                         Some(key)
                                                     },
                                                     self.network_pass_input.is_empty(),
@@ -3835,8 +3860,13 @@ impl MuvrixApp {
                                                     self.network_https_input,
                                                     if self.network_user_input.is_empty() { None } else { Some(self.network_user_input.clone()) },
                                                     if self.network_pass_input.is_empty() { None } else {
-                                                        let key = format!("webdav_{}_{}", self.network_host_input, self.network_user_input);
-                                                        self.network_vault.store(&key, &self.network_pass_input);
+                                                        let key = muvrix_core::network::generate_credential_ref(
+                                                            "webdav",
+                                                            self.network_host_input.trim(),
+                                                            self.network_port_input,
+                                                            self.network_user_input.trim(),
+                                                        );
+                                                        self.network_vault.store_ephemeral(&key, &self.network_pass_input);
                                                         Some(key)
                                                     },
                                                     self.network_vault.clone(),

@@ -123,13 +123,20 @@ impl RenderEngine {
             .or_else(|| NonZeroU32::new(prev_fbo as u32).map(glow::NativeFramebuffer));
         gl.bind_framebuffer(glow::FRAMEBUFFER, restore_target);
 
-        // 5. Composite video quad into the target viewport
-        gl.viewport(left, bottom, width, height);
-        gl.disable(glow::DEPTH_TEST);
-        gl.disable(glow::CULL_FACE);
-        gl.disable(glow::BLEND);
+        // 5. Composite video quad into the target viewport with RAII state isolation
+        {
+            let _state_guard = GlStateGuard::capture(gl);
 
-        self.quad.render(gl, self.fbo.texture());
+            gl.viewport(left, bottom, width, height);
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+
+            self.quad.render(gl, self.fbo.texture());
+            // _state_guard restores viewport, scissor, blend, depth, cull, active texture,
+            // bound texture, program, and VAO on drop.
+        }
 
         // 6. Reset active texture unit to TEXTURE0
         gl.active_texture(glow::TEXTURE0);
@@ -145,5 +152,108 @@ impl RenderEngine {
         self.mpv_render_ctx.destroy();
         self.fbo.destroy(gl);
         self.quad.destroy(gl);
+    }
+}
+
+/// RAII guard that captures and isolates OpenGL pipeline state during video quad compositing.
+/// Restores viewport, scissor box & test, depth test, cull face, blend state, active texture unit,
+/// bound texture, shader program, and vertex array object upon drop or explicit restoration.
+struct GlStateGuard<'a> {
+    gl: &'a glow::Context,
+    prev_viewport: [i32; 4],
+    prev_scissor_box: [i32; 4],
+    prev_scissor_test: bool,
+    prev_depth_test: bool,
+    prev_cull_face: bool,
+    prev_blend: bool,
+    prev_active_texture: u32,
+    prev_texture_2d: Option<glow::NativeTexture>,
+    prev_program: Option<glow::NativeProgram>,
+    prev_vao: Option<glow::NativeVertexArray>,
+}
+
+impl<'a> GlStateGuard<'a> {
+    unsafe fn capture(gl: &'a glow::Context) -> Self {
+        let mut prev_viewport = [0i32; 4];
+        gl.get_parameter_i32_slice(glow::VIEWPORT, &mut prev_viewport);
+
+        let mut prev_scissor_box = [0i32; 4];
+        gl.get_parameter_i32_slice(glow::SCISSOR_BOX, &mut prev_scissor_box);
+
+        let prev_scissor_test = gl.is_enabled(glow::SCISSOR_TEST);
+        let prev_depth_test = gl.is_enabled(glow::DEPTH_TEST);
+        let prev_cull_face = gl.is_enabled(glow::CULL_FACE);
+        let prev_blend = gl.is_enabled(glow::BLEND);
+        let prev_active_texture = gl.get_parameter_i32(glow::ACTIVE_TEXTURE) as u32;
+        let prev_texture_2d = gl.get_parameter_texture(glow::TEXTURE_BINDING_2D);
+        let prev_program = gl.get_parameter_program(glow::CURRENT_PROGRAM);
+        let prev_vao = gl.get_parameter_vertex_array(glow::VERTEX_ARRAY_BINDING);
+
+        Self {
+            gl,
+            prev_viewport,
+            prev_scissor_box,
+            prev_scissor_test,
+            prev_depth_test,
+            prev_cull_face,
+            prev_blend,
+            prev_active_texture,
+            prev_texture_2d,
+            prev_program,
+            prev_vao,
+        }
+    }
+
+    unsafe fn restore(&self) {
+        let gl = self.gl;
+        gl.viewport(
+            self.prev_viewport[0],
+            self.prev_viewport[1],
+            self.prev_viewport[2],
+            self.prev_viewport[3],
+        );
+        gl.scissor(
+            self.prev_scissor_box[0],
+            self.prev_scissor_box[1],
+            self.prev_scissor_box[2],
+            self.prev_scissor_box[3],
+        );
+
+        if self.prev_scissor_test {
+            gl.enable(glow::SCISSOR_TEST);
+        } else {
+            gl.disable(glow::SCISSOR_TEST);
+        }
+
+        if self.prev_depth_test {
+            gl.enable(glow::DEPTH_TEST);
+        } else {
+            gl.disable(glow::DEPTH_TEST);
+        }
+
+        if self.prev_cull_face {
+            gl.enable(glow::CULL_FACE);
+        } else {
+            gl.disable(glow::CULL_FACE);
+        }
+
+        if self.prev_blend {
+            gl.enable(glow::BLEND);
+        } else {
+            gl.disable(glow::BLEND);
+        }
+
+        gl.active_texture(self.prev_active_texture);
+        gl.bind_texture(glow::TEXTURE_2D, self.prev_texture_2d);
+        gl.use_program(self.prev_program);
+        gl.bind_vertex_array(self.prev_vao);
+    }
+}
+
+impl Drop for GlStateGuard<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            self.restore();
+        }
     }
 }

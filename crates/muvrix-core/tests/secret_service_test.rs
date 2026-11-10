@@ -291,3 +291,162 @@ fn test_sqlite_schema_stores_credential_ref_uuid_only() {
 
     vault.remove(credential_ref_uuid);
 }
+
+#[test]
+fn test_live_secret_service_native_methods() {
+    if !should_run_native_keyring_tests() {
+        return;
+    }
+
+    let test_uuid = format!(
+        "test-native-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let _guard = KeyringTestGuard::new(MUVRIX_KEYRING_SERVICE, &test_uuid);
+    let secret = "NativeSecretTest_987#xyz";
+
+    let vault = CredentialVault::new();
+
+    // 1. Store via explicit native method (skip gracefully when the
+    // Secret Service daemon is unavailable, matching the CRUD test above)
+    match vault.store_native(&test_uuid, secret) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("Secret Service not accessible in this environment: {e}; skipping");
+            return;
+        }
+    }
+
+    // 2. Retrieve via explicit native method
+    let retrieved = vault
+        .get_native(&test_uuid)
+        .expect("Explicit get_native from native keyring");
+    assert_eq!(retrieved, secret);
+
+    // 3. Delete via explicit native method
+    vault
+        .remove_native(&test_uuid)
+        .expect("Explicit remove_native from native keyring");
+
+    // 4. Verify get_native now returns NotFound
+    let after_delete = vault.get_native(&test_uuid);
+    assert!(
+        after_delete.is_err(),
+        "get_native must return Err after deletion"
+    );
+}
+
+#[test]
+fn test_live_secret_service_restart_lifecycle() {
+    if !should_run_native_keyring_tests() {
+        return;
+    }
+
+    let test_uuid = format!(
+        "test-restart-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let _guard = KeyringTestGuard::new(MUVRIX_KEYRING_SERVICE, &test_uuid);
+    let secret_v1 = "InitialSecretAfterReboot_111";
+    let secret_v2 = "UpdatedSecretAfterReboot_222";
+
+    // Session 1: Store secret (skip gracefully when no Secret Service)
+    {
+        let vault_session1 = CredentialVault::new();
+        match vault_session1.store_native(&test_uuid, secret_v1) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Secret Service not accessible in this environment: {e}; skipping");
+                return;
+            }
+        }
+        assert_eq!(vault_session1.get(&test_uuid).as_deref(), Some(secret_v1));
+    } // vault_session1 dropped, in-memory cache gone
+
+    // Session 2: Application restart simulation
+    {
+        let vault_session2 = CredentialVault::new();
+        // In-memory cache is empty, must retrieve from native OS keyring
+        let loaded = vault_session2
+            .get_native(&test_uuid)
+            .expect("Session 2 retrieve from native keyring after restart");
+        assert_eq!(loaded, secret_v1);
+
+        // Update secret in native store
+        vault_session2
+            .store_native(&test_uuid, secret_v2)
+            .expect("Session 2 update secret in native keyring");
+    } // vault_session2 dropped
+
+    // Session 3: Second application restart simulation
+    {
+        let vault_session3 = CredentialVault::new();
+        let loaded_v2 = vault_session3
+            .get_native(&test_uuid)
+            .expect("Session 3 retrieve updated secret after second restart");
+        assert_eq!(loaded_v2, secret_v2);
+
+        // Delete secret
+        vault_session3
+            .remove_native(&test_uuid)
+            .expect("Session 3 remove_native");
+    }
+
+    // Session 4: Verification of deletion after restart
+    {
+        let vault_session4 = CredentialVault::new();
+        assert!(
+            vault_session4.get_native(&test_uuid).is_err(),
+            "Session 4 must find no credential after deletion"
+        );
+        assert_eq!(vault_session4.get(&test_uuid), None);
+    }
+}
+
+#[test]
+fn test_ephemeral_does_not_persist_to_native_store() {
+    if !should_run_native_keyring_tests() {
+        return;
+    }
+
+    let test_uuid = format!(
+        "test-eph-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let _guard = KeyringTestGuard::new(MUVRIX_KEYRING_SERVICE, &test_uuid);
+    let secret = "EphemeralSecret_DoNotPersist";
+
+    let vault_session1 = CredentialVault::new();
+    vault_session1.store_ephemeral(&test_uuid, secret);
+
+    // Ephemeral lookup succeeds in the same instance
+    assert_eq!(
+        vault_session1.get_ephemeral(&test_uuid).as_deref(),
+        Some(secret)
+    );
+    assert_eq!(vault_session1.get(&test_uuid).as_deref(), Some(secret));
+
+    // Native store must NOT contain the ephemeral secret
+    let native_res = vault_session1.get_native(&test_uuid);
+    assert!(
+        native_res.is_err(),
+        "Native store must not contain secrets stored via store_ephemeral"
+    );
+
+    // Restart simulation: another vault instance with empty in-memory cache
+    let vault_session2 = CredentialVault::new();
+    assert_eq!(
+        vault_session2.get(&test_uuid),
+        None,
+        "Ephemeral secret must not be visible across application instances"
+    );
+}
