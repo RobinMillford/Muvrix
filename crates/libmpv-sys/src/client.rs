@@ -289,4 +289,8 @@ extern "C" {
     );
     pub fn mpv_wait_event(ctx: *mut mpv_handle, timeout: f64) -> *mut mpv_event;
     pub fn mpv_wakeup(ctx: *mut mpv_handle);
+    /// Monotonic engine clock in nanoseconds (`mpv/client.h`).
+    pub fn mpv_get_time_ns(ctx: *mut mpv_handle) -> i64;
+    /// Monotonic engine clock in microseconds (`mpv/client.h`).
+    pub fn mpv_get_time_us(ctx: *mut mpv_handle) -> i64;
 }

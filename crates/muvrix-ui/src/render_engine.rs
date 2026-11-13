@@ -1,18 +1,177 @@
 //! Rendering engine coordinating libmpv OpenGL playback and quad presentation.
+//!
+//! # Frame pacing
+//!
+//! The embedded render API has three moving parts that must agree:
+//!
+//! * `MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME` — whether `render` may block until
+//!   the frame's target display time.
+//! * `MPV_RENDER_PARAM_NEXT_FRAME_INFO` — the absolute time the frame should be
+//!   displayed, so the host can wait itself instead of blocking the UI thread.
+//! * `mpv_render_context_report_swap()` — tells the engine a frame reached the
+//!   screen, which is what its timing code calibrates against.
+//!
+//! [`PacingMode`] selects which combination is used, and [`SwapReportMode`] which
+//! swap-reporting policy is used; both are selectable at runtime so they can be
+//! measured against each other.
 
 use glow::HasContext as _;
 use muvrix_player::MpvRenderContext;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::fbo::OffscreenFbo;
 use crate::quad::QuadRenderer;
+use crate::wake::{schedule_no_frame_fallback, WakeHandle};
+
+/// How the render loop paces frames against the engine's target display times.
+///
+/// `Unpaced` was removed in Phase 2.0. It rendered on every paint callback
+/// regardless of whether a new engine frame existed, which duplicated render
+/// work (and, in copy-back mode, re-uploaded the same frame) so that the paint
+/// rate — not the media rate — decided how often the engine was driven. The
+/// runner drives paints from the compositor's frame callbacks, so an unpaced
+/// mode there is both wasteful and semantically wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacingMode {
+    /// Block inside `mpv_render_context_render` until the target time
+    /// (`block_for_target_time = 1`). Diagnostic only: blocks the caller.
+    Blocking,
+    /// Never block: take the frame's target time from `NEXT_FRAME_INFO`, render
+    /// only when a new frame exists, and schedule the next paint near the target.
+    /// This is the production mode.
+    Scheduled,
+}
+
+impl PacingMode {
+    /// Reads `MUVRIX_PACING` (`blocking` | `scheduled`).
+    pub fn from_env() -> Self {
+        match std::env::var("MUVRIX_PACING")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "blocking" => Self::Blocking,
+            _ => Self::Scheduled,
+        }
+    }
+
+    fn blocks(&self) -> bool {
+        matches!(self, Self::Blocking)
+    }
+
+    /// Production pacing.
+    pub fn default_mode() -> Self {
+        Self::Scheduled
+    }
+}
+
+/// Construction options that differ between the eframe shell and the native runner.
+#[derive(Debug, Clone, Copy)]
+pub struct EngineOptions {
+    /// Internal format for the engine's working target (`GL_RGBA8` or `GL_RGBA16F`).
+    pub internal_format: u32,
+    /// When true, `paint` renders into the working target but does not blit it to
+    /// the current framebuffer: the shell composites video and UI in one pass
+    /// (`platform::Composite`) so both are blended in the correct domain.
+    pub deferred_composite: bool,
+}
+
+impl Default for EngineOptions {
+    fn default() -> Self {
+        Self {
+            internal_format: glow::RGBA8,
+            deferred_composite: false,
+        }
+    }
+}
+
+/// When the engine is told that a frame was presented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwapReportMode {
+    /// Never report (control; the engine's timing degrades and it may log
+    /// "render() not being called or stuck").
+    None,
+    /// Report immediately after rendering into the intermediate FBO, i.e. before
+    /// eframe has presented. This was the previous production behaviour.
+    Immediate,
+    /// Acknowledge the *previous* frame at the start of the next paint callback,
+    /// so the report lands after the frame actually reached the screen.
+    Deferred,
+}
+
+impl SwapReportMode {
+    /// Reads `MUVRIX_SWAP_REPORT` (`none` | `immediate` | `deferred`).
+    pub fn from_env() -> Self {
+        match std::env::var("MUVRIX_SWAP_REPORT")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "none" => Self::None,
+            "immediate" => Self::Immediate,
+            "deferred" => Self::Deferred,
+            _ => Self::Deferred,
+        }
+    }
+}
+
+/// Histogram buckets for the duration of one `mpv_render_context_render` call
+/// on the UI thread. Upper bounds: 1, 2, 4, 8, 16, 33, 66, ∞ ms.
+pub const BLOCK_BUCKETS_US: [u64; 7] = [1_000, 2_000, 4_000, 8_000, 16_000, 33_000, 66_000];
+
+/// Counters and timings exposed for telemetry.
+#[derive(Debug, Clone, Default)]
+pub struct RenderTelemetry {
+    pub pain_count: u64,
+    pub mpv_renders: u64,
+    pub mpv_skips: u64,
+    pub swap_reports: u64,
+    /// No-frame fallback deadlines scheduled through the wake handle (WP5).
+    pub no_frame_fallback_deadlines: u64,
+    pub last_target_time_us: Option<i64>,
+    pub last_render_block_us: u64,
+    pub max_render_block_us: u64,
+    pub render_block_us_total: u64,
+    pub render_block_hist: [u64; 8],
+}
 
 /// Coordinates libmpv off-screen rendering and compositing into the egui glow pipeline.
 pub struct RenderEngine {
     mpv_render_ctx: MpvRenderContext,
     fbo: OffscreenFbo,
-    quad: QuadRenderer,
+    /// The GL3.3 blit quad. `None` when the shell composites, because the quad
+    /// is never drawn there and its GLSL 3.30 shader is invalid in a GLES
+    /// context (Mesa crashes while reporting that link error).
+    quad: Option<QuadRenderer>,
     frame_count: u64,
+    pacing: PacingMode,
+    swap_report: SwapReportMode,
+    pending_swap: bool,
+    egui_ctx: Option<egui::Context>,
+    /// `(Instant::now(), mpv clock)` pair used to convert between the monotonic
+    /// clock and the engine's microsecond time base without touching the mpv
+    /// handle from the render path.
+    clock_base: Option<(Instant, i64)>,
+    /// Set by the engine's update callback when it has work; consumed by the
+    /// next paint. This is what makes the loop callback-driven rather than
+    /// timer-driven, without re-rendering the same frame on every vsync.
+    frame_signal: Option<Arc<AtomicBool>>,
+    telemetry: RenderTelemetry,
+    options: EngineOptions,
+    /// Handle to the event-loop wake signal, used to keep the loop from parking
+    /// indefinitely when mpv has no frame to present.
+    ///
+    /// Platform-neutral by design (WP5): the engine knows only
+    /// [`WakeHandle`], never the Linux `WakeSignal`. Set after construction by
+    /// the shell via [`set_wake`]; defaults to `None` until the engine is wired
+    /// into a running event loop.
+    wake: Option<Arc<dyn WakeHandle>>,
+    /// The viewport rectangle the engine last rendered into, in window pixels
+    /// with a bottom-left origin. Consumed by the shell's composite pass.
+    last_video_rect: [i32; 4],
 }
 
 impl RenderEngine {
@@ -27,15 +186,140 @@ impl RenderEngine {
         initial_width: u32,
         initial_height: u32,
     ) -> Result<Self, String> {
-        let fbo = OffscreenFbo::new(gl, initial_width, initial_height)?;
-        let quad = QuadRenderer::new(gl)?;
+        Self::new_with_options(
+            gl,
+            mpv_render_ctx,
+            initial_width,
+            initial_height,
+            EngineOptions::default(),
+        )
+    }
+
+    /// Creates the engine with explicit target format / compositing behaviour.
+    ///
+    /// # Safety
+    ///
+    /// Must be called with the OpenGL context current on the calling thread.
+    pub unsafe fn new_with_options(
+        gl: &glow::Context,
+        mpv_render_ctx: MpvRenderContext,
+        initial_width: u32,
+        initial_height: u32,
+        options: EngineOptions,
+    ) -> Result<Self, String> {
+        let fbo = OffscreenFbo::new_with_format(
+            gl,
+            initial_width,
+            initial_height,
+            options.internal_format as i32,
+        )?;
+        let quad = if options.deferred_composite {
+            None
+        } else {
+            Some(QuadRenderer::new(gl)?)
+        };
 
         Ok(Self {
             mpv_render_ctx,
             fbo,
             quad,
             frame_count: 0,
+            pacing: PacingMode::from_env(),
+            swap_report: SwapReportMode::from_env(),
+            pending_swap: false,
+            egui_ctx: None,
+            clock_base: None,
+            frame_signal: None,
+            telemetry: RenderTelemetry::default(),
+            options,
+            last_video_rect: [0, 0, 0, 0],
+            wake: None,
         })
+    }
+
+    /// Video texture of the engine's working target (composite pass input).
+    pub fn video_texture(&self) -> glow::Texture {
+        self.fbo.texture()
+    }
+
+    /// Viewport rectangle of the last rendered frame, window pixels, bottom-left origin.
+    pub fn last_video_rect(&self) -> [i32; 4] {
+        self.last_video_rect
+    }
+
+    /// True when the working target is a floating-point format.
+    pub fn working_target_is_float(&self) -> bool {
+        self.fbo.internal_format() == glow::RGBA16F as i32
+            || self.fbo.internal_format() == glow::RGBA32F as i32
+    }
+
+    /// Acknowledges the frame that was presented by the shell's swap.
+    ///
+    /// Called *after* `eglSwapBuffers`, which is what makes the acknowledgement
+    /// mean "handed to the compositor" rather than "drawn into an FBO".
+    pub fn report_presented(&mut self) {
+        if self.pending_swap {
+            crate::trace::record(crate::trace::Ev::ReportSwap, "deferred", 0, 0);
+            self.mpv_render_ctx.report_swap();
+            self.telemetry.swap_reports += 1;
+            self.pending_swap = false;
+        }
+    }
+
+    /// Drops a queued swap acknowledgement without reporting it.
+    ///
+    /// Used when `eglSwapBuffers` failed: the frame was never flipped, so
+    /// reporting it on a later successful swap would attribute an old frame to a
+    /// newer display instant. The API is explicit that inconsistent use of
+    /// `mpv_render_context_report_swap` degrades playback, so a frame that was
+    /// rendered but not shown is better dropped than mis-timed.
+    pub fn discard_pending_swap(&mut self) {
+        self.pending_swap = false;
+    }
+
+    /// Provides the egui context so paced rendering can schedule the next wake-up.
+    pub fn set_egui_context(&mut self, ctx: egui::Context) {
+        self.egui_ctx = Some(ctx);
+    }
+
+    /// Provides the event-loop wake signal so the no-new-frame path can keep the
+    /// loop from parking indefinitely when mpv has no frame to present.
+    ///
+    /// Accepts any platform implementation of [`WakeHandle`]; on Linux the
+    /// runner passes its `WakeSignal`.
+    pub fn set_wake(&mut self, wake: Arc<dyn WakeHandle>) {
+        self.wake = Some(wake);
+    }
+
+    /// True when a wake handle is configured (headless/test engines have none).
+    pub fn has_wake_handle(&self) -> bool {
+        self.wake.is_some()
+    }
+
+    /// Registers the flag raised by the engine update callback.
+    ///
+    /// Without it, deciding whether to render from `mpv_render_context_update()`
+    /// alone races the decoder: at 60 fps the flag can be clear at the instant a
+    /// paint callback runs, the pending frame then ages out and is dropped, and
+    /// presentation collapses to half the source rate (measured: 30.0 fps and
+    /// ~30 drops/s on 60 fps content).
+    pub fn set_frame_signal(&mut self, signal: Arc<AtomicBool>) {
+        self.frame_signal = Some(signal);
+    }
+
+    /// Anchors the engine's microsecond clock to a local `Instant`.
+    ///
+    /// `mpv_get_time_us()` is only valid with a live handle, so the host samples
+    /// it once at startup and the render path interpolates from there.
+    pub fn set_clock_base(&mut self, mpv_time_us: i64) {
+        if mpv_time_us > 0 {
+            self.clock_base = Some((Instant::now(), mpv_time_us));
+        }
+    }
+
+    fn now_us(&self) -> Option<i64> {
+        let (anchor, base) = self.clock_base?;
+        Some(base + anchor.elapsed().as_micros() as i64)
     }
 
     /// Access the underlying mpv render context.
@@ -51,6 +335,18 @@ impl RenderEngine {
     /// Total video frames composited.
     pub fn frame_count(&self) -> u64 {
         self.frame_count
+    }
+
+    pub fn pacing(&self) -> PacingMode {
+        self.pacing
+    }
+
+    pub fn swap_report(&self) -> SwapReportMode {
+        self.swap_report
+    }
+
+    pub fn telemetry(&self) -> &RenderTelemetry {
+        &self.telemetry
     }
 
     /// Paints the video frame enforcing the Framebuffer Restoration Contract.
@@ -69,7 +365,46 @@ impl RenderEngine {
             return;
         }
 
-        // 0. Capture GL state *before* libmpv renders into the FBO.
+        self.telemetry.pain_count += 1;
+
+        // 0. Deferred swap acknowledgement (eframe shell only): the frame
+        //    rendered in the previous paint callback has been presented by the
+        //    compositor by now. The native runner reports after its own
+        //    `eglSwapBuffers` instead, which is stronger evidence.
+        if !self.options.deferred_composite
+            && self.swap_report == SwapReportMode::Deferred
+            && self.pending_swap
+        {
+            self.mpv_render_ctx.report_swap();
+            self.telemetry.swap_reports += 1;
+            self.pending_swap = false;
+        }
+
+        // 1. Decide whether this callback has a video frame to draw.
+        //
+        //    `mpv_render_context_update()` is the engine's own "a frame is
+        //    ready" signal. Rendering without it re-renders the same frame at
+        //    display rate, which wastes the whole render pipeline and, in
+        //    copy-back mode, re-uploads every frame.
+        let update_flags = self.mpv_render_ctx.update();
+        let engine_has_frame = (update_flags
+            & (libmpv_sys::mpv_render_update_flag::MPV_RENDER_UPDATE_FRAME as u64))
+            != 0;
+        crate::trace::record(
+            crate::trace::Ev::RenderUpdate,
+            "paint",
+            update_flags as i64,
+            engine_has_frame as i64,
+        );
+        let signalled = self
+            .frame_signal
+            .as_ref()
+            .map(|s| s.swap(false, Ordering::AcqRel))
+            .unwrap_or(false);
+        let should_render = engine_has_frame || signalled;
+        self.last_video_rect = viewport_px;
+
+        // 0b. Capture GL state *before* libmpv renders into the FBO.
         // libmpv's render call may mutate viewport/scissor/etc. internally
         // (it sizes its own rendering target to the FBO), so capturing only
         // around the quad composite would restore the post-render state
@@ -77,89 +412,191 @@ impl RenderEngine {
         // whole of `paint()` makes the paint operation state-neutral.
         let _state_guard = GlStateGuard::capture(gl);
 
-        // 1. Framebuffer Restoration Contract: Query active FBO
         let prev_fbo = gl.get_parameter_i32(glow::FRAMEBUFFER_BINDING);
-
-        // 2. Ensure FBO dimensions match physical viewport
         self.fbo.ensure_size(gl, width as u32, height as u32);
 
-        // 3. Render libmpv video frame into the off-screen FBO
-        let fbo_params = libmpv_sys::mpv_opengl_fbo {
-            fbo: self.fbo.fbo().0.get() as std::os::raw::c_int,
-            w: width,
-            h: height,
-            internal_format: glow::RGBA8 as std::os::raw::c_int,
-        };
+        if should_render {
+            let fbo_params = libmpv_sys::mpv_opengl_fbo {
+                fbo: self.fbo.fbo().0.get() as std::os::raw::c_int,
+                w: width,
+                h: height,
+                internal_format: self.fbo.internal_format(),
+            };
 
-        // Render into offscreen FBO.
-        // flip_y: false (quad coordinates align bottom-left to bottom-left)
-        // block_for_target_time: false (ensures UI thread does not freeze waiting on presentation timing)
-        let _ = self.mpv_render_ctx.render_gl(fbo_params, false, false);
-        self.mpv_render_ctx.report_swap();
-        self.frame_count += 1;
-        if self.frame_count % 30 == 1 {
-            let center_pixel = self.fbo.read_pixel_sample(gl);
-            log::info!(
-                "Rendered frame #{}, viewport: [{}, {}, {}x{}], center RGBA: {:?}",
-                self.frame_count,
-                left,
-                bottom,
-                width,
-                height,
-                center_pixel
+            let started = Instant::now();
+            crate::trace::record(
+                crate::trace::Ev::RenderEnter,
+                "mpv",
+                fbo_params.w as i64,
+                fbo_params.h as i64,
             );
+            let target =
+                self.mpv_render_ctx
+                    .render_gl_ex(fbo_params, false, self.pacing.blocks(), true);
+            let elapsed = started.elapsed();
+            let target_state = match &target {
+                Ok(Some(_)) => 1,
+                Ok(None) => 0,
+                Err(_) => -1,
+            };
+            crate::trace::record(
+                crate::trace::Ev::RenderExit,
+                "mpv",
+                elapsed.as_micros() as i64,
+                target_state,
+            );
+            let block_us = elapsed.as_micros() as u64;
+            self.telemetry.last_render_block_us = block_us;
+            self.telemetry.max_render_block_us = self.telemetry.max_render_block_us.max(block_us);
+            self.telemetry.render_block_us_total += block_us;
+            let bucket = BLOCK_BUCKETS_US
+                .iter()
+                .position(|limit| block_us < *limit)
+                .unwrap_or(BLOCK_BUCKETS_US.len());
+            self.telemetry.render_block_hist[bucket] += 1;
+            self.telemetry.mpv_renders += 1;
+            self.frame_count += 1;
 
-            // Optional automated frame capture for verification testing
-            if let Ok(capture_path) = std::env::var("MUVRIX_CAPTURE_FRAME_PNG") {
-                if self.frame_count == 181
-                    || (self.frame_count == 61 && !capture_path.contains("movie"))
-                {
-                    let count = self.frame_count;
-                    if let Err(e) = self.fbo.save_screenshot_png(gl, &capture_path) {
-                        log::error!("Failed to save screenshot: {e}");
-                    } else {
-                        log::info!("Successfully captured frame #{count} to {capture_path}");
+            match self.swap_report {
+                SwapReportMode::Immediate => {
+                    self.mpv_render_ctx.report_swap();
+                    self.telemetry.swap_reports += 1;
+                    crate::trace::record(crate::trace::Ev::ReportSwap, "immediate", 0, 0);
+                }
+                SwapReportMode::Deferred => self.pending_swap = true,
+                SwapReportMode::None => {}
+            }
+
+            // 1b. Non-blocking pacing: if the engine told us when this frame is
+            //     due, ask for a repaint then instead of spinning on vsync.
+            if let Ok(Some(target_us)) = target {
+                self.telemetry.last_target_time_us = Some(target_us);
+                self.schedule_repaint_at(target_us);
+            }
+
+            if self.frame_count % 30 == 1 {
+                let center_pixel = self.fbo.read_pixel_sample(gl);
+                log::trace!(
+                    "Rendered frame #{}, viewport: [{}, {}, {}x{}], center RGBA: {:?}",
+                    self.frame_count,
+                    left,
+                    bottom,
+                    width,
+                    height,
+                    center_pixel
+                );
+
+                // Optional automated frame capture for verification testing
+                if let Ok(capture_path) = std::env::var("MUVRIX_CAPTURE_FRAME_PNG") {
+                    if self.frame_count == 181
+                        || (self.frame_count == 61 && !capture_path.contains("movie"))
+                    {
+                        let count = self.frame_count;
+                        if let Err(e) = self.fbo.save_screenshot_png(gl, &capture_path) {
+                            log::error!("Failed to save screenshot: {e}");
+                        } else {
+                            log::info!("Successfully captured frame #{count} to {capture_path}");
+                        }
                     }
                 }
             }
+        } else {
+            // No new frame at this paint. Do NOT call
+            // `mpv_render_context_render(SKIP_RENDERING)`: the engine counts that
+            // as a completed render and advances the frame's display slot, so an
+            // alternating paint/every-other-paint pattern silently drops every
+            // second frame at 60 fps (measured: 30.0 fps, ~30 drops/s). Leaving
+            // the pending frame untouched lets the next paint pick it up.
+            self.telemetry.mpv_skips += 1;
+
+            // Keep the event loop from parking indefinitely when mpv has no frame
+            // to present. Without this, both wake paths go quiet at the same time:
+            // the mpv update callback is not raised (no frame ready) and
+            // `schedule_repaint_at` is not reached (gated behind `should_render`).
+            // The loop would then arm `ControlFlow::Wait` (indefinite) and calloop
+            // would park forever — the 4K HDR stall. A bounded poll interval lets
+            // the next paint re-examine `has_frame()` for a newly-decoded frame
+            // without busy-waiting.
+            //
+            // Use the wake handle directly instead of egui's
+            // request_repaint_after: egui's callback is async and the deadline it
+            // sets can be overwritten by the draw()-end deadline before the
+            // callback fires, leaving the loop with a late deadline and no
+            // pending Wake to interrupt it.
+            //
+            // The interval is the named, documented NO_FRAME_FALLBACK_INTERVAL
+            // constant (Phase 2.3 measures it; it is not a new tunable).
+            if schedule_no_frame_fallback(self.wake.as_ref(), Instant::now()) {
+                self.telemetry.no_frame_fallback_deadlines =
+                    self.telemetry.no_frame_fallback_deadlines.saturating_add(1);
+            }
         }
 
-        // 4. Framebuffer Restoration Contract: Restore target framebuffer
-        // Either the painter's intermediate FBO or the previously bound FBO
+        // 2. Framebuffer Restoration Contract: Restore target framebuffer
         let restore_target = painter
             .intermediate_fbo()
             .or_else(|| NonZeroU32::new(prev_fbo as u32).map(glow::NativeFramebuffer));
         gl.bind_framebuffer(glow::FRAMEBUFFER, restore_target);
 
-        // 5. Composite video quad into the target viewport with RAII state isolation
-        // (the guard captured above stays held across the whole render so the
-        // quad's state mutations are also undone on drop at the end of paint).
-        {
+        // 3. Composite the (fresh or previous) frame.
+        //
+        //    Skipped when the shell composites: there the engine's output is a
+        //    texture the shell reads, and drawing it here would either double-
+        //    draw it or (with a premultiplied UI) place the video on top of the
+        //    UI. The engine leaves the working target bound and untouched.
+        if !self.options.deferred_composite {
             gl.viewport(left, bottom, width, height);
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::DEPTH_TEST);
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
 
-            self.quad.render(gl, self.fbo.texture());
+            if let Some(quad) = &self.quad {
+                quad.render(gl, self.fbo.texture());
+            }
             // _state_guard restores viewport, scissor, blend, depth, cull, active texture,
             // bound texture, program, and VAO on drop.
         }
 
-        // 6. Reset active texture unit to TEXTURE0
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, None);
     }
 
+    /// Requests a repaint shortly before `target_us` (microseconds, engine clock).
+    fn schedule_repaint_at(&self, target_us: i64) {
+        let Some(ctx) = &self.egui_ctx else {
+            return;
+        };
+        let Some(now_us) = self.now_us() else {
+            return;
+        };
+        let delta_us = target_us - now_us;
+        // Present one refresh interval early: egui's timer fires on the next
+        // vsync boundary, so waking exactly at the target would be late.
+        let lead_us = 4_000;
+        let wait_us = (delta_us - lead_us).max(0);
+        if wait_us > 0 {
+            let capped = (wait_us as u64).min(50_000);
+            ctx.request_repaint_after(Duration::from_micros(capped));
+        }
+    }
+
     /// Destroys OpenGL resources.
     ///
-    /// # Safety
-    ///
-    /// Must be called with the OpenGL context current on the calling thread.
+    /// Must be called with the OpenGL context current on the calling thread,
+    /// before the windowing-system connection is released.
     pub unsafe fn destroy(&mut self, gl: &glow::Context) {
+        // Acknowledge any outstanding frame so the engine's teardown is not left
+        // waiting on a swap that will never be reported.
+        if self.pending_swap {
+            self.mpv_render_ctx.report_swap();
+            self.pending_swap = false;
+        }
         self.mpv_render_ctx.destroy();
         self.fbo.destroy(gl);
-        self.quad.destroy(gl);
+        if let Some(quad) = self.quad.as_mut() {
+            quad.destroy(gl);
+        }
     }
 }
 

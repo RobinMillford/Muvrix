@@ -1,7 +1,7 @@
 //! Desktop application window and playback UI implemented with eframe and egui_glow.
 
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,14 +20,33 @@ use muvrix_core::thumbnails::ThumbnailCache;
 use muvrix_player::equalizer::{AudioDeviceInfo, EqualizerManager, EqualizerSettings};
 use muvrix_player::shader::{Anime4KPreset, ShaderManager, ShaderQuality, VideoAdjustmentSettings};
 use muvrix_player::{
-    Event, MediaCapabilities, MpvHandle, MpvRenderContext, MpvStreamBridge, PlaybackController,
-    PlaybackState, SeekMode, SubtitleStyling, TrackInfo, TrackType,
+    classify_source, plan_presentation, DecodeObservation, DecodePath, DecodePolicy, Event,
+    MediaCapabilities, MpvHandle, MpvRenderContext, MpvStreamBridge, PlaybackController,
+    PlaybackState, PresentationState, SeekMode, SubtitleStyling, TrackInfo, TrackType,
 };
 
 use crate::gl_loader;
 use crate::icons::{self, Icon};
 use crate::render_engine::RenderEngine;
 use crate::views::{AppView, SettingsTab};
+use crate::wake::{WakeBridge, WakeHandle};
+
+/// A/V timing snapshot (see [`MuvrixApp::playback_stats`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlaybackStats {
+    pub avsync: Option<f64>,
+    pub display_fps: Option<f64>,
+    pub estimated_vf_fps: Option<f64>,
+    pub dropped: Option<i64>,
+    pub decoder_dropped: Option<i64>,
+}
+
+impl PlaybackStats {
+    /// Max absolute A/V difference when both sides are known.
+    pub fn avsync_abs(&self) -> Option<f64> {
+        self.avsync.map(|v| v.abs())
+    }
+}
 
 /// Main Muvrix desktop player application.
 pub struct MuvrixApp {
@@ -50,6 +69,22 @@ pub struct MuvrixApp {
     pub(crate) show_diagnostics: bool,
     pub(crate) screenshot_requested: bool,
     pub(crate) screenshot_frames: usize,
+    /// Diagnostics: number of `update()` calls. Telemetry exposes it so a
+    /// frozen counter can be told apart from a suspended window: a swap stall
+    /// keeps `upd` and `renders` advancing together (until the block), an
+    /// occluded/minimised window stops both because eframe delivers no paint.
+    pub(crate) update_count: u64,
+    /// WP4 chain counter: mpv update callbacks raised by the engine. It lives
+    /// behind an atomic because the callback runs on an mpv thread.
+    pub(crate) update_callbacks: Arc<AtomicU64>,
+    /// Independent event-loop wake path for the mpv update callback.
+    ///
+    /// The callback still raises an egui repaint for its rendering role, but
+    /// egui 0.31.1 can deduplicate that backend callback. This bridge is the
+    /// wake path that does not depend on egui or on a successful draw.
+    pub(crate) wake_bridge: Arc<WakeBridge>,
+    /// Diagnostics: last known viewport flags `(focused, minimized, fullscreen)`.
+    pub(crate) viewport_flags: (Option<bool>, Option<bool>, Option<bool>),
 
     // Phase 0.7 navigation and feature state
     pub(crate) current_view: AppView,
@@ -121,18 +156,58 @@ pub struct MuvrixApp {
     pub(crate) fps_measured: f64,
     pub(crate) frame_time_ms: f64,
     pub(crate) spinner_angle: f32,
+
+    // Decode-path selection and observation
+    pub(crate) decode_policy: DecodePolicy,
+    pub(crate) decode_attempt: usize,
+    pub(crate) decode_settled: bool,
+    pub(crate) decode_observation: Option<DecodeObservation>,
+    pub(crate) hdr_state: Option<PresentationState>,
+    pub(crate) native_display_kind: Option<&'static str>,
+    /// What the shell observed about the output path. Drives the HDR decision.
+    pub(crate) output: crate::output::OutputCaps,
+
+    // Optional telemetry sink (`MUVRIX_TELEMETRY`)
+    pub(crate) telemetry_path: Option<String>,
+    pub(crate) last_telemetry: Instant,
+    pub(crate) session_start: Instant,
 }
 
 impl MuvrixApp {
-    /// Creates a new `MuvrixApp` instance inside eframe's creation callback.
+    /// Creates a new `MuvrixApp` inside eframe's creation callback.
+    ///
+    /// This is now a thin adapter: eframe supplies a context and a loader, and
+    /// the shell itself is built by [`MuvrixApp::new_shell`], which the native
+    /// runner calls with its own EGL context. Keeping one constructor means the
+    /// two shells cannot drift apart in behaviour.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self, Box<dyn std::error::Error>> {
-        log::info!("Initializing MuvrixApp OpenGL 3.3+ Desktop Shell");
-
-        // 1. Inspect OpenGL context and GPU diagnostics
         let gl = cc
             .gl
             .clone()
             .ok_or("Glow OpenGL context was not provided by eframe")?;
+        let native_display = crate::native_display::from_creation_context(cc);
+        Self::new_shell(
+            gl,
+            cc.egui_ctx.clone(),
+            cc.get_proc_address,
+            native_display,
+            crate::output::OutputCaps::default(),
+        )
+    }
+
+    /// Builds the application around an existing GL context and window.
+    ///
+    /// `get_proc_address` must resolve symbols for that same context.
+    pub fn new_shell(
+        gl: Arc<glow::Context>,
+        egui_ctx: egui::Context,
+        get_proc_address: Option<&dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void>,
+        native_display: Option<muvrix_player::NativeDisplay>,
+        output: crate::output::OutputCaps,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        log::info!("Initializing MuvrixApp OpenGL 3.3+ Desktop Shell");
+
+        // 1. Inspect OpenGL context and GPU diagnostics
         let (gpu_vendor, gpu_renderer, gl_version) = unsafe {
             let vendor = gl.get_parameter_string(glow::VENDOR);
             let renderer = gl.get_parameter_string(glow::RENDERER);
@@ -147,10 +222,56 @@ impl MuvrixApp {
         let mpv = Arc::new(MpvHandle::new()?);
         let stream_bridge = Arc::new(MpvStreamBridge::new());
         let _ = stream_bridge.attach_to_handle(&mpv);
+        // The native display is what allows a direct (zero-copy) hardware decode
+        // path; without it the engine cannot create an interop context and
+        // silently degrades to copy-back or software decoding.
+        let native_display_kind = native_display.map(|d| d.kind());
+        let decode_policy = DecodePolicy::for_current(native_display.is_some());
+        let pacing = crate::render_engine::PacingMode::from_env();
+
+        log::info!(
+            "Decode policy: family={} native_display={} candidates={:?} pacing={:?}",
+            decode_policy.family().as_str(),
+            native_display_kind.unwrap_or("none"),
+            decode_policy.candidates(),
+            pacing
+        );
+
         mpv.set_option_string("vo", "libmpv")?;
-        mpv.set_option_string("hwdec", "auto-safe")?;
+        mpv.set_option_string("hwdec", decode_policy.initial_mode())?;
         mpv.set_option_string("keepaspect", "yes")?;
-        mpv.set_option_string("video-timing-offset", "0")?;
+        // `video-timing-offset` is the headroom the renderer gets before the
+        // frame's target display time. At 0 there is no headroom, which makes
+        // target-time blocking a no-op; it must be non-zero for paced playback.
+        let timing_offset =
+            std::env::var("MUVRIX_TIMING_OFFSET").unwrap_or_else(|_| "0.050".to_string());
+        mpv.set_option_string("video-timing-offset", &timing_offset)?;
+        log::info!("video-timing-offset={timing_offset}");
+
+        // Colour output. When the runner established a PQ/BT.2020 surface, the
+        // engine must encode for that surface — otherwise PQ pixels are written
+        // into an SDR-looking surface (or, worse, sRGB values are presented as
+        // PQ). `target-peak` is a configured value, not a panel measurement.
+        if output.native_hdr_available {
+            mpv.set_option_string("target-trc", "pq")?;
+            mpv.set_option_string("target-prim", "bt.2020")?;
+            if let Some(peak) = output.target_peak_nits {
+                mpv.set_option_string("target-peak", &peak.to_string())?;
+            }
+            log::info!(
+                "engine colour target: pq/bt.2020 peak={:?} (source: {})",
+                output.target_peak_nits,
+                output.peak_source
+            );
+        } else {
+            log::info!(
+                "engine colour target: SDR ({})",
+                output
+                    .fallback_reason
+                    .as_deref()
+                    .unwrap_or("HDR path unavailable")
+            );
+        }
         // Exclude 'lrc' from mpv's automatic subtitle track detection to prevent
         // mpv from loading LRC files as video subtitles and rendering raw timestamps.
         mpv.set_option_string(
@@ -160,28 +281,76 @@ impl MuvrixApp {
         mpv.initialize()?;
 
         // 3. Initialize libmpv OpenGL render context
-        let get_proc_address = cc
-            .get_proc_address
-            .ok_or("GL get_proc_address required for libmpv")?;
+        let get_proc_address = get_proc_address.ok_or("GL get_proc_address required for libmpv")?;
         let mpv_render_ctx = unsafe {
-            MpvRenderContext::new_gl(
+            MpvRenderContext::new_gl_with_display(
                 &mpv,
                 Some(gl_loader::gl_get_proc_address_trampoline),
                 &get_proc_address as *const _ as *mut std::ffi::c_void,
+                native_display,
             )?
+        };
+        if let Some(kind) = mpv_render_ctx.native_display_kind() {
+            log::info!("Render context created with native display ({kind})");
+        } else {
+            log::warn!(
+                "Render context created without a native display: direct hardware \
+                 decode is unavailable in this session"
+            );
+        }
+
+        // Colour of the engine's working target. A PQ surface needs a
+        // floating-point target: quantising PQ to 8 bits per channel costs
+        // roughly half a stop of shadow resolution in HDR10 content.
+        let engine_options = crate::render_engine::EngineOptions {
+            internal_format: if output.native_hdr_available {
+                glow::RGBA16F
+            } else {
+                glow::RGBA8
+            },
+            deferred_composite: output.is_native_shell(),
         };
 
         // 4. Create RenderEngine with off-screen FBO and quad compositor
         let mut render_engine = unsafe {
-            RenderEngine::new(&gl, mpv_render_ctx, 1280, 720)
+            RenderEngine::new_with_options(&gl, mpv_render_ctx, 1280, 720, engine_options)
                 .map_err(|e| format!("Failed to create RenderEngine: {e}"))?
         };
 
-        // 5. Connect mpv update callback to request eframe repaints
-        let egui_ctx = cc.egui_ctx.clone();
+        // 4b. Paced rendering needs the egui context (to schedule wake-ups) and
+        //     an anchor between the engine's clock and the local monotonic clock.
+        render_engine.set_egui_context(egui_ctx.clone());
+        render_engine.set_clock_base(mpv.get_time_us());
+        let frame_signal = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        render_engine.set_frame_signal(frame_signal.clone());
+
+        // 5. Connect mpv update callback to request eframe repaints.
+        //    The callback runs on an engine thread: it must only signal a
+        //    repaint, never render or call libmpv APIs.
+        let egui_ctx = egui_ctx.clone();
+        let callback_signal = frame_signal.clone();
+        let update_callbacks = Arc::new(AtomicU64::new(0));
+        let callback_counter = update_callbacks.clone();
+        // Independent wake path, installed by the native runner once the event
+        // loop proxy exists. Until then (and always in the eframe shell) this is
+        // a no-op and egui remains the only repaint mechanism.
+        let wake_bridge = Arc::new(WakeBridge::new());
+        let callback_wake = wake_bridge.clone();
         render_engine
             .mpv_render_ctx_mut()
             .set_update_callback(move || {
+                // Engine thread: only raise a flag, bump a counter, ask egui for
+                // a repaint, and deliver an independent event-loop wake. No
+                // rendering, no libmpv calls.
+                callback_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                callback_signal.store(true, std::sync::atomic::Ordering::Release);
+                crate::trace::record(crate::trace::Ev::UpdateCallback, "mpv_thread", 0, 0);
+                // This wake must not depend on egui's repaint-deduplication
+                // state: an egui pass is exactly what cannot run while the
+                // compositor withholds frame callbacks.
+                if callback_wake.wake_now() {
+                    crate::trace::record(crate::trace::Ev::Nudge, "mpv_update", 0, 0);
+                }
                 egui_ctx.request_repaint();
             });
 
@@ -249,12 +418,26 @@ impl MuvrixApp {
             fps_measured: 0.0,
             frame_time_ms: 0.0,
             spinner_angle: 0.0,
+            decode_policy,
+            decode_attempt: 0,
+            decode_settled: false,
+            decode_observation: None,
+            hdr_state: None,
+            native_display_kind,
+            output: output.clone(),
+            telemetry_path: std::env::var("MUVRIX_TELEMETRY").ok(),
+            last_telemetry: Instant::now(),
+            session_start: Instant::now(),
             path_input: String::new(),
             is_fullscreen: false,
             show_shortcuts: false,
             show_diagnostics: false,
             screenshot_requested: false,
             screenshot_frames: 0,
+            update_count: 0,
+            update_callbacks,
+            wake_bridge,
+            viewport_flags: (None, None, None),
             current_view,
             media_browser: MediaBrowser::default(),
             history_store: HistoryStore::load(None),
@@ -492,6 +675,11 @@ impl MuvrixApp {
 
                 match self.controller.load_file(&path_str) {
                     Ok(()) => {
+                        // New file: re-observe which decoder the engine picks.
+                        self.decode_settled = false;
+                        self.decode_attempt = 0;
+                        self.decode_observation = None;
+                        self.hdr_state = None;
                         self.status_message = format!("Loading: {path_str}");
                         // Immediately record initial entry in history store
                         self.history_store.record_playback(&path_str, 0.0, 0.0);
@@ -611,6 +799,219 @@ impl MuvrixApp {
         if self.is_fullscreen {
             self.is_fullscreen = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+    }
+
+    /// Observes the decoder the engine *actually* selected and applies a
+    /// platform-appropriate fallback when hardware decoding was requested but
+    /// software was chosen.
+    ///
+    /// The request (`hwdec`) is never treated as evidence: only `hwdec-current`
+    /// plus the decoded frame's pixel format decide the reported path.
+    fn check_decoder_path(&mut self) {
+        if self.decode_settled {
+            return;
+        }
+        if *self.controller.state() != PlaybackState::Playing {
+            return;
+        }
+        if self.controller.video_format().is_empty() {
+            return;
+        }
+
+        // Before the decoder initialises, `hwdec-current` is empty or "inactive".
+        let hwdec = self.controller.hwdec_current().to_string();
+        if hwdec.is_empty() || hwdec == "inactive" {
+            return;
+        }
+
+        let observation = self.controller.decode_observation();
+        if observation.path == DecodePath::Inactive {
+            return;
+        }
+
+        self.decode_settled = true;
+        log::info!(
+            "Decoder observed: hwdec='{}' pixelformat='{}' path={:?} requested='{}'",
+            observation.active,
+            observation.pixel_format,
+            observation.path,
+            self.controller.requested_hwdec()
+        );
+
+        // Source HDR classification + presentation plan. `native_hdr_available`
+        // is false on every path this build can offer today: no platform has a
+        // proven HDR surface hand-off yet, so HDR sources are tone-mapped and
+        // reported as such rather than as HDR.
+        let source = classify_source(
+            &self.controller.video_gamma(),
+            &self.controller.video_primaries(),
+            None,
+        );
+        // The decision uses what the shell actually observed: a PQ surface is
+        // only "available" when the surface format, the precision probe and the
+        // compositor's colour description all succeeded. Anything less falls
+        // back to SDR with the exact reason recorded.
+        let display = self.output.display.clone();
+        let (mut state, _plan) =
+            plan_presentation(&source, &display, self.output.native_hdr_available);
+        if state.reason.is_none() {
+            state.reason = self.output.fallback_reason.clone();
+        }
+        if state.hdr_presented && !self.output.physical_verified {
+            state.reason = Some(
+                "PQ surface + accepted description; physical panel HDR not verified".to_string(),
+            );
+        }
+        log::info!(
+            "Presentation: source={} mode={:?} tone_mapping={} hdr_presented={} reason={}",
+            state.source.label(),
+            state.mode,
+            state.tone_mapping,
+            state.hdr_presented,
+            state.reason.clone().unwrap_or_else(|| "-".to_string())
+        );
+        let hdr_note = if state.source.is_hdr() {
+            format!(" | {} → SDR (tone-mapped)", state.source.label())
+        } else {
+            String::new()
+        };
+        self.hdr_state = Some(state);
+
+        // Fallback: a hardware mode was requested but software was selected.
+        let expects_hardware = self.controller.requested_hwdec() != "no"
+            && !self.controller.requested_hwdec().is_empty();
+        if expects_hardware && observation.path == DecodePath::Software {
+            if let Some(next) = self.decode_policy.next_mode(self.decode_attempt) {
+                let _ = self.controller.set_hwdec_mode(next);
+                // Force a decoder reinit so the retry is observable in this
+                // session. If the command is unavailable, the new mode applies
+                // on the next file load instead (logged, not assumed).
+                let reload = self.controller.handle().command(&["video-reload"]);
+                self.decode_attempt += 1;
+                self.decode_settled = false;
+                match reload {
+                    Ok(()) => log::warn!(
+                        "Requested hardware decoding but engine selected software; \
+                         retrying with hwdec='{next}' (video-reload issued)"
+                    ),
+                    Err(e) => log::warn!(
+                        "Requested hardware decoding but engine selected software; \
+                         hwdec='{next}' set but video-reload failed ({e}); it applies on next load"
+                    ),
+                }
+                self.status_message = format!(
+                    "Hardware decoding unavailable ({}), retrying with '{next}'",
+                    observation.active
+                );
+                return;
+            }
+            log::error!(
+                "Hardware decoding unavailable: all decoder modes exhausted ({:?})",
+                self.decode_policy.candidates()
+            );
+            self.status_message =
+                "Software decoding — hardware acceleration unavailable".to_string();
+        } else {
+            self.status_message = format!("{}{hdr_note}", observation.describe());
+        }
+
+        self.decode_observation = Some(observation);
+    }
+
+    /// Appends one telemetry line per second when `MUVRIX_TELEMETRY` is set.
+    ///
+    /// The line is written for measurement only; nothing in the playback path
+    /// depends on it.
+    fn flush_telemetry(&mut self) {
+        let Some(path) = self.telemetry_path.clone() else {
+            return;
+        };
+        if self.last_telemetry.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.last_telemetry = Instant::now();
+
+        let (
+            renders,
+            skips,
+            swaps,
+            block_us,
+            block_max,
+            block_total,
+            block_hist,
+            pacing,
+            swap_mode,
+        ) = {
+            let Ok(engine) = self.render_engine.lock() else {
+                return;
+            };
+            let t = engine.telemetry();
+            (
+                t.mpv_renders,
+                t.mpv_skips,
+                t.swap_reports,
+                t.last_render_block_us,
+                t.max_render_block_us,
+                t.render_block_us_total,
+                t.render_block_hist,
+                format!("{:?}", engine.pacing()),
+                format!("{:?}", engine.swap_report()),
+            )
+        };
+        let hist = block_hist
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let avsync = self
+            .controller
+            .avsync()
+            .map(|v| format!("{v:.6}"))
+            .unwrap_or_else(|| "na".to_string());
+        let src_fps = self
+            .controller
+            .container_fps()
+            .map(|v| format!("{v:.3}"))
+            .unwrap_or_else(|| "na".to_string());
+        let vf_fps = self
+            .controller
+            .estimated_vf_fps()
+            .map(|v| format!("{v:.3}"))
+            .unwrap_or_else(|| "na".to_string());
+
+        let line = format!(
+            "t={:.1} state={:?} renders={renders} skips={skips} swaps={swaps} drops={} \
+             decdrops={} delayed={} avsync={avsync} hwdec={} pix={} gamma={} prims={} \
+             srcfps={src_fps} vfps={vf_fps} block_us={block_us} block_max={block_max} \
+             block_total={block_total} block_hist={hist} pacing={pacing} swap={swap_mode} \
+             upd={} foc={:?} min={:?} fs={:?}\n",
+            self.session_start.elapsed().as_secs_f64(),
+            self.controller.state(),
+            self.controller.frame_drop_count(),
+            self.controller.decoder_frame_drop_count(),
+            self.controller.vo_delayed_frame_count(),
+            self.controller.hwdec_current(),
+            self.controller.video_pixel_format(),
+            self.controller.video_gamma(),
+            self.controller.video_primaries(),
+            self.update_count,
+            self.viewport_flags.0,
+            self.viewport_flags.1,
+            self.viewport_flags.2,
+        );
+
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write as _;
+                let _ = file.write_all(line.as_bytes());
+            }
+            Err(e) => log::warn!("Telemetry write to {path} failed: {e}"),
         }
     }
 
@@ -1045,8 +1446,99 @@ impl MuvrixApp {
     }
 }
 
-impl eframe::App for MuvrixApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl MuvrixApp {
+    /// A/V timing properties, sampled by the runner's telemetry.
+    ///
+    /// `avsync` is the engine's own A/V difference in seconds; `display_fps` is
+    /// its estimate of the output rate (which we never tell it, because the
+    /// compositor does not tell us either). `dropped` counts frames the engine
+    /// discarded because they were late.
+    pub fn playback_stats(&self) -> PlaybackStats {
+        let h = self.controller.handle();
+        PlaybackStats {
+            avsync: h.get_property::<f64>("avsync").ok(),
+            display_fps: h.get_property::<f64>("display-fps").ok(),
+            estimated_vf_fps: h.get_property::<f64>("estimated-vf-fps").ok(),
+            dropped: h.get_property::<i64>("frame-drop-count").ok(),
+            decoder_dropped: h.get_property::<i64>("decoder-frame-drop-count").ok(),
+        }
+    }
+
+    /// Current video texture and its window-pixel rectangle, for the shell's
+    /// composite pass. `None` means the engine has no target yet.
+    pub fn video_output(&self) -> Option<(Option<glow::Texture>, [i32; 4])> {
+        let engine = self.render_engine.lock().ok()?;
+        Some((Some(engine.video_texture()), engine.last_video_rect()))
+    }
+
+    /// Cumulative mpv update callbacks observed (WP4 chain counter).
+    pub fn update_callback_count(&self) -> u64 {
+        self.update_callbacks
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Snapshot of the render engine's counters (WP4). `None` when the engine
+    /// cannot be locked (shutdown racing the telemetry tick).
+    pub fn render_telemetry(&self) -> Option<crate::render_engine::RenderTelemetry> {
+        self.render_engine
+            .lock()
+            .ok()
+            .map(|e| e.telemetry().clone())
+    }
+
+    /// Current playback state (used by the WP3 presentation state machine).
+    pub fn playback_state(&self) -> PlaybackState {
+        self.controller.state().clone()
+    }
+
+    /// Installs the event-loop wake handle used by the mpv update callback.
+    ///
+    /// The native runner calls this once its `WakeSignal` (and therefore its
+    /// event-loop proxy) exists. The eframe shell never calls it, so its update
+    /// callback keeps using egui alone, exactly as before.
+    pub fn install_wake(&self, wake: Arc<dyn WakeHandle>) {
+        self.wake_bridge.install(wake);
+    }
+
+    /// Clears the update-callback wake latch after the event loop drained a
+    /// batch. Called from `about_to_wait`; deliberately neither paint-gated nor
+    /// dependent on egui.
+    pub fn clear_update_wake(&self) {
+        self.wake_bridge.clear();
+    }
+
+    /// Tells the engine the frame it rendered has been handed to the compositor.
+    pub fn report_presented(&self) {
+        if let Ok(mut engine) = self.render_engine.lock() {
+            engine.report_presented();
+        }
+    }
+
+    /// Output capabilities the shell established (diagnostics + HDR decision).
+    pub fn output_caps(&self) -> &crate::output::OutputCaps {
+        &self.output
+    }
+
+    /// One frame: poll the engine, update state, and build the UI.
+    ///
+    /// Identical for both shells. `eframe::App::update` and the native runner
+    /// both call this; only the surrounding window/swap ownership differs.
+    pub fn frame_update(&mut self, ctx: &egui::Context) {
+        self.update_count = self.update_count.wrapping_add(1);
+        // Test-only: an unattended harness launches the window without user
+        // interaction, and GNOME will leave it behind other windows, where the
+        // compositor throttles it. Going fullscreen on the first frame is the
+        // only way a scripted run can guarantee the surface is visible and
+        // focused. Production never sets this variable.
+        if self.update_count == 1 && std::env::var("MUVRIX_TEST_FULLSCREEN").is_ok() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+            log::warn!("TEST-ONLY: requesting fullscreen so the harness has a visible surface");
+        }
+        self.viewport_flags = ctx.input(|i| {
+            let vp = i.viewport();
+            (vp.focused, vp.minimized, vp.fullscreen)
+        });
+
         // Poll background scanner channel
         let mut scan_finished = false;
         if let Some(ref rx) = self.active_scan_rx {
@@ -1063,6 +1555,8 @@ impl eframe::App for MuvrixApp {
         }
 
         self.sync_playback_state();
+        self.check_decoder_path();
+        self.flush_telemetry();
         self.update_frame_timing();
         self.handle_keyboard_inputs(ctx);
 
@@ -1488,6 +1982,36 @@ impl eframe::App for MuvrixApp {
                                 .monospace()
                                 .color(Color32::from_gray(160)),
                             );
+
+                            // Observed (never requested) decode + presentation state.
+                            let decode_line = self
+                                .decode_observation
+                                .as_ref()
+                                .map(|o| o.describe())
+                                .unwrap_or_else(|| "Decoder: not yet observed".to_string());
+                            ui.label(
+                                RichText::new(format!(
+                                    "{decode_line} | native display: {}",
+                                    self.native_display_kind.unwrap_or("none")
+                                ))
+                                .monospace()
+                                .color(Color32::from_rgb(120, 200, 255)),
+                            );
+                            if let Some(hdr) = &self.hdr_state {
+                                if hdr.source.is_hdr() {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "HDR: {} | mode {:?} | tone-mapped: {} | HDR output: {}",
+                                            hdr.source.label(),
+                                            hdr.mode,
+                                            hdr.tone_mapping,
+                                            hdr.hdr_presented
+                                        ))
+                                        .monospace()
+                                        .color(Color32::from_rgb(255, 200, 120)),
+                                    );
+                                }
+                            }
 
                             ui.separator();
                             let source_fps = self
@@ -2559,7 +3083,8 @@ impl eframe::App for MuvrixApp {
         }
     }
 
-    fn on_exit(&mut self, gl: Option<&glow::Context>) {
+    /// Releases GL and engine resources. Must run with the context current.
+    pub fn shutdown(&mut self, gl: Option<&glow::Context>) {
         log::info!("Initiating safe teardown of MuvrixApp");
 
         // Persist final playback position in history store
@@ -2584,6 +3109,16 @@ impl eframe::App for MuvrixApp {
             }
         }
         log::info!("MuvrixApp teardown complete");
+    }
+}
+
+impl eframe::App for MuvrixApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.frame_update(ctx);
+    }
+
+    fn on_exit(&mut self, gl: Option<&glow::Context>) {
+        self.shutdown(gl);
     }
 }
 

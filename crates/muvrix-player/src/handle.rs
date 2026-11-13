@@ -112,6 +112,17 @@ impl MpvHandle {
         MpvError::from_raw(res)
     }
 
+    /// The engine's monotonic clock in microseconds (`mpv_get_time_us()`).
+    ///
+    /// This is the time base used by `mpv_render_frame_info.target_time`; it is
+    /// unrelated to playback position.
+    pub fn get_time_us(&self) -> i64 {
+        match self.check_active() {
+            Ok(ctx) => unsafe { libmpv_sys::mpv_get_time_us(ctx) },
+            Err(_) => 0,
+        }
+    }
+
     /// Retrieves a typed property value (`mpv_get_property()`).
     pub fn get_property<T: GetProperty>(&self, name: &str) -> Result<T, MpvError> {
         let ctx = self.check_active()?;

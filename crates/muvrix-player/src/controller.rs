@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::command::{LoadFileMode, SeekMode};
+use crate::decode::DecodeObservation;
 use crate::equalizer::{AudioDeviceInfo, EqualizerManager};
 use crate::error::MpvError;
 use crate::event::{EndFileReason, Event};
@@ -282,6 +283,86 @@ impl PlaybackController {
         self.handle
             .get_property::<i64>("frame-drop-count")
             .unwrap_or(0)
+    }
+
+    /// Frames dropped by the decoder (before the VO saw them).
+    pub fn decoder_frame_drop_count(&self) -> i64 {
+        self.handle
+            .get_property::<i64>("decoder-frame-drop-count")
+            .unwrap_or(0)
+    }
+
+    /// Frames the VO deliberately delayed.
+    pub fn vo_delayed_frame_count(&self) -> i64 {
+        self.handle
+            .get_property::<i64>("vo-delayed-frame-count")
+            .unwrap_or(0)
+    }
+
+    /// A/V difference in seconds as reported by the engine, when audio is active.
+    pub fn avsync(&self) -> Option<f64> {
+        self.handle.get_property::<f64>("avsync").ok()
+    }
+
+    /// Cumulative A/V sync changes in seconds (drift measure).
+    pub fn total_avsync_change(&self) -> Option<f64> {
+        self.handle.get_property::<f64>("total-avsync-change").ok()
+    }
+
+    /// Pixel format the renderer receives (`vaapi`, `d3d11`, `nv12`, `yuv420p`, …).
+    ///
+    /// This is the decisive observable for whether direct hardware surfaces reach
+    /// the renderer. Empty while no video is decoded.
+    pub fn video_pixel_format(&self) -> String {
+        self.handle
+            .get_property_string("video-params/pixelformat")
+            .unwrap_or_default()
+    }
+
+    /// Pixel format the engine converts to for output (`video-out-params`).
+    pub fn video_out_pixel_format(&self) -> String {
+        self.handle
+            .get_property_string("video-out-params/pixelformat")
+            .unwrap_or_default()
+    }
+
+    /// Source transfer function (`pq`, `hlg`, `bt.1886`, …).
+    pub fn video_gamma(&self) -> String {
+        self.handle
+            .get_property_string("video-params/gamma")
+            .unwrap_or_default()
+    }
+
+    /// Source primaries (`bt.2020`, `bt.709`, …).
+    pub fn video_primaries(&self) -> String {
+        self.handle
+            .get_property_string("video-params/primaries")
+            .unwrap_or_default()
+    }
+
+    /// Nominal peak luminance of the source, when signalled.
+    pub fn video_sig_peak(&self) -> Option<f64> {
+        self.handle
+            .get_property::<f64>("video-params/sig-peak")
+            .ok()
+    }
+
+    /// Classification of the decoder path actually in use.
+    pub fn decode_observation(&self) -> DecodeObservation {
+        DecodeObservation::new(self.hwdec_current.clone(), self.video_pixel_format())
+    }
+
+    /// Requests a different hardware decoding mode.
+    ///
+    /// Takes effect for the next decoder initialisation (mpv applies `hwdec`
+    /// changes on the next file/reinit); it is not a per-frame switch.
+    pub fn set_hwdec_mode(&self, mode: &str) -> Result<(), MpvError> {
+        self.handle.set_property_string("hwdec", mode)
+    }
+
+    /// Previously requested hardware decoding mode (for diagnostics).
+    pub fn requested_hwdec(&self) -> String {
+        self.handle.get_property_string("hwdec").unwrap_or_default()
     }
 
     /// Active subtitle delay offset in seconds.

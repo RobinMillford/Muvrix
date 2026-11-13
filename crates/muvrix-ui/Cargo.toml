@@ -14,9 +14,28 @@ egui = { workspace = true }
 eframe = { workspace = true }
 egui_glow = { workspace = true }
 glow = { workspace = true }
+raw-window-handle = { workspace = true }
 libc = { workspace = true }
 bytemuck = "1.25"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+winit = { version = "0.30.13", default-features = false, features = [
+    "wayland",
+    "x11",
+    "rwh_06",
+] }
+egui-winit = { version = "0.31.1", default-features = false, features = [
+    "clipboard",
+    "links",
+    "wayland",
+    "x11",
+] }
+
+# The native presentation runner needs the Wayland connection it shares with
+# winit, and the colour-management protocol the compositor exposes.
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = { version = "0.31.15", features = ["system"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+wayland-sys = { version = "0.31.11", features = ["client"] }

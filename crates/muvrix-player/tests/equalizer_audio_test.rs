@@ -6,10 +6,24 @@ use muvrix_player::equalizer::{EqualizerManager, EqualizerPreset, EqualizerSetti
 use muvrix_player::handle::MpvHandle;
 use muvrix_player::PlaybackController;
 
+/// Returns the shared audio fixture, synthesising it on first use.
+///
+/// The WAV is generated rather than committed: binary fixtures are ignored by
+/// `.gitignore`, so a fresh clone had no fixture and these tests failed on
+/// `canonicalize`. Generation is deterministic (same samples every run), so the
+/// measurements below keep their thresholds.
 fn get_audio_fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/audio_test_tone.wav")
-        .canonicalize()
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/audio_test_tone.wav");
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create tests/fixtures");
+        }
+        // 2 s of a 1 kHz tone at half scale: enough for the Goertzel windows
+        // used by the frequency-response assertions.
+        synthesize_wav(&path, 2.0, &[(1000.0, 0.5)]);
+    }
+    path.canonicalize()
         .expect("Audio fixture tests/fixtures/audio_test_tone.wav must exist")
 }
 

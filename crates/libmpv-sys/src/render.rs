@@ -57,6 +57,24 @@ pub enum mpv_render_update_flag {
 
 pub type mpv_render_update_fn = Option<unsafe extern "C" fn(cb_ctx: *mut c_void)>;
 
+/// Flags used in `mpv_render_frame_info.flags` (`mpv/render.h` v0.42.0).
+pub const MPV_RENDER_FRAME_INFO_PRESENT: u64 = 1 << 0;
+pub const MPV_RENDER_FRAME_INFO_REDRAW: u64 = 1 << 1;
+pub const MPV_RENDER_FRAME_INFO_REPEAT: u64 = 1 << 2;
+pub const MPV_RENDER_FRAME_INFO_BLOCK_VSYNC: u64 = 1 << 3;
+
+/// Returned through `MPV_RENDER_PARAM_NEXT_FRAME_INFO`.
+///
+/// Field layout and semantics are copied from `mpv/render.h` (mpv v0.42.0):
+/// `target_time` is an absolute time in microseconds, in the same base as
+/// `mpv_get_time_us()`, at which the next frame is supposed to be displayed.
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
+pub struct mpv_render_frame_info {
+    pub flags: u64,
+    pub target_time: i64,
+}
+
 extern "C" {
     pub fn mpv_render_context_create(
         res: *mut *mut mpv_render_context,

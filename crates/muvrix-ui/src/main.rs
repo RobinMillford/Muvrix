@@ -41,7 +41,41 @@ fn main() -> eframe::Result<()> {
     }
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    log::info!("Starting Muvrix Desktop Player (Glow Rendering Prototype)");
+    log::info!("Starting Muvrix Desktop Player");
+
+    // Native presentation path (Phase 2.0). eframe remains available as an
+    // explicit rollback: MUVRIX_LEGACY_EFRAME=1 restores the old shell, which is
+    // the only way to compare the two on the same machine.
+    #[cfg(target_os = "linux")]
+    if std::env::var("MUVRIX_LEGACY_EFRAME")
+        .map(|v| v != "1")
+        .unwrap_or(true)
+    {
+        let width = std::env::var("MUVRIX_WINDOW_WIDTH")
+            .ok()
+            .and_then(|w| w.parse::<u32>().ok())
+            .unwrap_or(1280);
+        let height = std::env::var("MUVRIX_WINDOW_HEIGHT")
+            .ok()
+            .and_then(|h| h.parse::<u32>().ok())
+            .unwrap_or(720);
+        let cfg = muvrix_ui::runner::RunnerConfig {
+            title: "Muvrix Media Player".to_string(),
+            width,
+            height,
+            initial_file,
+            want_hdr: std::env::var("MUVRIX_NO_HDR")
+                .map(|v| v != "1")
+                .unwrap_or(true),
+        };
+        return match muvrix_ui::runner::run(cfg) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                log::error!("native presentation runner failed: {e}");
+                Err(eframe::Error::AppCreation(e.into()))
+            }
+        };
+    }
 
     let width = std::env::var("MUVRIX_WINDOW_WIDTH")
         .ok()

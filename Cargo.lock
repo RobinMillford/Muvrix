@@ -2243,6 +2243,7 @@ dependencies = [
  "bytemuck",
  "eframe",
  "egui",
+ "egui-winit",
  "egui_glow",
  "env_logger",
  "glow",
@@ -2252,7 +2253,12 @@ dependencies = [
  "log",
  "muvrix-core",
  "muvrix-player",
+ "raw-window-handle",
  "rfd",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-sys",
+ "winit",
 ]
 
 [[package]]

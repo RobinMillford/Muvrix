@@ -8,11 +8,63 @@ use muvrix_player::shader::{
 };
 use std::path::PathBuf;
 
+/// Returns the requested fixture, generating the HDR ones on first use.
+///
+/// Media fixtures are not committed (`.gitignore` excludes them), so a fresh
+/// checkout has none. The generated files are real HDR10 / HLG streams with the
+/// colour tags the tests assert on — not stand-ins — so the assertions keep
+/// testing detection rather than a mock.
 fn get_fixture_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../../tests/fixtures/{name}"))
-        .canonicalize()
-        .unwrap_or_else(|_| panic!("Fixture {name} must exist"))
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../tests/fixtures/{name}"));
+    if !path.exists() && (name.starts_with("hdr10_pq") || name.starts_with("hdr_hlg")) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create tests/fixtures");
+        }
+        generate_hdr_fixture(&path, name.starts_with("hdr_hlg"));
+    }
+    path.canonicalize()
+        .unwrap_or_else(|_| panic!("Fixture {name} must exist at {}", path.display()))
+}
+
+/// Encodes a 2 s, 320x240 HEVC stream tagged BT.2020 + PQ (or HLG).
+fn generate_hdr_fixture(path: &std::path::Path, hlg: bool) {
+    let transfer = if hlg { "arib-std-b67" } else { "smpte2084" };
+    let mut x265 = format!(
+        "colorprim=bt2020:transfer={transfer}:colormatrix=bt2020nc:keyint=12:min-keyint=12:log-level=error"
+    );
+    if !hlg {
+        // Mastering display + content light level, i.e. real HDR10 static metadata.
+        x265.push_str(
+            ":master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)\
+             :max-cll=1000,400",
+        );
+    }
+    let output = std::process::Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=24:duration=2",
+            "-pix_fmt",
+            "yuv420p10le",
+            "-c:v",
+            "libx265",
+            "-x265-params",
+            &x265,
+            path.to_str().expect("fixture path is UTF-8"),
+        ])
+        .output()
+        .unwrap_or_else(|e| panic!("ffmpeg is required to generate {path:?}: {e}"));
+    assert!(
+        output.status.success(),
+        "ffmpeg failed generating {path:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn create_mpv_player(vo: &str) -> MpvHandle {

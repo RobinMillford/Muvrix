@@ -2,23 +2,50 @@
 
 use glow::HasContext as _;
 
-/// Dedicated off-screen OpenGL Framebuffer Object backed by a 2D `GL_RGBA8` texture.
+/// Dedicated off-screen OpenGL Framebuffer Object for libmpv's render target.
+///
+/// The internal format matters for colour: `GL_RGBA8` quantises PQ values to 8
+/// bits before the compositor ever sees them, which is enough to band dark
+/// HDR10 content. `GL_RGBA16F` keeps the engine's float output intact and is
+/// selected whenever the surface is a PQ surface.
 pub struct OffscreenFbo {
     fbo: glow::Framebuffer,
     texture: glow::Texture,
     width: u32,
     height: u32,
+    internal_format: i32,
+    upload_type: u32,
 }
 
 impl OffscreenFbo {
-    /// Creates a new offscreen framebuffer of the given dimensions.
+    /// Creates a new offscreen framebuffer of the given dimensions (`GL_RGBA8`).
     ///
     /// # Safety
     ///
     /// The OpenGL context must be current on the calling thread.
     pub unsafe fn new(gl: &glow::Context, width: u32, height: u32) -> Result<Self, String> {
+        Self::new_with_format(gl, width, height, glow::RGBA8 as i32)
+    }
+
+    /// Creates an offscreen framebuffer with an explicit internal format.
+    ///
+    /// # Safety
+    ///
+    /// The OpenGL context must be current on the calling thread.
+    pub unsafe fn new_with_format(
+        gl: &glow::Context,
+        width: u32,
+        height: u32,
+        internal_format: i32,
+    ) -> Result<Self, String> {
         let width = width.max(1);
         let height = height.max(1);
+        let upload_type =
+            if internal_format == glow::RGBA16F as i32 || internal_format == glow::RGBA32F as i32 {
+                glow::FLOAT
+            } else {
+                glow::UNSIGNED_BYTE
+            };
 
         // 1. Create color texture
         let texture = gl.create_texture().map_err(|e| e.to_string())?;
@@ -26,12 +53,12 @@ impl OffscreenFbo {
         gl.tex_image_2d(
             glow::TEXTURE_2D,
             0,
-            glow::RGBA8 as i32,
+            internal_format,
             width as i32,
             height as i32,
             0,
             glow::RGBA,
-            glow::UNSIGNED_BYTE,
+            upload_type,
             glow::PixelUnpackData::Slice(None),
         );
         gl.tex_parameter_i32(
@@ -76,14 +103,23 @@ impl OffscreenFbo {
             return Err(format!("Framebuffer incomplete with status: 0x{status:X}"));
         }
 
-        log::info!("Created offscreen FBO ({width}x{height}, format GL_RGBA8)");
+        log::info!(
+            "Created offscreen FBO ({width}x{height}, internal_format=0x{internal_format:x})"
+        );
 
         Ok(Self {
             fbo,
             texture,
             width,
             height,
+            internal_format,
+            upload_type,
         })
+    }
+
+    /// Internal format the engine must render into (`mpv_opengl_fbo.internal_format`).
+    pub fn internal_format(&self) -> i32 {
+        self.internal_format
     }
 
     /// Resizes the framebuffer texture storage if dimensions have changed.
@@ -103,12 +139,12 @@ impl OffscreenFbo {
         gl.tex_image_2d(
             glow::TEXTURE_2D,
             0,
-            glow::RGBA8 as i32,
+            self.internal_format,
             width as i32,
             height as i32,
             0,
             glow::RGBA,
-            glow::UNSIGNED_BYTE,
+            self.upload_type,
             glow::PixelUnpackData::Slice(None),
         );
         gl.bind_texture(glow::TEXTURE_2D, None);
