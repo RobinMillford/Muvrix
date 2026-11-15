@@ -3,6 +3,7 @@
 *.swp
 *~
 .DS_Store
+.commandcode/
 
 # Large media files, test captures, and test media collections
 test/
@@ -14,6 +15,7 @@ tests/**/*.webm
 tests/**/*.mov
 tests/**/*.flac
 tests/**/*.wav
+tests/fixtures/audio_test_tone.wav
 tests/**/*.ogg
 tests/**/*.opus
 tests/**/*.mp3
@@ -48,6 +50,21 @@ docs/architecture/
 docs/mpv-engine/
 docs/verification/
 docs/phase-*
+docs/audits/
+# Local engineering investigations, evidence and audit artifacts
+docs/engineering/
+
+# Local agent/editor state and scratch output
+.freebuff/
+.codex/
+.claude/
+.agents/
+.continue/
+.aider*
+*.local.log
+
+# Local-only phase fixture generator
+scripts/generate-phase-2.8-media.sh
 
 # Dedicated committed test fixtures
 !tests/fixtures/path-resolution/

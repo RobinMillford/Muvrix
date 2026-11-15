@@ -179,6 +179,7 @@ impl Composite {
     ///
     /// Must be called with the host GL context current and the default
     /// framebuffer bound.
+    #[allow(clippy::too_many_arguments)] // one explicit GL draw call keeps the inputs visible
     pub unsafe fn run(
         &self,
         gl: &glow::Context,

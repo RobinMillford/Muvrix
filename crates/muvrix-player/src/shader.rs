@@ -352,10 +352,20 @@ impl ShaderManager {
         let _ = handle.set_property("video-pan-y", settings.pan_y.clamp(-1.0, 1.0));
         let _ = handle.set_property("video-rotate", settings.rotate % 360);
 
-        // libplacebo HDR tone-mapping & color gamut properties
+        // libplacebo HDR tone-mapping & color gamut properties.
+        //
+        // `Auto` deliberately leaves the engine target untouched. The shell
+        // owns the output target: it sets PQ/BT.2020 after the compositor
+        // accepts a 10-bit HDR description. Writing `auto` here (the default
+        // `VideoAdjustmentSettings` value) used to overwrite that target after
+        // startup. Auto means "do not fight the output target", not "reset it".
         let _ = handle.set_property_string("tone-mapping", settings.tone_mapping.as_str());
-        let _ = handle.set_property_string("target-trc", settings.target_trc.as_str());
-        let _ = handle.set_property_string("target-prim", settings.target_prim.as_str());
+        if settings.target_trc != TargetTrc::Auto {
+            let _ = handle.set_property_string("target-trc", settings.target_trc.as_str());
+        }
+        if settings.target_prim != TargetPrimaries::Auto {
+            let _ = handle.set_property_string("target-prim", settings.target_prim.as_str());
+        }
         let _ = handle.set_property_string("gamut-mapping-mode", settings.gamut_mapping.as_str());
         let _ = handle.set_property_string(
             "hdr-compute-peak",
@@ -373,7 +383,34 @@ impl ShaderManager {
         Ok(())
     }
 
+    /// Re-applies the shell-owned output colour target.
+    ///
+    /// The target belongs to the presentation surface, not to the user's
+    /// picture-adjustment settings. Calling this after applying adjustments
+    /// keeps a compositor-accepted PQ/BT.2020 target intact. `Auto` in
+    /// [`VideoAdjustmentSettings`] intentionally does not write a target.
+    pub fn apply_output_target(
+        handle: &MpvHandle,
+        native_hdr: bool,
+        peak_nits: Option<u32>,
+    ) -> Result<(), MpvError> {
+        if native_hdr {
+            handle.set_property_string("target-trc", "pq")?;
+            handle.set_property_string("target-prim", "bt.2020")?;
+            if let Some(peak) = peak_nits {
+                handle.set_property_string("target-peak", &peak.to_string())?;
+            }
+        } else {
+            handle.set_property_string("target-trc", "auto")?;
+            handle.set_property_string("target-prim", "auto")?;
+        }
+        Ok(())
+    }
+
     /// Resets all picture adjustments to flat defaults (0).
+    ///
+    /// Output target properties are left alone for the same reason as in
+    /// [`ShaderManager::apply_adjustments`].
     pub fn reset_adjustments(handle: &MpvHandle) -> Result<(), MpvError> {
         Self::apply_adjustments(handle, &VideoAdjustmentSettings::default())
     }

@@ -736,3 +736,103 @@ fn test_cross_platform_shader_path_serialization_and_handling() {
     ShaderManager::clear_shaders(&handle).expect("Clear shaders");
     assert_eq!(handle.get_property_string("glsl-shaders").unwrap(), "");
 }
+
+#[test]
+fn hdr_target_lifecycle_and_transitions() {
+    let handle = MpvHandle::new().expect("Create handle");
+    handle.set_option_string("vo", "null").unwrap();
+    handle.set_option_string("ao", "null").unwrap();
+    handle.initialize().unwrap();
+
+    // A/C: explicit output target initialization.
+    ShaderManager::apply_output_target(&handle, true, Some(617)).expect("HDR init");
+    assert_eq!(handle.get_property_string("target-trc").unwrap(), "pq");
+    assert_eq!(
+        handle.get_property_string("target-prim").unwrap(),
+        "bt.2020"
+    );
+
+    // B/F: default and non-default adjustments must not clear an HDR target.
+    let mut settings = VideoAdjustmentSettings {
+        brightness: 12,
+        contrast: -8,
+        gamma: 4,
+        saturation: 15,
+        ..Default::default()
+    };
+    ShaderManager::apply_adjustments(&handle, &settings).expect("Apply adjustments");
+    assert_eq!(handle.get_property_string("target-trc").unwrap(), "pq");
+    assert_eq!(
+        handle.get_property_string("target-prim").unwrap(),
+        "bt.2020"
+    );
+
+    // Explicit adjustment targets are allowed, then the shell reasserts.
+    settings.target_trc = TargetTrc::Srgb;
+    settings.target_prim = TargetPrimaries::Bt709;
+    ShaderManager::apply_adjustments(&handle, &settings).expect("Explicit adjustment target");
+    assert_eq!(handle.get_property_string("target-trc").unwrap(), "srgb");
+    assert_eq!(handle.get_property_string("target-prim").unwrap(), "bt.709");
+    ShaderManager::apply_output_target(&handle, true, Some(617)).expect("Reassert HDR");
+    assert_eq!(handle.get_property_string("target-trc").unwrap(), "pq");
+    assert_eq!(
+        handle.get_property_string("target-prim").unwrap(),
+        "bt.2020"
+    );
+
+    // D: HDR surface -> SDR output target.
+    ShaderManager::apply_output_target(&handle, false, None).expect("HDR to SDR");
+    assert_eq!(handle.get_property_string("target-trc").unwrap(), "auto");
+    assert_eq!(handle.get_property_string("target-prim").unwrap(), "auto");
+
+    // E: SDR -> HDR surface target.
+    ShaderManager::apply_output_target(&handle, true, Some(617)).expect("SDR to HDR");
+    assert_eq!(handle.get_property_string("target-trc").unwrap(), "pq");
+    assert_eq!(
+        handle.get_property_string("target-prim").unwrap(),
+        "bt.2020"
+    );
+}
+
+#[test]
+fn default_adjustments_preserve_output_hdr_target() {
+    let handle = MpvHandle::new().expect("Create handle");
+    handle.set_option_string("vo", "null").unwrap();
+    handle.set_option_string("ao", "null").unwrap();
+    handle.initialize().unwrap();
+
+    handle
+        .set_property_string("target-trc", "pq")
+        .expect("Set PQ target");
+    handle
+        .set_property_string("target-prim", "bt.2020")
+        .expect("Set BT.2020 primaries");
+
+    // Default enhancement settings use `Auto`; they must not reset the
+    // shell-owned PQ/BT.2020 target.
+    ShaderManager::apply_adjustments(&handle, &VideoAdjustmentSettings::default())
+        .expect("Apply default adjustments");
+    assert_eq!(handle.get_property_string("target-trc").unwrap(), "pq");
+    assert_eq!(
+        handle.get_property_string("target-prim").unwrap(),
+        "bt.2020"
+    );
+
+    ShaderManager::reset_adjustments(&handle).expect("Reset adjustments");
+    assert_eq!(handle.get_property_string("target-trc").unwrap(), "pq");
+    assert_eq!(
+        handle.get_property_string("target-prim").unwrap(),
+        "bt.2020"
+    );
+
+    ShaderManager::apply_output_target(&handle, true, Some(617)).expect("Apply HDR output target");
+    assert_eq!(handle.get_property_string("target-trc").unwrap(), "pq");
+    assert_eq!(
+        handle.get_property_string("target-prim").unwrap(),
+        "bt.2020"
+    );
+
+    ShaderManager::apply_output_target(&handle, false, None).expect("Apply SDR output target");
+    assert_eq!(handle.get_property_string("target-trc").unwrap(), "auto");
+    assert_eq!(handle.get_property_string("target-prim").unwrap(), "auto");
+}

@@ -29,6 +29,12 @@ use wayland_protocols::wp::color_management::v1::client::{
     },
     wp_image_description_v1::{self, Cause, WpImageDescriptionV1},
 };
+use wayland_protocols::wp::presentation_time::client::wp_presentation::{
+    self as presentation_iface, WpPresentation,
+};
+use wayland_protocols::wp::presentation_time::client::wp_presentation_feedback::{
+    self as feedback_iface, WpPresentationFeedback,
+};
 
 /// Protocol state accumulated from the manager's advertised events.
 #[derive(Debug, Default, Clone)]
@@ -64,6 +70,8 @@ pub struct CmState {
     /// Failure reported by `failed` for the description we created.
     pub failure: Option<String>,
     pub error: Option<String>,
+    /// Clock id reported by `wp_presentation.clock_id` (diagnostic only).
+    pub presentation_clock: Option<u32>,
 }
 
 /// Owns the shared connection's colour-management queue and manager object.
@@ -72,6 +80,7 @@ pub struct ColorManager {
     queue: EventQueue<CmState>,
     qh: QueueHandle<CmState>,
     manager: Option<WpColorManagerV1>,
+    presentation: Option<WpPresentation>,
     state: CmState,
     globals: GlobalList,
 }
@@ -111,12 +120,31 @@ impl ColorManager {
             caps.manager_version = bound.version();
             manager = Some(bound);
         }
+        // Diagnostic only: bind the stable presentation protocol so we can
+        // report whether the compositor advertises it and which clock it uses.
+        // No feedback objects are requested yet; per-commit feedback requires a
+        // safe commit-ordering owner.
+        let presentation = if std::env::var("MUVRIX_PRESENTATION_FEEDBACK").is_ok() {
+            match globals.bind::<WpPresentation, _, _>(&qh, 1..=1, ()) {
+                Ok(bound) => {
+                    log::info!("wp_presentation: v{}", bound.version());
+                    Some(bound)
+                }
+                Err(e) => {
+                    log::warn!("wp_presentation unavailable: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let mut this = Self {
             conn,
             queue,
             qh,
             manager,
+            presentation,
             state: CmState::default(),
             globals,
         };
@@ -174,6 +202,39 @@ impl ColorManager {
 
     pub fn manager_version(&self) -> Option<u32> {
         self.manager.as_ref().map(|m| m.version())
+    }
+
+    pub fn presentation_version(&self) -> Option<u32> {
+        self.presentation.as_ref().map(|p| p.version())
+    }
+
+    pub fn presentation_clock(&self) -> Option<u32> {
+        self.state.presentation_clock
+    }
+
+    /// Requests presentation feedback for the next surface commit. Must be
+    /// called before the EGL swap that commits the surface.
+    pub fn request_presentation_feedback(
+        &mut self,
+        surface_ptr: *mut c_void,
+        token: u64,
+    ) -> Result<(), String> {
+        let presentation = self
+            .presentation
+            .as_ref()
+            .ok_or("wp_presentation unavailable")?;
+        let id = unsafe {
+            wayland_client::backend::ObjectId::from_ptr(
+                WlSurface::interface(),
+                surface_ptr as *mut wayland_sys::client::wl_proxy,
+            )
+        }
+        .map_err(|e| format!("cannot adopt wl_surface: {e}"))?;
+        let surface = WlSurface::from_id(&self.conn, id)
+            .map_err(|e| format!("cannot reference wl_surface: {e}"))?;
+        let _feedback: WpPresentationFeedback =
+            presentation.feedback(&surface, &self.qh, PresentationToken(token));
+        Ok(())
     }
 
     pub fn supports_pq_bt2020(&self) -> bool {
@@ -377,6 +438,103 @@ impl Dispatch<wl_registry::WlRegistry, wayland_client::globals::GlobalListConten
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PresentationToken(pub u64);
+
+impl Dispatch<WpPresentationFeedback, PresentationToken> for CmState {
+    fn event(
+        state: &mut Self,
+        _proxy: &WpPresentationFeedback,
+        event: feedback_iface::Event,
+        data: &PresentationToken,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            feedback_iface::Event::Presented {
+                tv_sec_hi,
+                tv_sec_lo,
+                tv_nsec,
+                refresh,
+                seq_hi,
+                seq_lo,
+                flags,
+            } => {
+                let token = data.0;
+                let clock_id = state.presentation_clock.unwrap_or(0);
+                let now = crate::causal_trace::monotonic_ns();
+                let flags_raw = match flags {
+                    wayland_client::WEnum::Value(v) => u32::from(v),
+                    wayland_client::WEnum::Unknown(v) => v,
+                };
+                crate::causal_trace::record5(
+                    crate::causal_trace::Kind::PresentationPresented,
+                    token,
+                    tv_sec_hi as i64,
+                    tv_sec_lo as i64,
+                    tv_nsec as i64,
+                    refresh as i64,
+                    flags_raw as i64,
+                    "presented",
+                );
+                crate::causal_trace::record5(
+                    crate::causal_trace::Kind::PresentationSequence,
+                    token,
+                    seq_hi as i64,
+                    seq_lo as i64,
+                    clock_id as i64,
+                    now,
+                    flags_raw as i64,
+                    "presented",
+                );
+            }
+            feedback_iface::Event::Discarded => {
+                crate::causal_trace::record(
+                    crate::causal_trace::Kind::PresentationDiscarded,
+                    data.0,
+                    0,
+                    0,
+                    0,
+                    "discarded",
+                );
+            }
+            feedback_iface::Event::SyncOutput { .. } => {}
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WpPresentation, ()> for CmState {
+    fn event(
+        state: &mut Self,
+        _proxy: &WpPresentation,
+        event: presentation_iface::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let presentation_iface::Event::ClockId { clk_id } = event {
+            state.presentation_clock = Some(clk_id);
+            crate::causal_trace::record(
+                crate::causal_trace::Kind::PresentationClock,
+                0,
+                clk_id as i64,
+                0,
+                0,
+                "clock_id",
+            );
+            log::info!(
+                "wp_presentation clock_id={clk_id} ({})",
+                if clk_id == 1 {
+                    "CLOCK_MONOTONIC"
+                } else {
+                    "non-monotonic"
+                }
+            );
+        }
+    }
+}
+
 impl Dispatch<WpColorManagerV1, ()> for CmState {
     fn event(
         state: &mut Self,
@@ -388,21 +546,15 @@ impl Dispatch<WpColorManagerV1, ()> for CmState {
     ) {
         use wp_color_manager_v1::Event;
         match event {
-            Event::SupportedFeature { feature } => {
-                if let wayland_client::WEnum::Value(v) = feature {
-                    state.caps.features.push(v as u32);
-                }
-            }
-            Event::SupportedTfNamed { tf } => {
-                if let wayland_client::WEnum::Value(v) = tf {
-                    state.caps.transfer_functions.push(v as u32);
-                }
-            }
-            Event::SupportedPrimariesNamed { primaries } => {
-                if let wayland_client::WEnum::Value(v) = primaries {
-                    state.caps.primaries.push(v as u32);
-                }
-            }
+            Event::SupportedFeature {
+                feature: wayland_client::WEnum::Value(v),
+            } => state.caps.features.push(v as u32),
+            Event::SupportedTfNamed {
+                tf: wayland_client::WEnum::Value(v),
+            } => state.caps.transfer_functions.push(v as u32),
+            Event::SupportedPrimariesNamed {
+                primaries: wayland_client::WEnum::Value(v),
+            } => state.caps.primaries.push(v as u32),
             Event::Done => state.caps.done = true,
             _ => {}
         }

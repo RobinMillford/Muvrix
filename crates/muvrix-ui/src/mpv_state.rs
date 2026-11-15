@@ -51,10 +51,13 @@ const STOP_POLL: Duration = Duration::from_millis(50);
 
 /// CSV header, one physical line.
 pub const CANONICAL_HEADER: &str =
-    "timestamp_utc,t_s,pause,playback_time_s,eof_reached,core_idle,idle_active,demuxer_cache_state,notes";
+    "timestamp_utc,t_s,pause,playback_time_s,eof_reached,core_idle,idle_active,demuxer_cache_state,\
+frame_drop_count,decoder_frame_drop_count,vo_delayed_frame_count,mistimed_frame_count,vsync_ratio,\
+display_sync_active,container_fps,estimated_vf_fps,time_pos_s,avsync_s,audio_speed_correction,\
+video_speed_correction,notes";
 
 /// Field count of [`CANONICAL_HEADER`].
-pub const CANONICAL_FIELD_COUNT: usize = 9;
+pub const CANONICAL_FIELD_COUNT: usize = 21;
 
 const UNAVAILABLE: &str = "-1";
 const MAX_CACHE_STATE_LEN: usize = 240;
@@ -70,6 +73,18 @@ pub struct MpvStateSample {
     pub core_idle: Option<bool>,
     pub idle_active: Option<bool>,
     pub demuxer_cache_state: Option<String>,
+    pub frame_drop_count: Option<i64>,
+    pub decoder_frame_drop_count: Option<i64>,
+    pub vo_delayed_frame_count: Option<i64>,
+    pub mistimed_frame_count: Option<i64>,
+    pub vsync_ratio: Option<f64>,
+    pub display_sync_active: Option<bool>,
+    pub container_fps: Option<f64>,
+    pub estimated_vf_fps: Option<f64>,
+    pub time_pos: Option<f64>,
+    pub avsync: Option<f64>,
+    pub audio_speed_correction: Option<f64>,
+    pub video_speed_correction: Option<f64>,
 }
 
 impl MpvStateSample {
@@ -86,13 +101,28 @@ impl MpvStateSample {
                 .get_property_string("demuxer-cache-state")
                 .ok()
                 .map(|s| sanitize_cache_state(&s)),
+            // Phase 2.9: keep the VO/decoder/pacing counters distinct. These are
+            // the properties that explain `dropped_frames_total`; they are not
+            // interchangeable and are never inferred.
+            frame_drop_count: handle.get_property::<i64>("frame-drop-count").ok(),
+            decoder_frame_drop_count: handle.get_property::<i64>("decoder-frame-drop-count").ok(),
+            vo_delayed_frame_count: handle.get_property::<i64>("vo-delayed-frame-count").ok(),
+            mistimed_frame_count: handle.get_property::<i64>("mistimed-frame-count").ok(),
+            vsync_ratio: handle.get_property::<f64>("vsync-ratio").ok(),
+            display_sync_active: handle.get_property::<bool>("display-sync-active").ok(),
+            container_fps: handle.get_property::<f64>("container-fps").ok(),
+            estimated_vf_fps: handle.get_property::<f64>("estimated-vf-fps").ok(),
+            time_pos: handle.get_property::<f64>("time-pos").ok(),
+            avsync: handle.get_property::<f64>("avsync").ok(),
+            audio_speed_correction: handle.get_property::<f64>("audio-speed-correction").ok(),
+            video_speed_correction: handle.get_property::<f64>("video-speed-correction").ok(),
         }
     }
 
     /// Serializes one row. `t_s` is seconds since the run's start instant.
     pub fn to_csv_line(&self, t_s: f64) -> String {
         format!(
-            "{},{:.3},{},{},{},{},{},{},{}",
+            "{},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             iso8601_utc(SystemTime::now()),
             t_s,
             fmt_bool(self.pause),
@@ -101,6 +131,18 @@ impl MpvStateSample {
             fmt_bool(self.core_idle),
             fmt_bool(self.idle_active),
             self.demuxer_cache_state.as_deref().unwrap_or(UNAVAILABLE),
+            fmt_i64(self.frame_drop_count),
+            fmt_i64(self.decoder_frame_drop_count),
+            fmt_i64(self.vo_delayed_frame_count),
+            fmt_i64(self.mistimed_frame_count),
+            fmt_f64(self.vsync_ratio),
+            fmt_bool(self.display_sync_active),
+            fmt_f64(self.container_fps),
+            fmt_f64(self.estimated_vf_fps),
+            fmt_f64(self.time_pos),
+            fmt_f64(self.avsync),
+            fmt_f64(self.audio_speed_correction),
+            fmt_f64(self.video_speed_correction),
             ""
         )
     }
@@ -110,6 +152,13 @@ fn fmt_bool(value: Option<bool>) -> String {
     match value {
         Some(true) => "true".to_string(),
         Some(false) => "false".to_string(),
+        None => UNAVAILABLE.to_string(),
+    }
+}
+
+fn fmt_i64(value: Option<i64>) -> String {
+    match value {
+        Some(v) => v.to_string(),
         None => UNAVAILABLE.to_string(),
     }
 }
@@ -245,11 +294,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn header_has_exactly_nine_fields() {
+    fn header_has_exactly_twenty_one_fields() {
         let fields: Vec<&str> = CANONICAL_HEADER.split(',').collect();
         assert_eq!(fields.len(), CANONICAL_FIELD_COUNT);
         assert_eq!(fields[0], "timestamp_utc");
-        assert_eq!(fields[8], "notes");
+        assert_eq!(fields[7], "demuxer_cache_state");
+        assert_eq!(fields[8], "frame_drop_count");
+        assert_eq!(fields[9], "decoder_frame_drop_count");
+        assert_eq!(fields[20], "notes");
     }
 
     #[test]
@@ -258,12 +310,14 @@ mod tests {
         let line = sample.to_csv_line(1.0);
         let fields: Vec<&str> = line.split(',').collect();
         assert_eq!(fields.len(), CANONICAL_FIELD_COUNT, "line: {line}");
-        assert_eq!(fields[2], "-1", "pause");
-        assert_eq!(fields[3], "-1", "playback-time");
-        assert_eq!(fields[4], "-1", "eof-reached");
-        assert_eq!(fields[5], "-1", "core-idle");
-        assert_eq!(fields[6], "-1", "idle-active");
-        assert_eq!(fields[7], "-1", "demuxer-cache-state");
+        for (index, field) in fields
+            .iter()
+            .enumerate()
+            .take(CANONICAL_FIELD_COUNT - 1)
+            .skip(2)
+        {
+            assert_eq!(*field, "-1", "field {index} must be unavailable");
+        }
     }
 
     #[test]
@@ -275,9 +329,21 @@ mod tests {
             core_idle: Some(false),
             idle_active: Some(false),
             demuxer_cache_state: Some("seekable;eof=false".to_string()),
+            frame_drop_count: Some(7),
+            decoder_frame_drop_count: Some(0),
+            vo_delayed_frame_count: Some(2),
+            mistimed_frame_count: Some(1),
+            vsync_ratio: Some(0.998),
+            display_sync_active: Some(true),
+            container_fps: Some(60.0),
+            estimated_vf_fps: Some(60.0),
+            time_pos: Some(12.0),
+            avsync: Some(0.001),
+            audio_speed_correction: Some(1.0),
+            video_speed_correction: Some(1.0),
         };
         let line = sample.to_csv_line(2.5);
-        assert!(line.contains(",2.500,true,12.346,false,false,false,seekable;eof=false,"));
+        assert!(line.contains(",2.500,true,12.346,false,false,false,seekable;eof=false,7,0,2,1,"));
         assert_eq!(line.split(',').count(), CANONICAL_FIELD_COUNT);
     }
 

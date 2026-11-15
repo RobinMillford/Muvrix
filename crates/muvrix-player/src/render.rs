@@ -6,11 +6,42 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use libmpv_sys::{
     mpv_opengl_fbo, mpv_opengl_get_proc_address_fn, mpv_opengl_init_params, mpv_render_context,
     mpv_render_frame_info, mpv_render_param, mpv_render_param_type, mpv_render_update_flag,
-    MPV_RENDER_API_TYPE_OPENGL, MPV_RENDER_FRAME_INFO_PRESENT,
+    MPV_RENDER_API_TYPE_OPENGL, MPV_RENDER_FRAME_INFO_BLOCK_VSYNC, MPV_RENDER_FRAME_INFO_PRESENT,
 };
 
 use crate::error::MpvError;
 use crate::handle::MpvHandle;
+
+/// Diagnostic frame-info result for one render call. `valid` is the API's
+/// PRESENT bit; an invalid query is never converted into a zero-time frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FrameInfo {
+    pub valid: bool,
+    pub queried: bool,
+    pub api_result: i32,
+    pub flags: u64,
+    pub target_time: i64,
+}
+
+/// Only a successful get-info with PRESENT and a positive target time may drive
+/// target-time scheduling. A zero target is a valid API result, not a deadline.
+fn usable_target_time(info: &FrameInfo) -> Option<i64> {
+    if info.queried
+        && info.api_result == 0
+        && info.valid
+        && (info.flags & MPV_RENDER_FRAME_INFO_PRESENT) != 0
+        && info.target_time > 0
+    {
+        Some(info.target_time)
+    } else {
+        None
+    }
+}
+
+#[doc(hidden)]
+pub fn usable_target_time_for_test(info: &FrameInfo) -> Option<i64> {
+    usable_target_time(info)
+}
 
 /// Native display resource that the engine needs in order to initialise a
 /// hardware-surface interop context.
@@ -279,20 +310,34 @@ impl MpvRenderContext {
     /// # Safety
     ///
     /// Must be called with the OpenGL context current on the calling thread.
-    pub fn render_gl_ex(
+    pub fn render_gl_ex_info(
         &self,
         mut fbo: mpv_opengl_fbo,
         flip_y: bool,
         block_for_target_time: bool,
         query_frame_info: bool,
-    ) -> Result<Option<i64>, MpvError> {
+    ) -> Result<FrameInfo, MpvError> {
         if self.is_destroyed.load(Ordering::Acquire) || self.raw.is_null() {
             return Err(MpvError::NullHandle);
         }
 
         let mut flip_y_val: c_int = if flip_y { 1 } else { 0 };
         let mut block_val: c_int = if block_for_target_time { 1 } else { 0 };
-        let mut frame_info = mpv_render_frame_info::default();
+        let mut frame_info = mpv_render_frame_info {
+            flags: u64::MAX,
+            target_time: i64::MIN,
+        };
+        let mut api_result: i32 = i32::MIN;
+
+        if query_frame_info {
+            // `MPV_RENDER_PARAM_NEXT_FRAME_INFO` is a get-info parameter. Passing
+            // it inside the render call's parameter array does not fill it.
+            let info_param = mpv_render_param {
+                type_: mpv_render_param_type::MPV_RENDER_PARAM_NEXT_FRAME_INFO,
+                data: &mut frame_info as *mut _ as *mut c_void,
+            };
+            api_result = unsafe { libmpv_sys::mpv_render_context_get_info(self.raw, info_param) };
+        }
 
         let mut params = vec![
             mpv_render_param {
@@ -309,13 +354,6 @@ impl MpvRenderContext {
             },
         ];
 
-        if query_frame_info {
-            params.push(mpv_render_param {
-                type_: mpv_render_param_type::MPV_RENDER_PARAM_NEXT_FRAME_INFO,
-                data: &mut frame_info as *mut _ as *mut c_void,
-            });
-        }
-
         params.push(mpv_render_param {
             type_: mpv_render_param_type::MPV_RENDER_PARAM_INVALID,
             data: std::ptr::null_mut(),
@@ -324,13 +362,53 @@ impl MpvRenderContext {
         let res = unsafe { libmpv_sys::mpv_render_context_render(self.raw, params.as_mut_ptr()) };
         MpvError::from_raw(res)?;
 
-        if !query_frame_info || (frame_info.flags & MPV_RENDER_FRAME_INFO_PRESENT) == 0 {
-            return Ok(None);
+        if query_frame_info {
+            static FRAME_INFO_LOGGED: AtomicBool = AtomicBool::new(false);
+            if !FRAME_INFO_LOGGED.swap(true, Ordering::Relaxed) {
+                log::info!(
+                    "frame-info first: api_result={} flags=0x{:x} present={} block_vsync={} target_time_us={}",
+                    api_result,
+                    frame_info.flags,
+                    (frame_info.flags & MPV_RENDER_FRAME_INFO_PRESENT) != 0,
+                    (frame_info.flags & MPV_RENDER_FRAME_INFO_BLOCK_VSYNC) != 0,
+                    frame_info.target_time
+                );
+            }
+            static BLOCK_VSYNC_LOGGED: AtomicBool = AtomicBool::new(false);
+            if (frame_info.flags & MPV_RENDER_FRAME_INFO_BLOCK_VSYNC) != 0
+                && !BLOCK_VSYNC_LOGGED.swap(true, Ordering::Relaxed)
+            {
+                log::info!(
+                    "frame-info: BLOCK_VSYNC first set (flags=0x{:x}, target_time_us={})",
+                    frame_info.flags,
+                    frame_info.target_time
+                );
+            }
         }
-        if frame_info.target_time <= 0 {
-            return Ok(None);
+
+        if !query_frame_info {
+            return Ok(FrameInfo::default());
         }
-        Ok(Some(frame_info.target_time))
+        Ok(FrameInfo {
+            valid: api_result == 0 && (frame_info.flags & MPV_RENDER_FRAME_INFO_PRESENT) != 0,
+            queried: true,
+            api_result,
+            flags: frame_info.flags,
+            target_time: frame_info.target_time,
+        })
+    }
+
+    /// Backwards-compatible target-time wrapper. The causal trace uses
+    /// `render_gl_ex_info` so it can record every query, including invalid ones.
+    pub fn render_gl_ex(
+        &self,
+        fbo: mpv_opengl_fbo,
+        flip_y: bool,
+        block_for_target_time: bool,
+        query_frame_info: bool,
+    ) -> Result<Option<i64>, MpvError> {
+        let info = self.render_gl_ex_info(fbo, flip_y, block_for_target_time, query_frame_info)?;
+        Ok(usable_target_time(&info))
     }
 
     /// Informs the renderer that a frame was presented.

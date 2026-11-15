@@ -213,8 +213,9 @@ impl MpvHandle {
             .unwrap_or_default();
 
         let hdr_mode = if gamma == "pq" || gamma == "hlg" || primaries == "bt.2020" {
-            // Note: Standard OpenGL offscreen FBO renders into 8-bit sRGB framebuffer,
-            // tone-mapped by mpv/libplacebo. Native HDR requires 10-bit swapchain + compositor HDR protocol.
+            // Source-side classification only. The final output is described by
+            // OutputCaps (surface_bits, description_identity, native_hdr_available).
+            // This diagnostic is not evidence that the panel is in HDR mode.
             HdrPresentationMode::ToneMappedToSdr {
                 transfer: gamma,
                 primaries,

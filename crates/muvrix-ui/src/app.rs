@@ -276,8 +276,23 @@ impl MuvrixApp {
         // mpv from loading LRC files as video subtitles and rendering raw timestamps.
         mpv.set_option_string(
             "sub-auto-exts",
-            "ass,idx,mks,pgs,rt,sbv,scc,smi,srt,ssa,sub,sup,utf,utf-8,utf8,vtt",
+            "ass,idx,mks,pgs,rs,sbv,scc,smi,srt,ssa,sub,sup,utf,utf-8,utf8,vtt",
         )?;
+        // Phase 2.10 diagnostic: set pre-initialization options before the
+        // read-only `display-fps` property path. The option path is the one mpv
+        // actually accepts; the Phase 2.9 post-init property set was rejected.
+        if let Ok(video_sync) = std::env::var("MUVRIX_TEST_VIDEO_SYNC") {
+            mpv.set_option_string("video-sync", &video_sync)?;
+            log::warn!("TEST-ONLY: video-sync={video_sync} option set");
+        }
+        if let Ok(display_fps) = std::env::var("MUVRIX_TEST_DISPLAY_FPS_OPTION") {
+            // Pinned mpv uses `display-fps-override`; `display-fps` is the
+            // runtime-reported property, not the writable option.
+            match mpv.set_option_string("display-fps-override", &display_fps) {
+                Ok(()) => log::warn!("TEST-ONLY: display-fps-override={display_fps} option set"),
+                Err(e) => log::warn!("TEST-ONLY: display-fps-override option unavailable: {e}"),
+            }
+        }
         mpv.initialize()?;
 
         // 3. Initialize libmpv OpenGL render context
@@ -342,16 +357,50 @@ impl MuvrixApp {
                 // Engine thread: only raise a flag, bump a counter, ask egui for
                 // a repaint, and deliver an independent event-loop wake. No
                 // rendering, no libmpv calls.
+                let cb = crate::causal_trace::record(
+                    crate::causal_trace::Kind::CallbackEntry,
+                    0,
+                    0,
+                    0,
+                    0,
+                    "mpv_update",
+                );
+                crate::causal_trace::set_last_callback(cb);
                 callback_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 callback_signal.store(true, std::sync::atomic::Ordering::Release);
                 crate::trace::record(crate::trace::Ev::UpdateCallback, "mpv_thread", 0, 0);
                 // This wake must not depend on egui's repaint-deduplication
                 // state: an egui pass is exactly what cannot run while the
                 // compositor withholds frame callbacks.
-                if callback_wake.wake_now() {
+                let accepted = callback_wake.wake_now();
+                crate::causal_trace::record(
+                    crate::causal_trace::Kind::CallbackWakeBridge,
+                    cb,
+                    accepted as i64,
+                    0,
+                    0,
+                    if accepted { "accepted" } else { "coalesced" },
+                );
+                if accepted {
                     crate::trace::record(crate::trace::Ev::Nudge, "mpv_update", 0, 0);
                 }
                 egui_ctx.request_repaint();
+                crate::causal_trace::record(
+                    crate::causal_trace::Kind::CallbackEgui,
+                    cb,
+                    0,
+                    0,
+                    0,
+                    "request_repaint",
+                );
+                crate::causal_trace::record(
+                    crate::causal_trace::Kind::CallbackExit,
+                    cb,
+                    0,
+                    0,
+                    0,
+                    "mpv_update",
+                );
             });
 
         let render_engine = Arc::new(Mutex::new(render_engine));
@@ -651,6 +700,22 @@ impl MuvrixApp {
         if std::env::var("MUVRIX_INITIAL_PAUSE").is_ok() {
             let _ = app.controller.pause();
         }
+        // Phase 2.9 diagnostic: test whether mpv's display-sync path changes VO
+        // frame drops when it is told the actual output refresh instead of
+        // leaving `display-fps` unset. Test-only until the comparison proves it.
+        if let Ok(raw) = std::env::var("MUVRIX_TEST_DISPLAY_FPS") {
+            match raw.parse::<f64>() {
+                Ok(fps) if fps.is_finite() && fps > 0.0 => {
+                    match app.controller.handle().set_property("display-fps", fps) {
+                        Ok(()) => {
+                            log::warn!("TEST-ONLY: display-fps={fps:.6} set for drop diagnostic")
+                        }
+                        Err(e) => log::warn!("TEST-ONLY: failed to set display-fps={fps}: {e}"),
+                    }
+                }
+                _ => log::warn!("TEST-ONLY: invalid MUVRIX_TEST_DISPLAY_FPS={raw:?}"),
+            }
+        }
 
         Ok(app)
     }
@@ -675,6 +740,23 @@ impl MuvrixApp {
 
                 match self.controller.load_file(&path_str) {
                     Ok(()) => {
+                        // Test-only: long-duration reliability runs need a
+                        // source longer than the fixture. Production never sets
+                        // this variable.
+                        if std::env::var("MUVRIX_TEST_LOOP").is_ok() {
+                            match self
+                                .controller
+                                .handle()
+                                .set_property_string("loop-file", "inf")
+                            {
+                                Ok(()) => log::warn!(
+                                    "TEST-ONLY: loop-file=inf enabled for long-duration run"
+                                ),
+                                Err(e) => {
+                                    log::warn!("TEST-ONLY: failed to enable loop-file=inf: {e}")
+                                }
+                            }
+                        }
                         // New file: re-observe which decoder the engine picks.
                         self.decode_settled = false;
                         self.decode_attempt = 0;
@@ -853,6 +935,10 @@ impl MuvrixApp {
         // compositor's colour description all succeeded. Anything less falls
         // back to SDR with the exact reason recorded.
         let display = self.output.display.clone();
+        // `ColorPlan` is the source-side decision record. The engine target is
+        // owned by `apply_video_enhancements` -> `apply_output_target`, where the
+        // output surface is authoritative; it is deliberately not re-applied
+        // here and cannot fight the PQ/BT.2020 target.
         let (mut state, _plan) =
             plan_presentation(&source, &display, self.output.native_hdr_available);
         if state.reason.is_none() {
@@ -1415,6 +1501,30 @@ impl MuvrixApp {
 
     pub fn apply_video_enhancements(&mut self) {
         let _ = ShaderManager::apply_adjustments(self.controller.handle(), &self.video_settings);
+        // Re-assert the shell-owned output target after the adjustment write.
+        // `Auto` in the adjustment settings no longer writes target-trc/prim, but
+        // this also covers an explicit non-Auto selection or a reset on an HDR
+        // surface: the output surface remains the authority.
+        let _ = ShaderManager::apply_output_target(
+            self.controller.handle(),
+            self.output.native_hdr_available,
+            self.output.target_peak_nits,
+        );
+        let trc = self
+            .controller
+            .handle()
+            .get_property_string("target-trc")
+            .unwrap_or_else(|_| "unavailable".to_string());
+        let prim = self
+            .controller
+            .handle()
+            .get_property_string("target-prim")
+            .unwrap_or_else(|_| "unavailable".to_string());
+        log::info!(
+            "output colour target: trc={trc} prim={prim} native_hdr={} physical_verified={}",
+            self.output.native_hdr_available,
+            self.output.physical_verified
+        );
         let _ = ShaderManager::apply_anime4k_mode(
             self.controller.handle(),
             self.anime4k_preset,
@@ -2679,7 +2789,7 @@ impl MuvrixApp {
             // 3. Central Video Viewport with Interactive Overlay Cards
             // ---------------------------------------------------------------------
             egui::CentralPanel::default()
-                .frame(egui::Frame::NONE.fill(Color32::BLACK))
+                .frame(egui::Frame::NONE.fill(Color32::TRANSPARENT))
                 .show(ctx, |ui| {
                     let available_size = ui.available_size();
                     if available_size.x <= 1.0 || available_size.y <= 1.0 {

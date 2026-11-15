@@ -203,7 +203,57 @@ impl OffscreenFbo {
     /// The OpenGL context must be current on the calling thread.
     pub unsafe fn save_screenshot_png(&self, gl: &glow::Context, path: &str) -> Result<(), String> {
         let mut pixels = vec![0u8; (self.width * self.height * 4) as usize];
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+        let is_float = self.internal_format == glow::RGBA16F as i32
+            || self.internal_format == glow::RGBA32F as i32;
+        let mut temp_texture = None;
+        let mut temp_fbo = None;
+        let read_fbo = if is_float {
+            // RGBA16F cannot be read back as UNSIGNED_BYTE on this Mesa/i915
+            // path (it returns black). Blit to a temporary RGBA8 target first.
+            let tex = gl.create_texture().map_err(|e| e.to_string())?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                self.width as i32,
+                self.height as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(None),
+            );
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            let fbo = gl.create_framebuffer().map_err(|e| e.to_string())?;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(tex),
+                0,
+            );
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.fbo));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
+            gl.blit_framebuffer(
+                0,
+                0,
+                self.width as i32,
+                self.height as i32,
+                0,
+                0,
+                self.width as i32,
+                self.height as i32,
+                glow::COLOR_BUFFER_BIT,
+                glow::NEAREST,
+            );
+            temp_texture = Some(tex);
+            temp_fbo = Some(fbo);
+            Some(fbo)
+        } else {
+            Some(self.fbo)
+        };
+        gl.bind_framebuffer(glow::FRAMEBUFFER, read_fbo);
         gl.read_pixels(
             0,
             0,
@@ -214,6 +264,12 @@ impl OffscreenFbo {
             glow::PixelPackData::Slice(Some(&mut pixels)),
         );
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        if let Some(tex) = temp_texture {
+            gl.delete_texture(tex);
+        }
+        if let Some(fbo) = temp_fbo {
+            gl.delete_framebuffer(fbo);
+        }
 
         let stride = (self.width * 4) as usize;
         let mut flipped = Vec::with_capacity(pixels.len());

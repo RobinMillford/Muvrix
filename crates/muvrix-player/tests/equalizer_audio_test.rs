@@ -1,30 +1,31 @@
 //! Measurable audio tests for 10-Band Parametric Equalizer, Audio DSP, and Output Device Routing.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use muvrix_player::equalizer::{EqualizerManager, EqualizerPreset, EqualizerSettings};
 use muvrix_player::handle::MpvHandle;
 use muvrix_player::PlaybackController;
 
-/// Returns the shared audio fixture, synthesising it on first use.
+/// Returns a per-process audio fixture, synthesising it on first use.
 ///
-/// The WAV is generated rather than committed: binary fixtures are ignored by
-/// `.gitignore`, so a fresh clone had no fixture and these tests failed on
-/// `canonicalize`. Generation is deterministic (same samples every run), so the
-/// measurements below keep their thresholds.
+/// The WAV is generated in the system temp directory, not read from the source
+/// tree. This removes the local-only fixture dependency: a fresh checkout can
+/// run the tests without `tests/fixtures/audio_test_tone.wav`. The process id
+/// keeps parallel test binaries from racing on the same file. Generation is
+/// deterministic (same samples every run), so the Goertzel thresholds below
+/// remain valid.
 fn get_audio_fixture_path() -> PathBuf {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/audio_test_tone.wav");
-    if !path.exists() {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create tests/fixtures");
-        }
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let path =
+            std::env::temp_dir().join(format!("muvrix-audio-test-tone-{}.wav", std::process::id()));
         // 2 s of a 1 kHz tone at half scale: enough for the Goertzel windows
         // used by the frequency-response assertions.
         synthesize_wav(&path, 2.0, &[(1000.0, 0.5)]);
-    }
-    path.canonicalize()
-        .expect("Audio fixture tests/fixtures/audio_test_tone.wav must exist")
+        path
+    })
+    .clone()
 }
 
 fn create_test_player() -> MpvHandle {

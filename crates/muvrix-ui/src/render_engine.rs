@@ -48,11 +48,11 @@ pub enum PacingMode {
 impl PacingMode {
     /// Reads `MUVRIX_PACING` (`blocking` | `scheduled`).
     pub fn from_env() -> Self {
-        match std::env::var("MUVRIX_PACING")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str()
-        {
+        Self::from_value(&std::env::var("MUVRIX_PACING").unwrap_or_default())
+    }
+
+    fn from_value(value: &str) -> Self {
+        match value.to_ascii_lowercase().as_str() {
             "blocking" => Self::Blocking,
             _ => Self::Scheduled,
         }
@@ -65,6 +65,20 @@ impl PacingMode {
     /// Production pacing.
     pub fn default_mode() -> Self {
         Self::Scheduled
+    }
+}
+
+#[cfg(test)]
+mod pacing_tests {
+    use super::*;
+
+    #[test]
+    fn unpaced_is_not_a_valid_pacing_mode() {
+        // Phase 2.0 removed `Unpaced`; an old environment value must fall back
+        // to the scheduled production mode, not resurrect unpaced rendering.
+        assert_eq!(PacingMode::from_value("unpaced"), PacingMode::Scheduled);
+        assert_eq!(PacingMode::from_value("scheduled"), PacingMode::Scheduled);
+        assert_eq!(PacingMode::from_value("blocking"), PacingMode::Blocking);
     }
 }
 
@@ -172,6 +186,7 @@ pub struct RenderEngine {
     /// The viewport rectangle the engine last rendered into, in window pixels
     /// with a bottom-left origin. Consumed by the shell's composite pass.
     last_video_rect: [i32; 4],
+    gpu: crate::gpu_timing::GpuTiming,
 }
 
 impl RenderEngine {
@@ -233,6 +248,7 @@ impl RenderEngine {
             telemetry: RenderTelemetry::default(),
             options,
             last_video_rect: [0, 0, 0, 0],
+            gpu: crate::gpu_timing::GpuTiming::new(),
             wake: None,
         })
     }
@@ -263,6 +279,14 @@ impl RenderEngine {
             self.mpv_render_ctx.report_swap();
             self.telemetry.swap_reports += 1;
             self.pending_swap = false;
+            crate::causal_trace::record(
+                crate::causal_trace::Kind::ReportSwap,
+                crate::causal_trace::last_draw(),
+                1,
+                0,
+                0,
+                "after_successful_swap",
+            );
         }
     }
 
@@ -378,6 +402,14 @@ impl RenderEngine {
             self.mpv_render_ctx.report_swap();
             self.telemetry.swap_reports += 1;
             self.pending_swap = false;
+            crate::causal_trace::record(
+                crate::causal_trace::Kind::ReportSwap,
+                crate::causal_trace::last_draw(),
+                1,
+                0,
+                0,
+                "deferred_eframe",
+            );
         }
 
         // 1. Decide whether this callback has a video frame to draw.
@@ -386,6 +418,16 @@ impl RenderEngine {
         //    ready" signal. Rendering without it re-renders the same frame at
         //    display rate, which wastes the whole render pipeline and, in
         //    copy-back mode, re-uploads every frame.
+        let draw_corr = crate::causal_trace::last_draw();
+        self.gpu.poll(gl);
+        crate::causal_trace::record(
+            crate::causal_trace::Kind::UpdateEnter,
+            draw_corr,
+            0,
+            0,
+            0,
+            "paint",
+        );
         let update_flags = self.mpv_render_ctx.update();
         let engine_has_frame = (update_flags
             & (libmpv_sys::mpv_render_update_flag::MPV_RENDER_UPDATE_FRAME as u64))
@@ -396,12 +438,36 @@ impl RenderEngine {
             update_flags as i64,
             engine_has_frame as i64,
         );
+        crate::causal_trace::record(
+            crate::causal_trace::Kind::UpdateExit,
+            draw_corr,
+            update_flags as i64,
+            engine_has_frame as i64,
+            0,
+            "paint",
+        );
         let signalled = self
             .frame_signal
             .as_ref()
             .map(|s| s.swap(false, Ordering::AcqRel))
             .unwrap_or(false);
         let should_render = engine_has_frame || signalled;
+        crate::causal_trace::record(
+            crate::causal_trace::Kind::FrameSignal,
+            draw_corr,
+            signalled as i64,
+            engine_has_frame as i64,
+            should_render as i64,
+            "after_update",
+        );
+        crate::causal_trace::record(
+            crate::causal_trace::Kind::RenderDecision,
+            draw_corr,
+            engine_has_frame as i64,
+            signalled as i64,
+            should_render as i64,
+            "update_or_signal",
+        );
         self.last_video_rect = viewport_px;
 
         // 0b. Capture GL state *before* libmpv renders into the FBO.
@@ -430,15 +496,58 @@ impl RenderEngine {
                 fbo_params.w as i64,
                 fbo_params.h as i64,
             );
-            let target =
-                self.mpv_render_ctx
-                    .render_gl_ex(fbo_params, false, self.pacing.blocks(), true);
+            crate::causal_trace::record(
+                crate::causal_trace::Kind::RenderEnter,
+                draw_corr,
+                fbo_params.w as i64,
+                fbo_params.h as i64,
+                0,
+                "mpv",
+            );
+            let gpu_query = self.gpu.begin(gl);
+            let frame = self.mpv_render_ctx.render_gl_ex_info(
+                fbo_params,
+                false,
+                self.pacing.blocks(),
+                true,
+            );
+            let target = match &frame {
+                Ok(info) if info.valid && info.target_time > 0 => Some(info.target_time),
+                _ => None,
+            };
             let elapsed = started.elapsed();
-            let target_state = match &target {
-                Ok(Some(_)) => 1,
-                Ok(None) => 0,
+            self.gpu.end(
+                gl,
+                gpu_query,
+                crate::gpu_timing::GpuStage::MpvRender,
+                draw_corr,
+                elapsed.as_micros() as i64,
+            );
+            let target_state = match &frame {
+                Ok(info) if info.valid => 1,
+                Ok(_) => 0,
                 Err(_) => -1,
             };
+            if let Ok(info) = &frame {
+                crate::causal_trace::record5(
+                    crate::causal_trace::Kind::FrameInfo,
+                    draw_corr,
+                    info.flags as i64,
+                    info.target_time,
+                    info.valid as i64,
+                    ((info.flags & libmpv_sys::MPV_RENDER_FRAME_INFO_BLOCK_VSYNC) != 0) as i64,
+                    info.api_result as i64,
+                    "every_query",
+                );
+            }
+            crate::causal_trace::record(
+                crate::causal_trace::Kind::RenderExit,
+                draw_corr,
+                elapsed.as_micros() as i64,
+                target_state,
+                0,
+                "mpv",
+            );
             crate::trace::record(
                 crate::trace::Ev::RenderExit,
                 "mpv",
@@ -462,6 +571,14 @@ impl RenderEngine {
                     self.mpv_render_ctx.report_swap();
                     self.telemetry.swap_reports += 1;
                     crate::trace::record(crate::trace::Ev::ReportSwap, "immediate", 0, 0);
+                    crate::causal_trace::record(
+                        crate::causal_trace::Kind::ReportSwap,
+                        crate::causal_trace::last_draw(),
+                        1,
+                        0,
+                        0,
+                        "immediate",
+                    );
                 }
                 SwapReportMode::Deferred => self.pending_swap = true,
                 SwapReportMode::None => {}
@@ -469,22 +586,29 @@ impl RenderEngine {
 
             // 1b. Non-blocking pacing: if the engine told us when this frame is
             //     due, ask for a repaint then instead of spinning on vsync.
-            if let Ok(Some(target_us)) = target {
+            if let Some(target_us) = target {
                 self.telemetry.last_target_time_us = Some(target_us);
                 self.schedule_repaint_at(target_us);
             }
 
             if self.frame_count % 30 == 1 {
-                let center_pixel = self.fbo.read_pixel_sample(gl);
-                log::trace!(
-                    "Rendered frame #{}, viewport: [{}, {}, {}x{}], center RGBA: {:?}",
-                    self.frame_count,
-                    left,
-                    bottom,
-                    width,
-                    height,
-                    center_pixel
-                );
+                // A glReadPixels here synchronizes with GPU completion. It is
+                // trace-only diagnostics, so it must not run when trace logging
+                // is off: doing so inserted a periodic synchronous readback into
+                // the presentation path and could make the next frame miss its
+                // display deadline.
+                if log::log_enabled!(log::Level::Trace) {
+                    let center_pixel = self.fbo.read_pixel_sample(gl);
+                    log::trace!(
+                        "Rendered frame #{}, viewport: [{}, {}, {}x{}], center RGBA: {:?}",
+                        self.frame_count,
+                        left,
+                        bottom,
+                        width,
+                        height,
+                        center_pixel
+                    );
+                }
 
                 // Optional automated frame capture for verification testing
                 if let Ok(capture_path) = std::env::var("MUVRIX_CAPTURE_FRAME_PNG") {
@@ -575,6 +699,14 @@ impl RenderEngine {
         // vsync boundary, so waking exactly at the target would be late.
         let lead_us = 4_000;
         let wait_us = (delta_us - lead_us).max(0);
+        crate::causal_trace::record(
+            crate::causal_trace::Kind::TargetSchedule,
+            crate::causal_trace::last_draw(),
+            target_us,
+            now_us,
+            wait_us,
+            "egui_repaint_after",
+        );
         if wait_us > 0 {
             let capped = (wait_us as u64).min(50_000);
             ctx.request_repaint_after(Duration::from_micros(capped));
@@ -583,8 +715,11 @@ impl RenderEngine {
 
     /// Destroys OpenGL resources.
     ///
+    /// # Safety
+    ///
     /// Must be called with the OpenGL context current on the calling thread,
-    /// before the windowing-system connection is released.
+    /// before the windowing-system connection is released. The context must be
+    /// the one that created this engine and its FBO/quad resources.
     pub unsafe fn destroy(&mut self, gl: &glow::Context) {
         // Acknowledge any outstanding frame so the engine's teardown is not left
         // waiting on a swap that will never be reported.
@@ -592,6 +727,7 @@ impl RenderEngine {
             self.mpv_render_ctx.report_swap();
             self.pending_swap = false;
         }
+        self.gpu.destroy(gl);
         self.mpv_render_ctx.destroy();
         self.fbo.destroy(gl);
         if let Some(quad) = self.quad.as_mut() {

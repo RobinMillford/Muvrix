@@ -314,6 +314,7 @@ impl TelemetryRow {
     /// real ones, so `last_*_age_s` are ages *at sampling time* — not a value
     /// that is structurally zero because the sample and the event share a
     /// timestamp.
+    #[allow(clippy::too_many_arguments)] // deliberate row constructor; splitting it would obscure the schema
     pub fn sample(
         now: Instant,
         started: Instant,
@@ -977,7 +978,7 @@ fn run_worker(metrics: Arc<SharedMetrics>, config: TelemetryConfig) {
                 // other wake request.
                 notify.set_deadline(Instant::now());
                 nudges = nudges.saturating_add(1);
-                if nudges <= 3 || nudges % 30 == 0 {
+                if nudges <= 3 || nudges.is_multiple_of(30) {
                     log::warn!(
                         "no paint for {}ms while progress expected: requested a repaint ({nudges})",
                         now.saturating_duration_since(last_paint_change).as_millis()

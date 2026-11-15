@@ -80,11 +80,7 @@ pub struct SwapStats {
 
 impl SwapStats {
     pub fn avg_swap_us(&self) -> u64 {
-        if self.swaps == 0 {
-            0
-        } else {
-            self.swap_us_total / self.swaps
-        }
+        self.swap_us_total.checked_div(self.swaps).unwrap_or(0)
     }
 }
 
@@ -240,9 +236,8 @@ impl Presenter {
                 break;
             }
             log::warn!(
-                "no 10-bit EGLConfig for ES2 renderables (got R{}{} G{} B{} A{}); falling back to 8-bit",
+                "no 10-bit EGLConfig for ES2 renderables (got R{} G{} B{} A{}); falling back to 8-bit",
                 fmt.red,
-                if fmt.ten_bit { "" } else { "" },
                 fmt.green,
                 fmt.blue,
                 fmt.alpha
@@ -355,7 +350,20 @@ impl Presenter {
 
         // Interval 0 is the fix: Mesa's Wayland WSI blocks inside
         // eglSwapBuffers waiting for a frame callback at interval 1.
-        presenter.set_swap_interval(0)?;
+        // Phase 2.11 controlled experiment: test-only interval override. The
+        // production caller still requests 0 unless this env var is set.
+        let requested_interval = std::env::var("MUVRIX_TEST_EGL_SWAP_INTERVAL")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(0);
+        presenter.set_swap_interval(requested_interval)?;
+        log::info!(
+            "swap interval requested={} applied={} range={}..={}",
+            requested_interval,
+            presenter.swap_interval,
+            presenter.interval_min,
+            presenter.interval_max
+        );
 
         log::info!(
             "surface: R{}G{}B{}A{} config_id={} samples={} ten_bit={} interval={} (range {}..={})",
@@ -580,6 +588,12 @@ pub fn get_proc_address(name: &str) -> *mut c_void {
 
 /// `MPV_RENDER_PARAM_OPENGL_INIT_PARAMS` callback, kept as a plain `extern "C"`
 /// function so the pointer stays valid for the render context's lifetime.
+///
+/// # Safety
+///
+/// `name` must be null or a valid NUL-terminated C string. The returned pointer
+/// is an EGL/GL entry point and is only valid to call in a context where that
+/// function is supported.
 pub unsafe extern "C" fn mpv_get_proc_address(
     _ctx: *mut c_void,
     name: *const std::os::raw::c_char,

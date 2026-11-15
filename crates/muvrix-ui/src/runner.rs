@@ -117,27 +117,60 @@ impl WakeSignal {
         )
     }
 
+    #[cfg(test)]
     fn request_immediate(&self) {
+        self.request_immediate_from("immediate");
+    }
+
+    fn request_immediate_from(&self, source: &'static str) {
         self.immediate_requests
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut s) = self.inner.lock() {
             s.immediate = true;
         }
-        self.nudge();
+        self.nudge(source);
     }
 
     /// Wakes the event loop. Safe from any thread; ignored if the loop is gone.
-    fn nudge(&self) {
+    fn nudge(&self, source: &'static str) {
         if let Some(proxy) = &self.proxy {
             // A request is not a delivery: record both sides separately so a run
             // whose sends never reach the loop is distinguishable from one that
             // simply has nothing to do.
             match proxy.send_event(RunnerEvent::Wake) {
-                Ok(()) => crate::trace::record(crate::trace::Ev::ProxySend, "ok", 0, 0),
-                Err(_) => crate::trace::record(crate::trace::Ev::ProxySend, "closed", 0, 0),
+                Ok(()) => {
+                    crate::trace::record(crate::trace::Ev::ProxySend, "ok", 0, 0);
+                    crate::causal_trace::record(
+                        crate::causal_trace::Kind::ProxySend,
+                        crate::causal_trace::last_callback(),
+                        1,
+                        0,
+                        0,
+                        source,
+                    );
+                }
+                Err(_) => {
+                    crate::trace::record(crate::trace::Ev::ProxySend, "closed", 0, 0);
+                    crate::causal_trace::record(
+                        crate::causal_trace::Kind::ProxySend,
+                        crate::causal_trace::last_callback(),
+                        0,
+                        0,
+                        0,
+                        source,
+                    );
+                }
             }
         } else {
             crate::trace::record(crate::trace::Ev::ProxySend, "no_proxy", 0, 0);
+            crate::causal_trace::record(
+                crate::causal_trace::Kind::ProxySend,
+                crate::causal_trace::last_callback(),
+                -1,
+                0,
+                0,
+                source,
+            );
         }
     }
 
@@ -147,6 +180,10 @@ impl WakeSignal {
     /// platform-neutral [`WakeHandle`] trait, and an inherent method with the
     /// same name is exactly how recursive trait forwarding happens.
     pub fn request_deadline(&self, at: Instant) {
+        self.request_deadline_from(at, "deadline");
+    }
+
+    fn request_deadline_from(&self, at: Instant, source: &'static str) {
         use std::sync::atomic::Ordering::Relaxed;
         self.deadlines_set.fetch_add(1, Relaxed);
         let mut replaced = false;
@@ -167,7 +204,7 @@ impl WakeSignal {
             delay_ms,
             self.deadlines_set.load(Relaxed) as i64,
         );
-        self.nudge();
+        self.nudge(source);
     }
 
     /// Returns the pending deadline without consuming it.
@@ -208,9 +245,13 @@ impl WakeSignal {
             Ok(mut s) => {
                 let immediate = std::mem::take(&mut s.immediate);
                 let deadline = s.deadline;
+                let mut due = 0i64;
+                let mut lateness = 0i64;
                 match deadline {
                     Some(at) if at <= now => {
                         s.deadline = None;
+                        due = 1;
+                        lateness = now.saturating_duration_since(at).as_micros() as i64;
                         crate::trace::record(
                             crate::trace::Ev::DeadlineDue,
                             "due",
@@ -223,6 +264,14 @@ impl WakeSignal {
                     }
                     None => {}
                 }
+                crate::causal_trace::record(
+                    crate::causal_trace::Kind::WakeTakeDue,
+                    crate::causal_trace::last_callback(),
+                    immediate as i64,
+                    due,
+                    lateness,
+                    if due == 1 { "due" } else { "retained" },
+                );
                 (immediate, deadline)
             }
             Err(_) => (false, None),
@@ -235,7 +284,7 @@ impl WakeHandle for WakeSignal {
     fn set_deadline(&self, deadline: Instant) {
         // Call the inherent method by its full path. `self.set_deadline(..)`
         // would resolve to this trait method and recurse until the stack dies.
-        WakeSignal::request_deadline(self, deadline);
+        WakeSignal::request_deadline_from(self, deadline, "wake_handle");
     }
 
     fn wake_now(&self) {
@@ -243,7 +292,7 @@ impl WakeHandle for WakeSignal {
         // the `min()` race against a draw-end/target-time deadline and replace
         // it. The immediate flag wakes the loop while leaving the pacing
         // deadline intact.
-        WakeSignal::request_immediate(self);
+        WakeSignal::request_immediate_from(self, "wake_bridge");
     }
 }
 
@@ -287,6 +336,47 @@ pub const WITHHELD_FRAME_CALLBACK_MS: Duration = Duration::from_millis(300);
 /// How often a suspended surface re-requests a paint so it can notice that the
 /// compositor resumed compositing it.
 pub const SUSPENSION_PROBE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Bounded redraw-request gate.
+///
+/// Winit coalesces redraw requests internally, but the application previously
+/// issued one on every wake and deadline without any visible gate. This makes
+/// the policy explicit: while a request is outstanding, another is suppressed
+/// unless the suspension-probe interval has elapsed. That bounds request storms
+/// during callback withholding while still allowing the probe to retry. A
+/// completed paint clears the gate.
+#[derive(Debug, Default)]
+struct RedrawGate {
+    pending_since: Option<Instant>,
+    last_request_at: Option<Instant>,
+}
+
+impl RedrawGate {
+    /// Returns true when a request should be sent to winit.
+    fn request(&mut self, now: Instant, retry_after: Duration) -> bool {
+        if self.pending_since.is_some() {
+            if let Some(last) = self.last_request_at {
+                if now.saturating_duration_since(last) < retry_after {
+                    return false;
+                }
+            }
+        } else {
+            self.pending_since = Some(now);
+        }
+        self.last_request_at = Some(now);
+        true
+    }
+
+    /// A paint completed, so the next request is immediate.
+    fn complete(&mut self) {
+        self.pending_since = None;
+        self.last_request_at = None;
+    }
+
+    fn pending_since(&self) -> Option<Instant> {
+        self.pending_since
+    }
+}
 
 /// Test-only controlled rendering interruption (Phase 2.4, Part 4/Test D).
 ///
@@ -339,9 +429,7 @@ impl FaultInjection {
 
     /// Some(end) while the pipeline must stay paused.
     fn stall_until(&mut self, now: Instant, origin: Instant) -> Option<Instant> {
-        let Some(len) = self.stall else {
-            return None;
-        };
+        let len = self.stall?;
         if self.finished {
             return None;
         }
@@ -385,8 +473,11 @@ struct Shell {
     egui_state: egui_winit::State,
     egui_ctx: egui::Context,
     app: MuvrixApp,
+    test_sequence: Vec<(f64, String)>,
+    next_sequence: usize,
     ui_fbo: OffscreenFbo,
     composite: Composite,
+    gpu: crate::gpu_timing::GpuTiming,
     color: Option<ColorManager>,
     description: Option<SurfaceDescription>,
     color_mode: ColorMode,
@@ -444,7 +535,7 @@ struct Shell {
     /// the event loop is healthy and mpv keeps producing frames. Tracking the
     /// outstanding request turns that into a *known* presentation suspension
     /// instead of a false stall.
-    redraw_pending_since: Option<Instant>,
+    redraw_gate: RedrawGate,
     /// True while the compositor is withholding frame callbacks.
     frame_callbacks_withheld: bool,
     /// Last recovery probe issued while presentation is suspended.
@@ -456,16 +547,48 @@ struct Shell {
     exit_requested: bool,
     occluded: bool,
     destroyed: bool,
+    /// Last physical drawable size logged; re-logged on every change so
+    /// fullscreen/scale transitions are recorded, not just the pre-fullscreen
+    /// first frame.
+    last_drawable: (u32, u32),
+    /// One-time monitor refresh report for cadence evidence.
+    monitor_reported: bool,
 }
 
 impl Shell {
+    /// Test-only sequential media loads for A/B transitions in one process.
+    fn poll_test_sequence(&mut self) {
+        if self.next_sequence >= self.test_sequence.len() {
+            return;
+        }
+        let (due, path) = &self.test_sequence[self.next_sequence];
+        if self.started.elapsed().as_secs_f64() >= *due {
+            let path = path.clone();
+            log::warn!("TEST-ONLY: sequential media load at {due:.1}s: {path}");
+            self.app.load_file(&path);
+            self.next_sequence += 1;
+        }
+    }
+
     /// Requests a redraw and counts it (WP4 `redraw_requests_*`).
     ///
     /// The count lives in `SharedMetrics` so the per-second CSV and the teardown
     /// summary read one atomic instead of two independent tallies (Part 6).
     fn request_redraw(&mut self) {
-        if self.redraw_pending_since.is_none() {
-            self.redraw_pending_since = Some(Instant::now());
+        let now = Instant::now();
+        let pending_before = self.redraw_gate.pending_since().is_some() as i64;
+        let accepted = self.redraw_gate.request(now, SUSPENSION_PROBE_INTERVAL);
+        crate::causal_trace::record(
+            crate::causal_trace::Kind::RedrawRequest,
+            crate::causal_trace::last_callback(),
+            accepted as i64,
+            pending_before,
+            self.redraw_gate.pending_since().is_some() as i64,
+            if accepted { "accepted" } else { "coalesced" },
+        );
+        if !accepted {
+            crate::trace::record(crate::trace::Ev::RedrawRequested, "coalesced", 0, 0);
+            return;
         }
         self.metrics.note_redraw_request();
         crate::trace::record(crate::trace::Ev::RedrawRequested, "request", 0, 0);
@@ -487,7 +610,7 @@ impl Shell {
     /// not composite it and therefore sends no frame callbacks. It is an
     /// intentional absence of presentation, not a fault and not a stall.
     fn note_frame_withholding(&mut self, now: Instant) {
-        let Some(since) = self.redraw_pending_since else {
+        let Some(since) = self.redraw_gate.pending_since() else {
             return;
         };
         if self.frame_callbacks_withheld {
@@ -650,6 +773,7 @@ impl Shell {
         proxy: &EventLoopProxy<RunnerEvent>,
         cfg: &RunnerConfig,
     ) -> Result<Self, String> {
+        crate::causal_trace::init_from_env();
         let window = Arc::new(
             event_loop
                 .create_window(
@@ -825,12 +949,12 @@ impl Shell {
             gl.clone(),
             egui_ctx.clone(),
             Some(loader_ref),
-            // No native display: direct VAAPI is disabled until the
-            // `vaGetDisplayWl` crash is explained (see phase-1.9 findings).
-            None,
+            Some(muvrix_player::NativeDisplay::Wayland(display_ptr)),
             output.clone(),
         )
         .map_err(|e| format!("MuvrixApp init failed: {e}"))?;
+
+        crate::causal_trace::install_drop_watcher(app.controller.handle().clone());
 
         if let Some(path) = &cfg.initial_file {
             app.load_file(path);
@@ -860,10 +984,24 @@ impl Shell {
         let wake = Arc::new(WakeSignal::new(proxy.clone()));
         let wake_for_callback = wake.clone();
         egui_ctx.set_request_repaint_callback(move |info| {
+            let delay_us = info.delay.as_micros() as i64;
+            crate::causal_trace::record(
+                crate::causal_trace::Kind::EguiRepaintRequest,
+                crate::causal_trace::last_callback(),
+                delay_us,
+                0,
+                0,
+                if info.delay.is_zero() {
+                    "egui_immediate"
+                } else {
+                    "egui_delay"
+                },
+            );
             if info.delay.is_zero() {
-                wake_for_callback.request_immediate();
+                wake_for_callback.request_immediate_from("egui_immediate");
             } else {
-                wake_for_callback.request_deadline(Instant::now() + info.delay);
+                wake_for_callback
+                    .request_deadline_from(Instant::now() + info.delay, "egui_deadline");
             }
         });
 
@@ -910,8 +1048,21 @@ impl Shell {
             egui_state,
             egui_ctx,
             app,
+            test_sequence: std::env::var("MUVRIX_TEST_SEQUENCE")
+                .ok()
+                .map(|raw| {
+                    raw.split('|')
+                        .filter_map(|item| {
+                            let (sec, path) = item.split_once(':')?;
+                            Some((sec.parse().ok()?, path.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            next_sequence: 0,
             ui_fbo,
             composite,
+            gpu: crate::gpu_timing::GpuTiming::new(),
             color: color_manager,
             description,
             color_mode,
@@ -933,21 +1084,59 @@ impl Shell {
             wake,
             frame_count: 0,
             run_limit,
-            redraw_pending_since: None,
+            redraw_gate: RedrawGate::default(),
             frame_callbacks_withheld: false,
             last_suspension_probe: None,
             exit_requested: false,
             occluded: false,
             destroyed: false,
+            last_drawable: (0, 0),
+            monitor_reported: false,
         })
     }
 
     fn draw(&mut self) {
         let now = Instant::now();
+        let draw_seq = crate::causal_trace::record(
+            crate::causal_trace::Kind::DrawEnter,
+            crate::causal_trace::last_callback(),
+            self.frame_count as i64,
+            0,
+            0,
+            "draw",
+        );
+        crate::causal_trace::set_last_draw(draw_seq);
         // Liveness beacon: if this stops advancing while mpv expects a swap, the
         // telemetry thread asks for a repaint so a parked loop cannot deadlock.
         self.metrics.note_paint();
-        self.redraw_pending_since = None;
+        self.redraw_gate.complete();
+        crate::causal_trace::record(
+            crate::causal_trace::Kind::RedrawGateComplete,
+            draw_seq,
+            0,
+            0,
+            0,
+            "draw",
+        );
+        let drawable = self.window.inner_size();
+        if (drawable.width, drawable.height) != self.last_drawable {
+            log::info!(
+                "drawable: {}x{} physical pixels",
+                drawable.width,
+                drawable.height
+            );
+            self.last_drawable = (drawable.width, drawable.height);
+        }
+        if !self.monitor_reported {
+            if let Some(monitor) = self.window.current_monitor() {
+                log::info!(
+                    "monitor: name={:?} refresh_millihertz={:?}",
+                    monitor.name(),
+                    monitor.refresh_rate_millihertz()
+                );
+                self.monitor_reported = true;
+            }
+        }
         if self.frame_callbacks_withheld {
             self.frame_callbacks_withheld = false;
             self.last_suspension_probe = None;
@@ -1076,6 +1265,9 @@ impl Shell {
             self.gl.viewport(0, 0, width as i32, height as i32);
             self.gl.clear_color(0.0, 0.0, 0.0, 1.0);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
+            let composite_started = Instant::now();
+            self.gpu.poll(&self.gl);
+            let gpu_query = self.gpu.begin(&self.gl);
             self.composite.run(
                 &self.gl,
                 video_tex,
@@ -1085,6 +1277,53 @@ impl Shell {
                 self.color_mode,
                 UI_WHITE_NITS,
             );
+            self.gpu.end(
+                &self.gl,
+                gpu_query,
+                crate::gpu_timing::GpuStage::Composite,
+                crate::causal_trace::last_draw(),
+                composite_started.elapsed().as_micros() as i64,
+            );
+            crate::causal_trace::record(
+                crate::causal_trace::Kind::Composite,
+                crate::causal_trace::last_draw(),
+                composite_started.elapsed().as_micros() as i64,
+                width as i64,
+                height as i64,
+                "video_ui",
+            );
+            // Test-only, isolated final-window capture. This is a synchronous
+            // readback and must never run in normal playback.
+            if let Ok(capture_path) = std::env::var("MUVRIX_CAPTURE_WINDOW_PNG") {
+                if self.frame_count == 61 {
+                    let mut pixels = vec![0u8; (width * height * 4) as usize];
+                    self.gl.read_pixels(
+                        0,
+                        0,
+                        width as i32,
+                        height as i32,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelPackData::Slice(Some(&mut pixels)),
+                    );
+                    let stride = (width * 4) as usize;
+                    let mut flipped = Vec::with_capacity(pixels.len());
+                    for row in pixels.chunks_exact(stride).rev() {
+                        flipped.extend_from_slice(row);
+                    }
+                    if let Err(e) = image::save_buffer(
+                        &capture_path,
+                        &flipped,
+                        width,
+                        height,
+                        image::ExtendedColorType::Rgba8,
+                    ) {
+                        log::error!("Failed to save final window capture: {e}");
+                    } else {
+                        log::info!("Captured final window frame to {capture_path}");
+                    }
+                }
+            }
         }
 
         // --- WP4 chain: count frames the engine actually rendered into the
@@ -1104,7 +1343,41 @@ impl Shell {
         // --- Present. Every event carries the instant it actually happened;
         //     sampling later is what makes the ages meaningful.
         self.window.pre_present_notify();
+        // Winit's pre_present_notify() is the wl_surface.frame request site on
+        // Wayland. Record the request attempt; Winit suppresses duplicates while
+        // a callback is outstanding.
+        crate::causal_trace::record(
+            crate::causal_trace::Kind::FrameCallbackRequest,
+            crate::causal_trace::last_draw(),
+            self.frame_count as i64,
+            crate::causal_trace::monotonic_ns(),
+            0,
+            "pre_present",
+        );
+        if self
+            .color
+            .as_ref()
+            .map(|cm| cm.presentation_version().is_some())
+            .unwrap_or(false)
+        {
+            if let Some(cm) = self.color.as_mut() {
+                if let Err(e) = cm.request_presentation_feedback(
+                    self.presenter.surface_ptr(),
+                    crate::causal_trace::last_draw(),
+                ) {
+                    log::warn!("presentation feedback request failed: {e}");
+                }
+            }
+        }
         crate::trace::record(crate::trace::Ev::SwapEnter, "egl", 0, 0);
+        crate::causal_trace::record(
+            crate::causal_trace::Kind::SwapEnter,
+            crate::causal_trace::last_draw(),
+            0,
+            0,
+            0,
+            "egl",
+        );
         let attempt_at = Instant::now();
         self.counters.egl_swap_attempts_total =
             self.counters.egl_swap_attempts_total.saturating_add(1);
@@ -1118,6 +1391,16 @@ impl Shell {
             if ok { "ok" } else { "fail" },
             attempt_at.elapsed().as_micros() as i64,
             0,
+        );
+        crate::causal_trace::record5(
+            crate::causal_trace::Kind::SwapExit,
+            crate::causal_trace::last_draw(),
+            ok as i64,
+            attempt_at.elapsed().as_micros() as i64,
+            0,
+            0,
+            crate::causal_trace::monotonic_ns(),
+            if ok { "ok" } else { "fail" },
         );
         if ok {
             // The swap is the strongest evidence available without a
@@ -1176,7 +1459,8 @@ impl Shell {
             .min()
             .unwrap_or(Duration::from_millis(16));
         if repaint_after < Duration::from_millis(1000) {
-            self.wake.request_deadline(Instant::now() + repaint_after);
+            self.wake
+                .request_deadline_from(Instant::now() + repaint_after, "draw_end");
         }
         for vp in viewport_output.values() {
             if !vp.commands.is_empty() {
@@ -1195,7 +1479,7 @@ impl Shell {
         // it is not a substitute for measuring audio and video arrival times,
         // but it is the only sync evidence this runner can collect without
         // audio loopback instrumentation.
-        if self.frame_count % 60 == 0 {
+        if self.frame_count.is_multiple_of(60) {
             let stats = self.app.playback_stats();
             log::info!(
                 "sync: avsync={:?}s display_fps={:?} vf_fps={:?} dropped={:?} decoder_dropped={:?}",
@@ -1260,6 +1544,14 @@ impl Shell {
             self.metrics.redraw_requests() as i64,
         );
         crate::trace::dump("runner_teardown");
+        crate::causal_trace::record(
+            crate::causal_trace::Kind::Teardown,
+            crate::causal_trace::last_draw(),
+            self.frame_count as i64,
+            self.metrics.wake_events() as i64,
+            0,
+            "runner",
+        );
 
         // Stop measuring before GL teardown: the worker must not sample a
         // half-destroyed runtime, and it must join cleanly with the process.
@@ -1276,6 +1568,10 @@ impl Shell {
         if let Some(mut sampler) = self.mpv_state.take() {
             sampler.shutdown();
         }
+
+        // Stop the causal drop watcher and flush the trace before mpv/EGL
+        // teardown. This is diagnostic-only; scheduling state is untouched.
+        crate::causal_trace::shutdown();
 
         if let Err(e) = self.presenter.make_current() {
             log::warn!("make_current before teardown failed: {e}");
@@ -1349,16 +1645,18 @@ fn display_capabilities(
     output: &OutputCaps,
     cm: Option<&ColorManager>,
 ) -> muvrix_player::DisplayCapabilities {
-    let mut caps = muvrix_player::DisplayCapabilities::default();
-    caps.display_id = std::env::var("WAYLAND_DISPLAY").ok();
-    caps.hdr_capable = Some(output.surface_ten_bit && output.precision_verified);
-    caps.hdr_enabled = Some(output.native_hdr_available);
-    caps.reference_white_nits = Some(UI_WHITE_NITS as f64);
-    caps.max_luminance_nits = output.target_peak_nits.map(|p| p as f64);
-    caps.primaries = if output.native_hdr_available {
-        Some("bt2020".to_string())
-    } else {
-        Some("srgb".to_string())
+    let mut caps = muvrix_player::DisplayCapabilities {
+        display_id: std::env::var("WAYLAND_DISPLAY").ok(),
+        hdr_capable: Some(output.surface_ten_bit && output.precision_verified),
+        hdr_enabled: Some(output.native_hdr_available),
+        reference_white_nits: Some(UI_WHITE_NITS as f64),
+        max_luminance_nits: output.target_peak_nits.map(|p| p as f64),
+        primaries: if output.native_hdr_available {
+            Some("bt2020".to_string())
+        } else {
+            Some("srgb".to_string())
+        },
+        ..Default::default()
     };
     if let Some(cm) = cm {
         caps.transfer_functions = cm
@@ -1429,6 +1727,14 @@ impl ApplicationHandler<RunnerEvent> for Runner {
                 // it is in the future, so a redraw here is safe and does not spin.
                 log::trace!("Runner: Wake event received");
                 crate::trace::record(crate::trace::Ev::WakeDelivered, "user_event", 0, 0);
+                crate::causal_trace::record(
+                    crate::causal_trace::Kind::UserEvent,
+                    crate::causal_trace::last_callback(),
+                    0,
+                    0,
+                    0,
+                    "wake",
+                );
                 if let Some(shell) = self.shell.as_mut() {
                     shell.note_wake();
                     shell.request_redraw();
@@ -1501,12 +1807,28 @@ impl ApplicationHandler<RunnerEvent> for Runner {
             }
             WindowEvent::RedrawRequested => {
                 crate::trace::record(crate::trace::Ev::DrawEnter, "redraw", 0, 0);
+                crate::causal_trace::record(
+                    crate::causal_trace::Kind::RedrawRequested,
+                    crate::causal_trace::last_callback(),
+                    crate::causal_trace::monotonic_ns(),
+                    0,
+                    0,
+                    "winit",
+                );
                 shell.draw();
                 crate::trace::record(
                     crate::trace::Ev::DrawExit,
                     "redraw",
                     shell.frame_count as i64,
                     0,
+                );
+                crate::causal_trace::record(
+                    crate::causal_trace::Kind::DrawExit,
+                    crate::causal_trace::last_draw(),
+                    shell.frame_count as i64,
+                    0,
+                    0,
+                    "redraw",
                 );
             }
             WindowEvent::ScaleFactorChanged { .. } => {
@@ -1520,7 +1842,18 @@ impl ApplicationHandler<RunnerEvent> for Runner {
         // No busy loop. A frame is requested when egui asks for one (the engine
         // raises that from mpv's update callback) or when a deadline the engine
         // computed for its next frame passes.
+        if let Some(shell) = self.shell.as_mut() {
+            shell.poll_test_sequence();
+        }
         crate::trace::record(crate::trace::Ev::AboutToWait, "enter", 0, 0);
+        crate::causal_trace::record(
+            crate::causal_trace::Kind::AboutToWaitEnter,
+            crate::causal_trace::last_callback(),
+            0,
+            0,
+            0,
+            "loop",
+        );
 
         // The run deadline is enforced by the telemetry thread as well as by the
         // painter, so a run with no paints still terminates here (Part 7).
@@ -1579,9 +1912,37 @@ impl ApplicationHandler<RunnerEvent> for Runner {
         arm_suspension_probe(&shell.wake, shell.frame_callbacks_withheld, now);
 
         match shell.wake.peek_deadline() {
-            Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
-            None => event_loop.set_control_flow(ControlFlow::Wait),
+            Some(at) => {
+                crate::causal_trace::record(
+                    crate::causal_trace::Kind::ControlFlow,
+                    crate::causal_trace::last_callback(),
+                    at.saturating_duration_since(now).as_micros() as i64,
+                    0,
+                    0,
+                    "wait_until",
+                );
+                event_loop.set_control_flow(ControlFlow::WaitUntil(at))
+            }
+            None => {
+                crate::causal_trace::record(
+                    crate::causal_trace::Kind::ControlFlow,
+                    crate::causal_trace::last_callback(),
+                    0,
+                    0,
+                    0,
+                    "wait",
+                );
+                event_loop.set_control_flow(ControlFlow::Wait)
+            }
         }
+        crate::causal_trace::record(
+            crate::causal_trace::Kind::AboutToWaitExit,
+            crate::causal_trace::last_callback(),
+            0,
+            0,
+            0,
+            "loop",
+        );
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -1805,6 +2166,38 @@ mod tests {
             signal.peek_deadline(),
             Some(t0 + SUSPENSION_PROBE_INTERVAL),
             "the original future deadline must be retained"
+        );
+    }
+
+    #[test]
+    fn redraw_gate_allows_one_outstanding_request_and_a_bounded_retry() {
+        let mut gate = RedrawGate::default();
+        let t0 = Instant::now();
+        let retry = SUSPENSION_PROBE_INTERVAL;
+
+        assert!(gate.request(t0, retry));
+        assert_eq!(gate.pending_since(), Some(t0));
+        assert!(
+            !gate.request(t0 + Duration::from_millis(100), retry),
+            "a second request while one is outstanding must be coalesced"
+        );
+        assert_eq!(gate.pending_since(), Some(t0));
+
+        assert!(
+            gate.request(t0 + retry, retry),
+            "the probe interval must permit a retry"
+        );
+        assert_eq!(
+            gate.pending_since(),
+            Some(t0),
+            "a retry must not lose the original withholding age"
+        );
+
+        gate.complete();
+        assert_eq!(gate.pending_since(), None);
+        assert!(
+            gate.request(t0 + retry + Duration::from_millis(1), retry),
+            "after a paint the next request is immediate"
         );
     }
 
