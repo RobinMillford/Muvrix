@@ -26,6 +26,7 @@ use muvrix_player::{
     SubtitleStyling, ThemeMode, TrackInfo, TrackType,
 };
 
+use crate::branding::{self, BrandPalette};
 use crate::config_editor::{self, ConfigEditorFile};
 use crate::gl_loader;
 use crate::icons::{self, Icon};
@@ -213,6 +214,7 @@ pub struct MuvrixApp {
     pub(crate) add_root_dialog_open: bool,
     pub(crate) add_root_path_input: String,
     pub(crate) thumbnail_textures: std::collections::HashMap<String, egui::TextureHandle>,
+    pub(crate) logo_texture: Option<egui::TextureHandle>,
     pub(crate) active_scan_cancel: Option<Arc<AtomicBool>>,
     pub(crate) active_scan_rx: Option<mpsc::Receiver<ScanProgress>>,
     pub(crate) scan_progress: Option<ScanProgress>,
@@ -636,6 +638,7 @@ impl MuvrixApp {
             add_root_dialog_open: false,
             add_root_path_input: String::new(),
             thumbnail_textures: std::collections::HashMap::new(),
+            logo_texture: None,
             active_scan_cancel: None,
             active_scan_rx: None,
             scan_progress: None,
@@ -999,6 +1002,22 @@ impl MuvrixApp {
         self.decode_settled = false;
         self.decode_observation = None;
         self.hdr_state = None;
+    }
+
+    /// Returns the retained logo texture handle, decoding it once on first access.
+    pub fn ensure_logo_texture(&mut self, ctx: &egui::Context) -> &egui::TextureHandle {
+        if self.logo_texture.is_none() {
+            let (rgba, width, height) = crate::branding::logo_rgba();
+            let color_image =
+                egui::ColorImage::from_rgba_unmultiplied([*width as usize, *height as usize], rgba);
+            let tex = ctx.load_texture(
+                "muvrix_brand_logo",
+                color_image,
+                egui::TextureOptions::LINEAR,
+            );
+            self.logo_texture = Some(tex);
+        }
+        self.logo_texture.as_ref().unwrap()
     }
 
     /// Opens the native file picker to select a media file.
@@ -2314,7 +2333,34 @@ impl MuvrixApp {
 
         // Apply the persisted appearance mode and accent color.
         let mut visuals = match self.theme_mode {
-            ThemeMode::Dark => egui::Visuals::dark(),
+            ThemeMode::Obsidian => {
+                let mut visuals = egui::Visuals::dark();
+                visuals.panel_fill = BrandPalette::OBSIDIAN;
+                visuals.window_fill = BrandPalette::OBSIDIAN;
+                visuals.extreme_bg_color = Color32::from_rgb(12, 19, 25);
+                visuals.faint_bg_color = BrandPalette::ELEVATED_SURFACE;
+                visuals.code_bg_color = Color32::from_rgb(14, 21, 28);
+                visuals.window_stroke = Stroke::new(1.0_f32, BrandPalette::SLATE_BORDER);
+                visuals.widgets.noninteractive.bg_fill = BrandPalette::ELEVATED_SURFACE;
+                visuals.widgets.noninteractive.bg_stroke =
+                    Stroke::new(1.0_f32, BrandPalette::SLATE_DIVIDER);
+                visuals.widgets.noninteractive.fg_stroke =
+                    Stroke::new(1.0_f32, BrandPalette::MUTED_TEXT);
+                visuals.widgets.inactive.bg_fill = BrandPalette::ELEVATED_SURFACE;
+                visuals.widgets.inactive.bg_stroke =
+                    Stroke::new(1.0_f32, BrandPalette::SLATE_BORDER);
+                visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, BrandPalette::IVORY_TEXT);
+                visuals.widgets.hovered.bg_fill = BrandPalette::CARD_SURFACE;
+                visuals.widgets.hovered.bg_stroke =
+                    Stroke::new(1.0_f32, BrandPalette::ELECTRIC_LIME);
+                visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, BrandPalette::IVORY_TEXT);
+                visuals
+            }
+            ThemeMode::Dark => {
+                let mut visuals = egui::Visuals::dark();
+                visuals.panel_fill = Color32::from_rgb(18, 20, 26);
+                visuals
+            }
             ThemeMode::Light => egui::Visuals::light(),
             ThemeMode::Amoled => {
                 let mut visuals = egui::Visuals::dark();
@@ -2327,10 +2373,8 @@ impl MuvrixApp {
                 visuals
             }
         };
-        if self.theme_mode == ThemeMode::Dark {
-            visuals.panel_fill = Color32::from_rgb(18, 20, 26);
-        }
         let accent = match self.accent_color {
+            AccentColor::Lime => BrandPalette::ELECTRIC_LIME,
             AccentColor::Blue => Color32::from_rgb(60, 150, 245),
             AccentColor::Purple => Color32::from_rgb(168, 85, 247),
             AccentColor::Teal => Color32::from_rgb(20, 184, 166),
@@ -2342,6 +2386,9 @@ impl MuvrixApp {
         visuals.selection.stroke = Stroke::new(1.0_f32, accent);
         visuals.hyperlink_color = accent;
         visuals.widgets.active.bg_fill = accent;
+        if self.accent_color == AccentColor::Lime {
+            visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, BrandPalette::OBSIDIAN);
+        }
         ctx.set_visuals(visuals);
 
         if let Some(path) = self.crash_notice.clone() {
@@ -2388,12 +2435,19 @@ impl MuvrixApp {
                 let available_w = ui.available_width();
 
                 ui.horizontal(|ui| {
-                    // Application branding / identity
+                    // Application branding / identity with official circular emblem
+                    let logo_tex = self.ensure_logo_texture(ui.ctx());
+                    branding::render_logo(ui, logo_tex, 24.0);
+                    ui.add_space(2.0);
                     ui.label(
                         RichText::new("MUVRIX")
                             .strong()
                             .size(13.5)
-                            .color(Color32::from_rgb(80, 180, 255)),
+                            .color(if self.accent_color == AccentColor::Lime {
+                                BrandPalette::ELECTRIC_LIME
+                            } else {
+                                Color32::from_rgb(80, 180, 255)
+                            }),
                     );
 
                     ui.add_space(4.0);
@@ -2887,10 +2941,15 @@ impl MuvrixApp {
                             .unwrap_or_else(|| format!("Seek to {}", format_timestamp(slider_val)));
                         let response = response.on_hover_text(tooltip);
 
-                        // Draw visual chapter marks on slider track
+                        // Draw visual chapter marks on slider track echoing logo notches
                         let chapters = self.controller.chapters();
                         if duration > 0.0 && !chapters.is_empty() {
                             let painter = ui.painter();
+                            let notch_col = if self.accent_color == AccentColor::Lime {
+                                BrandPalette::ELECTRIC_LIME
+                            } else {
+                                Color32::from_rgb(56, 189, 248)
+                            };
                             for ch in chapters {
                                 let frac = (ch.time / duration).clamp(0.0, 1.0) as f32;
                                 let x = response.rect.min.x + frac * response.rect.width();
@@ -2899,12 +2958,12 @@ impl MuvrixApp {
                                         Pos2::new(x, response.rect.min.y + 1.0),
                                         Pos2::new(x, response.rect.max.y - 1.0),
                                     ],
-                                    Stroke::new(2.0_f32, Color32::from_rgb(56, 189, 248)),
+                                    Stroke::new(2.0_f32, notch_col),
                                 );
                                 painter.circle_filled(
                                     Pos2::new(x, response.rect.min.y - 1.0),
                                     2.5,
-                                    Color32::from_rgb(56, 189, 248),
+                                    notch_col,
                                 );
                             }
                         }
@@ -2935,6 +2994,34 @@ impl MuvrixApp {
                                     Stroke::new(1.0_f32, Color32::from_rgb(180, 83, 9)),
                                 ));
                             }
+                        }
+
+                        // Signature electric lime scrubber pin echoing logo right-leg cue
+                        if duration > 0.0 {
+                            let painter = ui.painter();
+                            let frac = (slider_val / max_dur).clamp(0.0, 1.0) as f32;
+                            let pin_x = response.rect.min.x + frac * response.rect.width();
+                            let pin_y = response.rect.center().y;
+                            let pin_col = match self.accent_color {
+                                AccentColor::Lime => BrandPalette::ELECTRIC_LIME,
+                                AccentColor::Blue => Color32::from_rgb(60, 150, 245),
+                                AccentColor::Purple => Color32::from_rgb(168, 85, 247),
+                                AccentColor::Teal => Color32::from_rgb(20, 184, 166),
+                                AccentColor::Green => Color32::from_rgb(74, 222, 128),
+                                AccentColor::Orange => Color32::from_rgb(249, 115, 22),
+                                AccentColor::Red => Color32::from_rgb(239, 68, 68),
+                            };
+                            let radius = if response.hovered() || self.is_seeking {
+                                6.5
+                            } else {
+                                4.5
+                            };
+                            painter.circle_filled(Pos2::new(pin_x, pin_y), radius, pin_col);
+                            painter.circle_stroke(
+                                Pos2::new(pin_x, pin_y),
+                                radius,
+                                Stroke::new(1.5_f32, BrandPalette::OBSIDIAN),
+                            );
                         }
 
                         if response.drag_started() {
@@ -3608,19 +3695,27 @@ impl MuvrixApp {
                     match self.controller.state() {
                         PlaybackState::Idle => {
                             let center_pos = rect.center();
-                            let card_width = 410.0_f32.min(rect.width() - 32.0);
-                            let card_height = 205.0_f32.min(rect.height() - 32.0);
+                            let card_width = 440.0_f32.min(rect.width() - 32.0);
+                            let card_height = 320.0_f32.min(rect.height() - 32.0);
                             let card_rect = egui::Rect::from_center_size(
                                 center_pos,
                                 Vec2::new(card_width, card_height),
                             );
 
                             // High contrast welcome card container
+                            let (card_bg, card_border) = if self.theme_mode == ThemeMode::Obsidian {
+                                (BrandPalette::OBSIDIAN, BrandPalette::SLATE_BORDER)
+                            } else {
+                                (
+                                    Color32::from_rgba_premultiplied(22, 25, 34, 235),
+                                    Color32::from_rgb(55, 68, 92),
+                                )
+                            };
                             ui.painter().rect(
                                 card_rect,
-                                8.0_f32,
-                                Color32::from_rgba_premultiplied(22, 25, 34, 235),
-                                Stroke::new(1.0_f32, Color32::from_rgb(55, 68, 92)),
+                                10.0_f32,
+                                card_bg,
+                                Stroke::new(1.5_f32, card_border),
                                 egui::StrokeKind::Inside,
                             );
 
@@ -3629,12 +3724,15 @@ impl MuvrixApp {
                                     .max_rect(card_rect.shrink(18.0))
                                     .layout(egui::Layout::top_down(egui::Align::Center)),
                             );
-                            child_ui.add_space(6.0);
+                            child_ui.add_space(4.0);
+                            let logo_tex = self.ensure_logo_texture(child_ui.ctx());
+                            branding::render_logo(&mut child_ui, logo_tex, 96.0);
+                            child_ui.add_space(8.0);
                             child_ui.label(
                                 RichText::new("MUVRIX MEDIA PLAYER")
                                     .strong()
                                     .size(19.0)
-                                    .color(Color32::from_rgb(96, 175, 255)),
+                                    .color(BrandPalette::IVORY_TEXT),
                             );
                             child_ui.add_space(3.0);
                             child_ui.label(
@@ -3642,7 +3740,7 @@ impl MuvrixApp {
                                     "Lightweight hardware-accelerated desktop media player",
                                 )
                                 .size(12.5)
-                                .color(Color32::from_gray(190)),
+                                .color(BrandPalette::MUTED_TEXT),
                             );
                             child_ui.add_space(14.0);
 

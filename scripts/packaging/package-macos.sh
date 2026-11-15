@@ -52,6 +52,7 @@ fi
 
 # 5. Copy shaders and assets
 cp -r "$REPO_ROOT/assets/shaders" "$APP_BUNDLE/Contents/Resources/assets/"
+cp "$REPO_ROOT/assets/branding/muvrix.icns" "$APP_BUNDLE/Contents/Resources/Muvrix.icns"
 
 # 6. Create Info.plist
 cat << 'EOF' > "$APP_BUNDLE/Contents/Info.plist"
@@ -63,6 +64,8 @@ cat << 'EOF' > "$APP_BUNDLE/Contents/Info.plist"
     <string>en</string>
     <key>CFBundleExecutable</key>
     <string>muvrix</string>
+    <key>CFBundleIconFile</key>
+    <string>Muvrix</string>
     <key>CFBundleIdentifier</key>
     <string>io.muvrix.desktop</string>
     <key>CFBundleInfoDictionaryVersion</key>

@@ -20,6 +20,7 @@ fn default_volume() -> f64 {
 #[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
     #[default]
+    Obsidian,
     Dark,
     Light,
     Amoled,
@@ -30,6 +31,7 @@ pub enum ThemeMode {
 #[serde(rename_all = "snake_case")]
 pub enum AccentColor {
     #[default]
+    Lime,
     Blue,
     Purple,
     Teal,
@@ -68,8 +70,8 @@ impl Default for PersistedMediaSettings {
             selected_audio_device: "auto".to_string(),
             volume: 100.0,
             subtitle_styling: SubtitleStyling::default(),
-            theme_mode: ThemeMode::Dark,
-            accent_color: AccentColor::Blue,
+            theme_mode: ThemeMode::Obsidian,
+            accent_color: AccentColor::Lime,
         }
     }
 }

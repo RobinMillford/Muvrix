@@ -1,6 +1,7 @@
 //! `muvrix-ui`: Desktop UI and OpenGL rendering pipeline for Muvrix.
 
 pub mod app;
+pub mod branding;
 pub mod causal_trace;
 pub mod clock;
 pub mod config_editor;

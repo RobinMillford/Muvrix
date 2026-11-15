@@ -60,8 +60,9 @@ Get-ChildItem -Path $MpvDir -Filter "*.dll" | ForEach-Object {
     }
 }
 
-# 5. Copy shader assets
+# 5. Copy shader assets and brand icon
 Copy-Item -Recurse "$RepoRoot\assets\shaders" -Destination "$OutputDir\assets\shaders"
+Copy-Item "$RepoRoot\assets\branding\muvrix.ico" -Destination "$OutputDir\muvrix.ico"
 
 # 6. Copy licenses and notices
 Copy-Item "$RepoRoot\LICENSE" -Destination $OutputDir

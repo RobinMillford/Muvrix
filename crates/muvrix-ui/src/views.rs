@@ -598,8 +598,9 @@ impl MuvrixApp {
             // Main Catalog Area
             if self.library_items.is_empty() {
                 ui.vertical_centered(|ui| {
-                    ui.add_space(60.0);
-                    icons::icon_label(ui, Icon::Library, 48.0, Color32::from_gray(80));
+                    ui.add_space(48.0);
+                    let logo_tex = self.ensure_logo_texture(ui.ctx());
+                    crate::branding::render_logo(ui, logo_tex, 64.0);
                     ui.add_space(12.0);
                     ui.label(
                         RichText::new("No media items in library")
@@ -2296,10 +2297,11 @@ impl MuvrixApp {
             ui.add_space(4.0);
 
             if playlist_count == 0 {
-                ui.add_space(50.0);
+                ui.add_space(40.0);
                 ui.vertical_centered(|ui| {
-                    icons::icon_label(ui, Icon::Playlist, 36.0, Color32::from_gray(120));
-                    ui.add_space(10.0);
+                    let logo_tex = self.ensure_logo_texture(ui.ctx());
+                    crate::branding::render_logo(ui, logo_tex, 64.0);
+                    ui.add_space(12.0);
                     ui.label(
                         RichText::new("Your playback queue is empty.")
                             .size(15.0)
@@ -2846,7 +2848,9 @@ impl MuvrixApp {
             ui.add_space(4.0);
 
             ui.horizontal(|ui| {
-                icons::icon_label(ui, Icon::Settings, 18.0, Color32::from_rgb(85, 175, 255));
+                let logo_tex = self.ensure_logo_texture(ui.ctx());
+                crate::branding::render_logo(ui, logo_tex, 24.0);
+                ui.add_space(4.0);
                 ui.label(
                     RichText::new("Player Preferences & Subtitle Engine Configuration")
                         .strong()
@@ -4484,13 +4488,20 @@ impl MuvrixApp {
                             ui.label("Theme:");
                             egui::ComboBox::from_id_salt("theme_mode_combo")
                                 .selected_text(match self.theme_mode {
+                                    ThemeMode::Obsidian => "Obsidian (Signature Brand)",
                                     ThemeMode::Dark => "Dark",
                                     ThemeMode::Light => "Light",
                                     ThemeMode::Amoled => "AMOLED (pure black)",
                                 })
                                 .show_ui(ui, |ui| {
-                                    for mode in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Amoled] {
+                                    for mode in [
+                                        ThemeMode::Obsidian,
+                                        ThemeMode::Dark,
+                                        ThemeMode::Light,
+                                        ThemeMode::Amoled,
+                                    ] {
                                         let label = match mode {
+                                            ThemeMode::Obsidian => "Obsidian (Signature Brand)",
                                             ThemeMode::Dark => "Dark",
                                             ThemeMode::Light => "Light",
                                             ThemeMode::Amoled => "AMOLED (pure black)",
@@ -4506,9 +4517,21 @@ impl MuvrixApp {
                         ui.horizontal(|ui| {
                             ui.label("Accent:");
                             egui::ComboBox::from_id_salt("accent_color_combo")
-                                .selected_text(format!("{:?}", self.accent_color))
+                                .selected_text(match self.accent_color {
+                                    AccentColor::Lime => "Lime (Electric Brand)",
+                                    other => match other {
+                                        AccentColor::Blue => "Blue",
+                                        AccentColor::Purple => "Purple",
+                                        AccentColor::Teal => "Teal",
+                                        AccentColor::Green => "Green",
+                                        AccentColor::Orange => "Orange",
+                                        AccentColor::Red => "Red",
+                                        _ => "Custom",
+                                    },
+                                })
                                 .show_ui(ui, |ui| {
                                     for color in [
+                                        AccentColor::Lime,
                                         AccentColor::Blue,
                                         AccentColor::Purple,
                                         AccentColor::Teal,
@@ -4516,11 +4539,17 @@ impl MuvrixApp {
                                         AccentColor::Orange,
                                         AccentColor::Red,
                                     ] {
+                                        let label = match color {
+                                            AccentColor::Lime => "Lime (Electric Brand)",
+                                            AccentColor::Blue => "Blue",
+                                            AccentColor::Purple => "Purple",
+                                            AccentColor::Teal => "Teal",
+                                            AccentColor::Green => "Green",
+                                            AccentColor::Orange => "Orange",
+                                            AccentColor::Red => "Red",
+                                        };
                                         if ui
-                                            .selectable_label(
-                                                self.accent_color == color,
-                                                format!("{color:?}"),
-                                            )
+                                            .selectable_label(self.accent_color == color, label)
                                             .clicked()
                                         {
                                             self.accent_color = color;
@@ -4702,6 +4731,51 @@ impl MuvrixApp {
                             let _ = self.history_store.save();
                             self.status_message = "History cleared".to_string();
                         }
+                    });
+
+                    ui.add_space(10.0);
+
+                    // Section 8: About & System Information Card
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            let logo_tex = self.ensure_logo_texture(ui.ctx());
+                            crate::branding::render_logo(ui, logo_tex, 72.0);
+                            ui.add_space(12.0);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new("Muvrix Desktop Media Player")
+                                        .strong()
+                                        .size(16.0)
+                                        .color(crate::branding::BrandPalette::IVORY_TEXT),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Version: {} (Linux Wayland Beta)",
+                                        env!("CARGO_PKG_VERSION")
+                                    ))
+                                    .size(12.0)
+                                    .color(crate::branding::BrandPalette::MUTED_TEXT),
+                                );
+                                ui.label(
+                                    RichText::new(
+                                        "Engine: libmpv 0.42.0 (Client API 2.6) · libplacebo 7.387.0",
+                                    )
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(crate::branding::BrandPalette::ELECTRIC_LIME),
+                                );
+                                ui.label(
+                                    RichText::new("Dual-licensed under MIT and Apache-2.0")
+                                        .size(11.0)
+                                        .color(Color32::from_gray(160)),
+                                );
+                                ui.label(
+                                    RichText::new("© 2026 Muvrix Project Contributors · All rights reserved")
+                                        .size(10.5)
+                                        .color(Color32::from_gray(130)),
+                                );
+                            });
+                        });
                     });
                 }
             }

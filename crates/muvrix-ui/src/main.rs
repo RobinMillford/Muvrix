@@ -87,11 +87,16 @@ fn main() -> eframe::Result<()> {
         .and_then(|h| h.parse::<f32>().ok())
         .unwrap_or(720.0);
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Muvrix Media Player (Glow Prototype)")
+        .with_inner_size([width, height])
+        .with_min_inner_size([640.0, 360.0]);
+    if let Some(icon) = muvrix_ui::branding::egui_icon_data() {
+        viewport = viewport.with_icon(icon);
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Muvrix Media Player (Glow Prototype)")
-            .with_inner_size([width, height])
-            .with_min_inner_size([640.0, 360.0]),
+        viewport,
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };

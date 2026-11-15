@@ -27,4 +27,26 @@ fn desktop_entry_and_launcher_rpath_guidance_are_valid() {
     assert!(launcher.contains("lib64"));
     assert!(launcher.contains("muvrix-bin"));
     assert!(launcher.contains("MUVRIX_ASSETS_DIR"));
+
+    // Branding and packaging icon verification
+    assert!(desktop.contains("Icon=io.muvrix.Muvrix"));
+    let svg = root.join("assets/branding/muvrix-logo.svg");
+    let png = root.join("assets/branding/muvrix-logo.png");
+    let ico = root.join("assets/branding/muvrix.ico");
+    let icns = root.join("assets/branding/muvrix.icns");
+    assert!(svg.is_file() && fs::metadata(&svg).unwrap().len() > 0);
+    assert!(png.is_file() && fs::metadata(&png).unwrap().len() > 0);
+    assert!(ico.is_file() && fs::metadata(&ico).unwrap().len() > 0);
+    assert!(icns.is_file() && fs::metadata(&icns).unwrap().len() > 0);
+
+    for size in [16, 24, 32, 48, 64, 128, 256, 512] {
+        let icon_path = root.join(format!(
+            "assets/branding/icons/muvrix-{}x{}.png",
+            size, size
+        ));
+        assert!(
+            icon_path.is_file() && fs::metadata(&icon_path).unwrap().len() > 0,
+            "missing or empty icon: {icon_path:?}"
+        );
+    }
 }

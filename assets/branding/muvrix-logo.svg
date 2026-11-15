@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Media player circular mark</title>
+  <desc>Minimal circular media-player identity: a custom M-shaped frame mark with subtle film perforations and a lime playback cue.</desc>
+  <circle cx="512" cy="512" r="456" fill="#111A22"/>
+  <circle cx="512" cy="512" r="438" fill="none" stroke="#34434D" stroke-width="12"/>
+  <!-- Custom M / frame path -->
+  <path d="M300 690 V352 Q300 326 326 326 H338 Q356 326 370 342 L512 510 L654 342 Q668 326 686 326 H698 Q724 326 724 352 V690"
+        fill="none" stroke="#F1F0E8" stroke-width="76" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Film-frame perforations cut into the left stem -->
+  <g fill="#111A22">
+    <rect x="267" y="398" width="66" height="28" rx="14"/>
+    <rect x="267" y="493" width="66" height="28" rx="14"/>
+    <rect x="267" y="588" width="66" height="28" rx="14"/>
+  </g>
+  <!-- Playback position cue -->
+  <path d="M724 646 H786" stroke="#C8EE75" stroke-width="18" stroke-linecap="round"/>
+  <circle cx="786" cy="646" r="19" fill="#C8EE75"/>
+</svg>

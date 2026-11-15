@@ -923,14 +923,16 @@ impl Shell {
         cfg: &RunnerConfig,
     ) -> Result<Self, String> {
         crate::causal_trace::init_from_env();
+        let mut attributes = Window::default_attributes()
+            .with_title(cfg.title.clone())
+            .with_inner_size(winit::dpi::PhysicalSize::new(cfg.width, cfg.height))
+            .with_min_inner_size(winit::dpi::PhysicalSize::new(640, 360));
+        if let Some(icon) = crate::branding::winit_window_icon() {
+            attributes = attributes.with_window_icon(Some(icon));
+        }
         let window = Arc::new(
             event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title(cfg.title.clone())
-                        .with_inner_size(winit::dpi::PhysicalSize::new(cfg.width, cfg.height))
-                        .with_min_inner_size(winit::dpi::PhysicalSize::new(640, 360)),
-                )
+                .create_window(attributes)
                 .map_err(|e| format!("create_window failed: {e}"))?,
         );
 

@@ -96,6 +96,14 @@ chmod +x "$DIST_DIR/bin/muvrix"
 # 5. Copy assets (Anime4K shaders, profiles, manifests)
 cp -r "$REPO_ROOT/assets/shaders" "$DIST_DIR/share/muvrix/assets/"
 
+# 5b. Copy branding icons
+mkdir -p "$DIST_DIR/share/icons/hicolor/scalable/apps"
+cp "$REPO_ROOT/assets/branding/muvrix-logo.svg" "$DIST_DIR/share/icons/hicolor/scalable/apps/io.muvrix.Muvrix.svg"
+for size in 16 24 32 48 64 128 256 512; do
+    mkdir -p "$DIST_DIR/share/icons/hicolor/${size}x${size}/apps"
+    cp "$REPO_ROOT/assets/branding/icons/muvrix-${size}x${size}.png" "$DIST_DIR/share/icons/hicolor/${size}x${size}/apps/io.muvrix.Muvrix.png"
+done
+
 # 6. Copy documentation and licenses
 cp "$REPO_ROOT/LICENSE" "$DIST_DIR/"
 cp "$REPO_ROOT/THIRD-PARTY-NOTICES.md" "$DIST_DIR/"

@@ -46,8 +46,8 @@ fn theme_and_subtitle_styling_roundtrip_with_backward_compatible_defaults() {
     )
     .expect("write legacy");
     let legacy_loaded = PersistedMediaSettings::load(Some(&legacy));
-    assert_eq!(legacy_loaded.theme_mode, ThemeMode::Dark);
-    assert_eq!(legacy_loaded.accent_color, AccentColor::Blue);
+    assert_eq!(legacy_loaded.theme_mode, ThemeMode::Obsidian);
+    assert_eq!(legacy_loaded.accent_color, AccentColor::Lime);
     assert_eq!(legacy_loaded.subtitle_styling, SubtitleStyling::default());
 
     let _ = std::fs::remove_file(path);
