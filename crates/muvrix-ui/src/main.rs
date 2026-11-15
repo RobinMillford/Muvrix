@@ -108,6 +108,12 @@ fn main() -> eframe::Result<()> {
             let mut app = MuvrixApp::new(cc).expect("Failed to initialize MuvrixApp");
             if let Some(path) = initial_file {
                 app.load_file(&path);
+                if std::env::var("MUVRIX_INITIAL_PAUSED")
+                    .map(|v| v == "1")
+                    .unwrap_or(false)
+                {
+                    app.toggle_pause();
+                }
             }
             Ok(Box::new(app))
         }),

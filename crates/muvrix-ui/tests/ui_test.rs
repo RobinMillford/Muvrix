@@ -116,6 +116,7 @@ fn test_format_timestamp_relative() {
 
 #[test]
 fn test_app_view_labels_and_icons() {
+    assert_eq!(AppView::Home.label(), "Home");
     assert_eq!(AppView::Player.label(), "Player");
     assert_eq!(AppView::Browser.label(), "Browser");
     assert_eq!(AppView::Playlist.label(), "Playlist");

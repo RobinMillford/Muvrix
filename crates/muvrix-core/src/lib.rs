@@ -1,5 +1,6 @@
 //! `muvrix-core`: Core shared data structures, platform detection and error handling.
 
+pub mod backup;
 pub mod browser;
 pub mod database;
 pub mod error;
@@ -13,6 +14,7 @@ pub mod playlist;
 pub mod scanner;
 pub mod thumbnails;
 
+pub use backup::{BackupError, BackupSettings, CURRENT_BACKUP_SCHEMA};
 pub use browser::{EntryKind, MediaBrowser, MediaBrowserEntry, MediaFilter, SortBy};
 pub use database::{
     models::*, DatabaseError, DatabaseManager, DbResult, Repository, LATEST_SCHEMA_VERSION,

@@ -45,7 +45,9 @@ pub use metadata::MpvMetadataExtractor;
 pub use playlist::PlaylistItem;
 pub use property::{GetProperty, PropertyFormat, SetProperty};
 pub use render::{MpvRenderContext, NativeDisplay};
-pub use settings::{AccentColor, PersistedMediaSettings, ThemeMode, CURRENT_SETTINGS_VERSION};
+pub use settings::{
+    AccentColor, AudioChannelsSetting, PersistedMediaSettings, ThemeMode, CURRENT_SETTINGS_VERSION,
+};
 pub use shader::{
     Anime4KPreset, GamutMappingMode, ShaderManager, ShaderProfile, ShaderQuality, TargetPrimaries,
     TargetTrc, ToneMappingAlgorithm, VideoAdjustmentSettings,

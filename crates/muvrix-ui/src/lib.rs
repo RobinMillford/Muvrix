@@ -26,6 +26,7 @@ pub mod render_engine;
 pub mod runner;
 pub mod telemetry;
 pub mod trace;
+pub mod ui_components;
 pub mod views;
 pub mod wake;
 

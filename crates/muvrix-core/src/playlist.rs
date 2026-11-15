@@ -96,6 +96,35 @@ pub fn load_m3u(source: &str) -> M3uResult<Vec<M3uEntry>> {
     }
 }
 
+/// Generates M3U8 playlist text from a list of entries.
+///
+/// Produces an extended M3U8 file with `#EXTM3U` header, `#EXTINF` lines for
+/// each entry that has a known duration or title, followed by the media path.
+pub fn generate_m3u(entries: &[M3uEntry]) -> String {
+    let mut out = String::from("#EXTM3U\n");
+    for entry in entries {
+        let duration_secs = if entry.duration_ms > 0 {
+            (entry.duration_ms / 1000) as i64
+        } else {
+            -1
+        };
+        let title = entry.title.as_deref().unwrap_or("");
+        out.push_str(&format!("#EXTINF:{},{}\n", duration_secs, title));
+        out.push_str(&entry.path);
+        out.push('\n');
+    }
+    out
+}
+
+/// Writes M3U8 playlist content to a local file at `dest`.
+///
+/// Creates or truncates the destination file. Returns an I/O error on failure.
+pub fn export_m3u(entries: &[M3uEntry], dest: &str) -> M3uResult<()> {
+    let content = generate_m3u(entries);
+    std::fs::write(dest, content.as_bytes())?;
+    Ok(())
+}
+
 fn parse_extinf(rest: &str) -> (HashMap<String, String>, String, f64) {
     let mut attrs = HashMap::new();
     let mut quoted = false;
@@ -269,5 +298,47 @@ mod tests {
             format!("http://127.0.0.1:{port}/lists/relative/file.mp4")
         );
         handle.join().expect("join");
+    }
+
+    #[test]
+    fn generate_m3u_produces_valid_extended_m3u() {
+        let entries = vec![
+            M3uEntry {
+                path: "/media/video.mp4".to_string(),
+                title: Some("My Video".to_string()),
+                duration_ms: 90_500,
+                logo: None,
+                group: None,
+            },
+            M3uEntry {
+                path: "/media/music.mp3".to_string(),
+                title: None,
+                duration_ms: 0,
+                logo: None,
+                group: None,
+            },
+        ];
+        let output = generate_m3u(&entries);
+        assert!(output.starts_with("#EXTM3U\n"));
+        assert!(output.contains("#EXTINF:90,My Video\n/media/video.mp4\n"));
+        assert!(output.contains("#EXTINF:-1,\n/media/music.mp3\n"));
+    }
+
+    #[test]
+    fn export_m3u_writes_file_and_round_trips() {
+        let dir = std::env::temp_dir();
+        let dest = dir.join("muvrix_test_export.m3u");
+        let entries = vec![M3uEntry {
+            path: "/home/user/clip.mkv".to_string(),
+            title: Some("Test Clip".to_string()),
+            duration_ms: 5_000,
+            logo: None,
+            group: None,
+        }];
+        export_m3u(&entries, dest.to_str().unwrap()).expect("export");
+        let content = std::fs::read_to_string(&dest).expect("read");
+        assert!(content.contains("Test Clip"));
+        assert!(content.contains("/home/user/clip.mkv"));
+        let _ = std::fs::remove_file(&dest);
     }
 }

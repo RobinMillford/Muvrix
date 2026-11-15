@@ -77,6 +77,7 @@ fn test_full_restart_persistence_lifecycle() {
         subtitle_styling: Default::default(),
         theme_mode: Default::default(),
         accent_color: Default::default(),
+        ..Default::default()
     };
 
     // 2. Persist to disk
@@ -277,6 +278,7 @@ fn test_real_application_settings_persistence_and_libmpv_restoration_lifecycle()
         subtitle_styling: Default::default(),
         theme_mode: Default::default(),
         accent_color: Default::default(),
+        ..Default::default()
     };
 
     // 2. Persist to disk

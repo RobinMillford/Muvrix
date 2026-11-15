@@ -1118,6 +1118,12 @@ impl Shell {
 
         if let Some(path) = &cfg.initial_file {
             app.load_file(path);
+            if std::env::var("MUVRIX_INITIAL_PAUSED")
+                .map(|v| v == "1")
+                .unwrap_or(false)
+            {
+                let _ = app.controller.pause();
+            }
         }
 
         // From here on the app owns live engine resources: any failure must tear
@@ -1467,7 +1473,17 @@ impl Shell {
             // Test-only, isolated final-window capture. This is a synchronous
             // readback and must never run in normal playback.
             if let Ok(capture_path) = std::env::var("MUVRIX_CAPTURE_WINDOW_PNG") {
-                if self.frame_count == 61 {
+                let target_frame = std::env::var("MUVRIX_CAPTURE_FRAME")
+                    .ok()
+                    .and_then(|f| f.parse::<u64>().ok())
+                    .unwrap_or(
+                        if *self.app.controller.state() == muvrix_player::PlaybackState::Idle {
+                            15
+                        } else {
+                            61
+                        },
+                    );
+                if self.frame_count == target_frame {
                     let mut pixels = vec![0u8; (width * height * 4) as usize];
                     self.gl.read_pixels(
                         0,
@@ -1493,6 +1509,9 @@ impl Shell {
                         log::error!("Failed to save final window capture: {e}");
                     } else {
                         log::info!("Captured final window frame to {capture_path}");
+                    }
+                    if std::env::var("MUVRIX_CAPTURE_AND_EXIT").is_ok() {
+                        self.exit_requested = true;
                     }
                 }
             }

@@ -1041,6 +1041,25 @@ impl PlaybackController {
         Ok(())
     }
 
+    /// Sets audio channel configuration and routing.
+    pub fn set_audio_channels(
+        &self,
+        channels: crate::settings::AudioChannelsSetting,
+    ) -> Result<(), MpvError> {
+        self.handle
+            .set_property_string("audio-channels", channels.mpv_channels_option())
+    }
+
+    /// Sets audio pitch correction when playback speed changes.
+    pub fn set_audio_pitch_correction(&self, enabled: bool) -> Result<(), MpvError> {
+        self.handle.set_property("audio-pitch-correction", enabled)
+    }
+
+    /// Sets preferred audio track languages (`alang`).
+    pub fn set_audio_languages(&self, languages: &str) -> Result<(), MpvError> {
+        self.handle.set_property_string("alang", languages)
+    }
+
     /// Toggles audio mute state.
     pub fn toggle_mute(&mut self) -> Result<(), MpvError> {
         self.set_mute(!self.is_muted)

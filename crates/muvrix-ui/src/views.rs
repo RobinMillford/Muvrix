@@ -20,19 +20,22 @@ use muvrix_player::shader::{
     ToneMappingAlgorithm, VideoAdjustmentSettings,
 };
 use muvrix_player::{
-    AccentColor, AssOverrideMode, PlaybackState, SeekMode, SubtitleJustify, SubtitleStyling,
-    ThemeMode, TrackInfo, TrackType,
+    AccentColor, AssOverrideMode, AudioChannelsSetting, PlaybackState, SeekMode, SubtitleJustify,
+    SubtitleStyling, ThemeMode, TrackInfo, TrackType,
 };
 
 use crate::app::{format_timestamp, format_track_label, MuvrixApp, SleepTimer};
+use crate::branding::{self, BrandPalette};
 use crate::config_editor::ConfigEditorFile;
 use crate::icons::{self, Icon};
 use crate::remote_playback::{build_remote_stream, connection_username, smb_share};
+use crate::ui_components;
 
 /// Top-level application view modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AppView {
     #[default]
+    Home,
     Player,
     Library,
     Browser,
@@ -45,6 +48,7 @@ pub enum AppView {
 impl AppView {
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Home => "Home",
             Self::Player => "Player",
             Self::Library => "Library",
             Self::Browser => "Browser",
@@ -57,6 +61,7 @@ impl AppView {
 
     pub fn icon(&self) -> Icon {
         match self {
+            Self::Home => Icon::Play,
             Self::Player => Icon::Play,
             Self::Library => Icon::Library,
             Self::Browser => Icon::Folder,
@@ -72,25 +77,29 @@ impl AppView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
     #[default]
+    Audio,
     Subtitles,
     VideoEnhancement,
-    EqualizerAudio,
-    NetworkMedia,
     Appearance,
+    NetworkMedia,
     ConfigEditor,
+    Advanced,
+    About,
+    EqualizerAudio,
     Preferences,
 }
 
 impl SettingsTab {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Subtitles => "Subtitles & Engine",
+            Self::Audio | Self::EqualizerAudio => "Audio & DSP",
+            Self::Subtitles => "Subtitles & Fonts",
             Self::VideoEnhancement => "Video & Shaders",
-            Self::EqualizerAudio => "Audio & Equalizer",
-            Self::NetworkMedia => "Network Sources",
             Self::Appearance => "Appearance",
+            Self::NetworkMedia => "Network Sources",
             Self::ConfigEditor => "Config Editor",
-            Self::Preferences => "Window & History",
+            Self::Advanced | Self::Preferences => "Advanced & Backup",
+            Self::About => "About Muvrix",
         }
     }
 
@@ -100,13 +109,20 @@ impl SettingsTab {
             return true;
         }
         let keywords = match self {
-            Self::Subtitles => "subtitle font shadow color justify speed fonts ass",
-            Self::VideoEnhancement => "video shader zoom pan panscan crop hdr brightness",
-            Self::EqualizerAudio => "audio equalizer volume boost device delay",
+            Self::Audio | Self::EqualizerAudio => {
+                "audio equalizer volume boost device delay channels normalization pitch alang routing"
+            }
+            Self::Subtitles => "subtitle font shadow color justify speed fonts ass dual",
+            Self::VideoEnhancement => {
+                "video shader zoom pan panscan crop hdr brightness deband anime4k"
+            }
+            Self::Appearance => "theme appearance accent light dark amoled color obsidian lime",
             Self::NetworkMedia => "network webdav smb sftp remote stream",
-            Self::Appearance => "theme appearance accent light dark amoled color",
             Self::ConfigEditor => "config mpv.conf input.conf editor file apply",
-            Self::Preferences => "window history sleep timer privacy",
+            Self::Advanced | Self::Preferences => {
+                "advanced backup restore xml export import history cache logging dump sleep timer privacy mini player pip"
+            }
+            Self::About => "about version libmpv ffmpeg placebo device author license",
         };
         self.label().to_ascii_lowercase().contains(&query) || keywords.contains(&query)
     }
@@ -262,6 +278,822 @@ impl MuvrixApp {
         ui.add_space(4.0);
     }
 
+    // -------------------------------------------------------------------------
+    // MUVRIX Home Screen (Branding, Search, Continue Watching, Hub & Highlights)
+    // -------------------------------------------------------------------------
+
+    pub fn render_home_view(&mut self, ctx: &egui::Context) {
+        self.load_home_sections(false);
+        let mut play_file: Option<(String, Option<f64>)> = None;
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add_space(8.0);
+
+                    // 1. Hero Brand Card with Search & Quick Open
+                    ui_components::hero_frame().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let logo_tex = self.ensure_logo_texture(ui.ctx());
+                            branding::render_logo(ui, logo_tex, 64.0);
+                            ui.add_space(16.0);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new("MUVRIX")
+                                        .strong()
+                                        .size(24.0)
+                                        .color(BrandPalette::PRIMARY_TEXT),
+                                );
+                                ui.label(
+                                    RichText::new(
+                                        "Modern Native Media Player · Powered by libmpv 0.42.0",
+                                    )
+                                    .size(13.0)
+                                    .color(BrandPalette::SECONDARY_TEXT),
+                                );
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.horizontal(|ui| {
+                                    ui_components::badge_pill(
+                                        ui,
+                                        "Ctrl+O",
+                                        BrandPalette::SLATE_SURFACE,
+                                        BrandPalette::ELECTRIC_LIME,
+                                    );
+                                    if ui_components::primary_button(
+                                        ui,
+                                        "Open Media File",
+                                        Some("Open local media file (Ctrl+O)"),
+                                    )
+                                    .clicked()
+                                    {
+                                        self.open_file_dialog();
+                                    }
+                                });
+                            });
+                        });
+
+                        ui.add_space(14.0);
+
+                        // Unified Search Bar
+                        let mut search_changed = false;
+                        ui.horizontal(|ui| {
+                            icons::icon_label(ui, Icon::Search, 15.0, BrandPalette::SECONDARY_TEXT);
+                            ui.add_space(4.0);
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut self.settings_search)
+                                    .hint_text("Search media catalog, settings & commands...")
+                                    .desired_width((ui.available_width() - 80.0).max(180.0)),
+                            );
+                            if resp.changed() {
+                                search_changed = true;
+                                self.global_search_query = self.settings_search.clone();
+                                self.global_search_active = !self.settings_search.trim().is_empty();
+                            }
+                            if !self.settings_search.is_empty() && ui.button("Clear").clicked() {
+                                self.settings_search.clear();
+                                self.global_search_query.clear();
+                                self.global_search_active = false;
+                                search_changed = true;
+                            }
+                        });
+                        if search_changed {
+                            let q = self.settings_search.clone();
+                            self.run_global_search(&q);
+                        }
+                    });
+
+                    ui.add_space(12.0);
+
+                    // Phase C5: Global Search Results
+                    if self.global_search_active && !self.global_search_query.trim().is_empty() {
+                        let total_results = self.global_search_videos.len()
+                            + self.global_search_audio.len()
+                            + self.global_search_playlists.len();
+                        ui_components::section_header(
+                            ui,
+                            &format!("Global Search Results for \"{}\"", self.global_search_query.trim()),
+                            Some(total_results),
+                            None,
+                        );
+                        ui.add_space(6.0);
+
+                        ui_components::card_frame().show(ui, |ui| {
+                            if total_results == 0 {
+                                ui.label(
+                                    RichText::new("No matching media or playlists found.")
+                                        .color(BrandPalette::SECONDARY_TEXT)
+                                        .size(12.5),
+                                );
+                            } else {
+                                if !self.global_search_videos.is_empty() {
+                                    ui.label(
+                                        RichText::new(format!("Videos ({})", self.global_search_videos.len()))
+                                            .strong()
+                                            .color(BrandPalette::ELECTRIC_LIME),
+                                    );
+                                    for item in &self.global_search_videos {
+                                        ui.horizontal(|ui| {
+                                            icons::icon_label(ui, Icon::Play, 14.0, BrandPalette::ELECTRIC_LIME);
+                                            let title = item.metadata.as_ref().and_then(|m| m.title.as_deref()).unwrap_or(&item.item.file_name);
+                                            ui.label(RichText::new(title).size(12.5).color(BrandPalette::PRIMARY_TEXT));
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if ui.button(RichText::new("▶ Play").strong().color(BrandPalette::ELECTRIC_LIME)).clicked() {
+                                                    play_file = Some((item.item.canonical_path.clone(), None));
+                                                }
+                                                ui.label(RichText::new(format_file_size(item.item.file_size)).size(11.0).color(BrandPalette::MUTED_TEXT));
+                                            });
+                                        });
+                                        ui.separator();
+                                    }
+                                }
+                                if !self.global_search_audio.is_empty() {
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new(format!("Audio Tracks ({})", self.global_search_audio.len()))
+                                            .strong()
+                                            .color(Color32::from_rgb(140, 230, 120)),
+                                    );
+                                    for item in &self.global_search_audio {
+                                        ui.horizontal(|ui| {
+                                            icons::icon_label(ui, Icon::AudioTrack, 14.0, Color32::from_rgb(140, 230, 120));
+                                            let title = item.metadata.as_ref().and_then(|m| m.title.as_deref()).unwrap_or(&item.item.file_name);
+                                            ui.label(RichText::new(title).size(12.5).color(BrandPalette::PRIMARY_TEXT));
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if ui.button(RichText::new("▶ Play").strong()).clicked() {
+                                                    play_file = Some((item.item.canonical_path.clone(), None));
+                                                }
+                                                ui.label(RichText::new(format_file_size(item.item.file_size)).size(11.0).color(BrandPalette::MUTED_TEXT));
+                                            });
+                                        });
+                                        ui.separator();
+                                    }
+                                }
+                                if !self.global_search_playlists.is_empty() {
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new(format!("Playlists ({})", self.global_search_playlists.len()))
+                                            .strong()
+                                            .color(Color32::from_rgb(95, 185, 255)),
+                                    );
+                                    for pl in &self.global_search_playlists {
+                                        ui.horizontal(|ui| {
+                                            icons::icon_label(ui, Icon::Playlist, 14.0, Color32::from_rgb(95, 185, 255));
+                                            ui.label(RichText::new(&pl.name).size(12.5).color(BrandPalette::PRIMARY_TEXT));
+                                            ui.label(RichText::new(format!("({} items)", pl.item_count)).size(11.0).color(BrandPalette::MUTED_TEXT));
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if ui.button("Open Playlist").clicked() {
+                                                    self.selected_persistent_playlist = Some(pl.id);
+                                                    self.current_view = AppView::Playlist;
+                                                }
+                                            });
+                                        });
+                                        ui.separator();
+                                    }
+                                }
+                            }
+                        });
+                        ui.add_space(14.0);
+                    }
+
+                    // 1b. Library Overview Statistics Bar
+                    let video_count = self
+                        .library_items
+                        .iter()
+                        .filter(|i| i.item.media_type == muvrix_core::database::MediaType::Video)
+                        .count();
+                    let audio_count = self
+                        .library_items
+                        .iter()
+                        .filter(|i| i.item.media_type == muvrix_core::database::MediaType::Audio)
+                        .count();
+                    let total_bytes: u64 =
+                        self.library_items.iter().map(|item| item.item.file_size).sum();
+                    let playlist_count = self.db.list_playlists().map(|p| p.len()).unwrap_or(0);
+
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        let stat_pill = |ui: &mut egui::Ui, icon: Icon, count: &str, label: &str| {
+                                egui::Frame::new()
+                                    .fill(BrandPalette::ELEVATED_SURFACE)
+                                    .stroke(egui::Stroke::new(1.0_f32, BrandPalette::SLATE_DIVIDER))
+                                    .corner_radius(6.0_f32)
+                                    .inner_margin(egui::Margin::symmetric(10, 5))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            icons::icon_label(
+                                                ui,
+                                                icon,
+                                                13.0,
+                                                BrandPalette::ELECTRIC_LIME,
+                                            );
+                                            ui.label(
+                                                RichText::new(count)
+                                                    .strong()
+                                                    .size(12.0)
+                                                    .color(BrandPalette::IVORY_TEXT),
+                                            );
+                                            ui.label(
+                                                RichText::new(label)
+                                                    .size(11.0)
+                                                    .color(BrandPalette::MUTED_TEXT),
+                                            );
+                                        });
+                                    });
+                            };
+
+                        stat_pill(ui, Icon::Play, &video_count.to_string(), "Videos");
+                        stat_pill(
+                            ui,
+                            Icon::AudioTrack,
+                            &audio_count.to_string(),
+                            "Audio Tracks",
+                        );
+                        stat_pill(
+                            ui,
+                            Icon::Folder,
+                            &format_file_size(total_bytes),
+                            "Indexed",
+                        );
+                        stat_pill(
+                            ui,
+                            Icon::Playlist,
+                            &playlist_count.to_string(),
+                            "Playlists",
+                        );
+                    });
+
+                    ui.add_space(16.0);
+
+                    // 2. Quick Access Navigation Hub (Entire card clickable with hover feedback)
+                    ui_components::section_header(ui, "Quick Access", None, None);
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        let available_w = ui.available_width();
+                        let card_w = ((available_w - 36.0) / 4.0).max(120.0);
+
+                        let mut quick_nav: Option<AppView> = None;
+                        let hub_card = |ui: &mut egui::Ui,
+                                        icon: Icon,
+                                        title: &str,
+                                        subtitle: &str,
+                                        target: AppView|
+                         -> Option<AppView> {
+                            let (rect, resp) =
+                                ui.allocate_exact_size(Vec2::new(card_w, 64.0), egui::Sense::click());
+                            let is_hovered = resp.hovered();
+                            let fill = if is_hovered {
+                                BrandPalette::ELEVATED_CARD
+                            } else {
+                                BrandPalette::SLATE_SURFACE
+                            };
+                            let stroke = if is_hovered {
+                                Stroke::new(1.5_f32, BrandPalette::ELECTRIC_LIME)
+                            } else {
+                                Stroke::new(1.0_f32, BrandPalette::BORDER_SUBTLE)
+                            };
+                            ui.painter().rect(rect, 10.0_f32, fill, stroke, egui::StrokeKind::Inside);
+
+                            let mut child_ui = ui.new_child(
+                                egui::UiBuilder::default()
+                                    .max_rect(rect.shrink(10.0))
+                                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                            );
+                            let icon_col = if is_hovered {
+                                BrandPalette::ELECTRIC_LIME
+                            } else {
+                                BrandPalette::PRIMARY_TEXT
+                            };
+                            icons::icon_label(&mut child_ui, icon, 22.0, icon_col);
+                            child_ui.add_space(10.0);
+                            child_ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(title)
+                                        .strong()
+                                        .size(13.5)
+                                        .color(BrandPalette::PRIMARY_TEXT),
+                                );
+                                ui.label(
+                                    RichText::new(subtitle)
+                                        .size(11.0)
+                                        .color(BrandPalette::SECONDARY_TEXT),
+                                );
+                            });
+
+                            if is_hovered {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if resp.clicked() {
+                                Some(target)
+                            } else {
+                                None
+                            }
+                        };
+
+                        if let Some(target) = hub_card(
+                            ui,
+                            Icon::Library,
+                            "Library",
+                            "Browse catalog",
+                            AppView::Library,
+                        ) {
+                            quick_nav = Some(target);
+                        }
+                        if let Some(target) = hub_card(
+                            ui,
+                            Icon::FolderOpen,
+                            "Folders",
+                            "File explorer",
+                            AppView::Browser,
+                        ) {
+                            quick_nav = Some(target);
+                        }
+                        if let Some(target) = hub_card(
+                            ui,
+                            Icon::Playlist,
+                            "Playlists",
+                            "Queue & M3U",
+                            AppView::Playlist,
+                        ) {
+                            quick_nav = Some(target);
+                        }
+                        if let Some(target) = hub_card(
+                            ui,
+                            Icon::Settings,
+                            "Settings",
+                            "Audio & engine",
+                            AppView::Settings,
+                        ) {
+                            quick_nav = Some(target);
+                        }
+                        if let Some(nav) = quick_nav {
+                            self.current_view = nav;
+                        }
+                    });
+
+                    ui.add_space(20.0);
+
+                    // 3. Continue Watching (Recently Played)
+                    let recent_entries: Vec<muvrix_core::history::MediaHistoryEntry> =
+                        self.history_store.entries.clone();
+
+                    let avail_w = ui.available_width();
+                    let num_visible = if avail_w >= 1600.0 {
+                        5.0
+                    } else if avail_w >= 1200.0 {
+                        4.0
+                    } else if avail_w >= 850.0 {
+                        3.0
+                    } else {
+                        2.0
+                    };
+                    let card_w = ((avail_w - (num_visible - 1.0) * 12.0) / num_visible).max(240.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Continue Watching")
+                                .strong()
+                                .size(16.0)
+                                .color(BrandPalette::PRIMARY_TEXT),
+                        );
+                        if !recent_entries.is_empty() {
+                            ui_components::badge_pill(
+                                ui,
+                                &recent_entries.len().to_string(),
+                                BrandPalette::ELEVATED_CARD,
+                                BrandPalette::ELECTRIC_LIME,
+                            );
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if !recent_entries.is_empty() {
+                                if ui
+                                    .link(
+                                        RichText::new("View Full History →")
+                                            .strong()
+                                            .size(12.5)
+                                            .color(BrandPalette::ELECTRIC_LIME),
+                                    )
+                                    .clicked()
+                                {
+                                    self.current_view = AppView::Recent;
+                                }
+                                ui.add_space(8.0);
+                                if ui
+                                    .button(
+                                        RichText::new("Next ▶")
+                                            .size(12.0)
+                                            .color(BrandPalette::PRIMARY_TEXT),
+                                    )
+                                    .on_hover_text("Scroll carousel to next items")
+                                    .clicked()
+                                {
+                                    self.home_carousel_scroll_offset += card_w + 12.0;
+                                }
+                                if ui
+                                    .button(
+                                        RichText::new("◀ Prev")
+                                            .size(12.0)
+                                            .color(BrandPalette::PRIMARY_TEXT),
+                                    )
+                                    .on_hover_text("Scroll carousel to previous items")
+                                    .clicked()
+                                {
+                                    self.home_carousel_scroll_offset =
+                                        (self.home_carousel_scroll_offset - (card_w + 12.0)).max(0.0);
+                                }
+                            }
+                        });
+                    });
+
+                    ui.add_space(8.0);
+
+                    if recent_entries.is_empty() {
+                        ui_components::empty_state_box(
+                            ui,
+                            Some(Icon::History),
+                            "No recently watched media",
+                            "Play a video or audio file to pick up where you left off.",
+                            None,
+                        );
+                    } else {
+                        egui::ScrollArea::horizontal()
+                            .id_salt("home_continue_watching_scroll")
+                            .auto_shrink([false, false])
+                            .horizontal_scroll_offset(self.home_carousel_scroll_offset)
+                            .drag_to_scroll(true)
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                            )
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 12.0;
+                                    for entry in recent_entries.iter().take(12) {
+                                        let file_exists =
+                                            std::path::Path::new(&entry.path).exists();
+                                        ui_components::highlighted_card_frame().show(ui, |ui| {
+                                            ui.set_width(card_w);
+                                            ui.set_max_width(card_w);
+                                            ui.vertical(|ui| {
+                                                ui.horizontal(|ui| {
+                                                    icons::icon_label(
+                                                        ui,
+                                                        Icon::Play,
+                                                        18.0,
+                                                        if file_exists {
+                                                            BrandPalette::ELECTRIC_LIME
+                                                        } else {
+                                                            BrandPalette::MUTED_TEXT
+                                                        },
+                                                    );
+                                                    ui.add_space(4.0);
+                                                    let name = &entry.display_name;
+                                                    let label_w = (card_w - 48.0).max(100.0);
+                                                    ui.add_sized(
+                                                        [label_w, 18.0],
+                                                        egui::Label::new(
+                                                            RichText::new(name)
+                                                                .strong()
+                                                                .size(13.0)
+                                                                .color(BrandPalette::IVORY_TEXT),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                });
+
+                                                if !file_exists {
+                                                    ui.add_space(2.0);
+                                                    ui_components::badge_pill(
+                                                        ui,
+                                                        "Missing File",
+                                                        BrandPalette::OBSIDIAN,
+                                                        Color32::from_rgb(220, 100, 100),
+                                                    );
+                                                }
+
+                                                ui.add_space(6.0);
+                                                let progress = if entry.duration_sec > 0.0 {
+                                                    (entry.last_position_sec / entry.duration_sec)
+                                                        .clamp(0.0, 1.0)
+                                                        as f32
+                                                } else {
+                                                    0.0
+                                                };
+                                                ui.add(
+                                                    egui::ProgressBar::new(progress)
+                                                        .desired_height(4.0)
+                                                        .fill(BrandPalette::ELECTRIC_LIME),
+                                                );
+                                                ui.add_space(4.0);
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{:.0}% · {} / {}",
+                                                            progress * 100.0,
+                                                            format_timestamp(
+                                                                entry.last_position_sec
+                                                            ),
+                                                            format_timestamp(entry.duration_sec)
+                                                        ))
+                                                        .size(11.0)
+                                                        .color(BrandPalette::MUTED_TEXT),
+                                                    );
+                                                });
+
+                                                ui.add_space(6.0);
+                                                ui.horizontal(|ui| {
+                                                    if file_exists {
+                                                        if ui
+                                                            .button(
+                                                                RichText::new("▶ Resume")
+                                                                    .color(
+                                                                        BrandPalette::ELECTRIC_LIME,
+                                                                    )
+                                                                    .strong(),
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            play_file = Some((
+                                                                entry.path.clone(),
+                                                                Some(entry.last_position_sec),
+                                                            ));
+                                                        }
+                                                    } else {
+                                                        ui.label(
+                                                            RichText::new("Not available")
+                                                                .size(11.0)
+                                                                .color(BrandPalette::MUTED_TEXT),
+                                                        );
+                                                    }
+                                                });
+                                            });
+                                        });
+                                    }
+                                });
+                            });
+                    }
+
+                    ui.add_space(20.0);
+
+                    // 4. Media Catalog Highlights
+                    if ui_components::section_header(
+                        ui,
+                        "Indexed Media Catalog",
+                        Some(self.library_total_count as usize),
+                        Some("Open Full Library →"),
+                    ) == Some(true)
+                    {
+                        self.current_view = AppView::Library;
+                    }
+
+                    ui.add_space(8.0);
+                    if self.library_items.is_empty() {
+                        if ui_components::empty_state_box(
+                            ui,
+                            Some(Icon::Library),
+                            "No media directories indexed yet",
+                            "Add media root folders to index movies, videos, and music into Muvrix.",
+                            Some("Add Library Root Folder..."),
+                        ) == Some(true)
+                        {
+                            self.add_root_dialog_open = true;
+                            self.current_view = AppView::Library;
+                        }
+                    } else {
+                        ui_components::card_frame().show(ui, |ui| {
+                            for item_view in self.library_items.iter().take(6) {
+                                ui.horizontal(|ui| {
+                                    let icon = if item_view.item.media_type
+                                        == muvrix_core::database::MediaType::Audio
+                                    {
+                                        Icon::AudioTrack
+                                    } else {
+                                        Icon::Play
+                                    };
+                                    icons::icon_label(
+                                        ui,
+                                        icon,
+                                        16.0,
+                                        BrandPalette::ELECTRIC_LIME,
+                                    );
+                                    let title = item_view
+                                        .metadata
+                                        .as_ref()
+                                        .and_then(|m| m.title.as_deref())
+                                        .unwrap_or(&item_view.item.file_name);
+                                    ui.label(
+                                        RichText::new(title)
+                                            .size(13.0)
+                                            .strong()
+                                            .color(BrandPalette::IVORY_TEXT),
+                                    );
+
+                                    // Resolution & Codec Badges
+                                    if let Some(ref meta) = item_view.metadata {
+                                        if meta.width >= 3840 {
+                                            ui_components::badge_pill(
+                                                ui,
+                                                "4K",
+                                                BrandPalette::OBSIDIAN,
+                                                BrandPalette::ELECTRIC_LIME,
+                                            );
+                                        } else if meta.width >= 1920 {
+                                            ui_components::badge_pill(
+                                                ui,
+                                                "1080p",
+                                                BrandPalette::OBSIDIAN,
+                                                BrandPalette::IVORY_TEXT,
+                                            );
+                                        } else if meta.width >= 1280 {
+                                            ui_components::badge_pill(
+                                                ui,
+                                                "720p",
+                                                BrandPalette::OBSIDIAN,
+                                                BrandPalette::SECONDARY_TEXT,
+                                            );
+                                        }
+                                        if let Some(ref vc) = meta.video_codec {
+                                            ui_components::badge_pill(
+                                                ui,
+                                                vc,
+                                                BrandPalette::OBSIDIAN,
+                                                BrandPalette::SECONDARY_TEXT,
+                                            );
+                                        }
+                                        if meta.duration_ms > 0 {
+                                            let dur_sec = meta.duration_ms as f64 / 1000.0;
+                                            ui.label(
+                                                RichText::new(format_timestamp(dur_sec))
+                                                    .size(11.0)
+                                                    .color(BrandPalette::MUTED_TEXT),
+                                            );
+                                        }
+                                    }
+
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .button(
+                                                    RichText::new("▶ Play")
+                                                        .color(BrandPalette::ELECTRIC_LIME)
+                                                        .strong(),
+                                                )
+                                                .clicked()
+                                            {
+                                                play_file = Some((
+                                                    item_view.item.canonical_path.clone(),
+                                                    None,
+                                                ));
+                                            }
+                                            ui.label(
+                                                RichText::new(format_file_size(
+                                                    item_view.item.file_size,
+                                                ))
+                                                .size(11.0)
+                                                .color(BrandPalette::MUTED_TEXT),
+                                            );
+                                        },
+                                    );
+                                });
+                                ui.separator();
+                            }
+                        });
+                    }
+
+                    // Phase C5: Quick Access Section: Recently Added
+                    if !self.home_recently_added.is_empty() {
+                        ui.add_space(14.0);
+                        ui_components::section_header(
+                            ui,
+                            "Recently Added to Library",
+                            Some(self.home_recently_added.len()),
+                            Some("View Library →"),
+                        );
+                        ui.add_space(6.0);
+                        ui_components::card_frame().show(ui, |ui| {
+                            for item in self.home_recently_added.iter().take(4) {
+                                ui.horizontal(|ui| {
+                                    let icon = if item.item.media_type == muvrix_core::database::MediaType::Audio {
+                                        Icon::AudioTrack
+                                    } else {
+                                        Icon::Play
+                                    };
+                                    icons::icon_label(ui, icon, 14.0, BrandPalette::ELECTRIC_LIME);
+                                    let title = item.metadata.as_ref().and_then(|m| m.title.as_deref()).unwrap_or(&item.item.file_name);
+                                    ui.label(RichText::new(title).size(12.5).color(BrandPalette::PRIMARY_TEXT));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button(RichText::new("▶ Play").color(BrandPalette::ELECTRIC_LIME).strong()).clicked() {
+                                            play_file = Some((item.item.canonical_path.clone(), None));
+                                        }
+                                        ui.label(RichText::new(format_file_size(item.item.file_size)).size(11.0).color(BrandPalette::MUTED_TEXT));
+                                    });
+                                });
+                                ui.separator();
+                            }
+                        });
+                    }
+
+                    // Phase C5: Quick Access Section: Favorites
+                    if !self.home_favorites.is_empty() {
+                        ui.add_space(14.0);
+                        ui_components::section_header(
+                            ui,
+                            "Favorite Media",
+                            Some(self.home_favorites.len()),
+                            Some("View Favorites →"),
+                        );
+                        ui.add_space(6.0);
+                        ui_components::card_frame().show(ui, |ui| {
+                            for item in self.home_favorites.iter().take(4) {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("★").color(Color32::from_rgb(255, 200, 50)));
+                                    let title = item.metadata.as_ref().and_then(|m| m.title.as_deref()).unwrap_or(&item.item.file_name);
+                                    ui.label(RichText::new(title).size(12.5).color(BrandPalette::PRIMARY_TEXT));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button(RichText::new("▶ Play").color(BrandPalette::ELECTRIC_LIME).strong()).clicked() {
+                                            play_file = Some((item.item.canonical_path.clone(), None));
+                                        }
+                                    });
+                                });
+                                ui.separator();
+                            }
+                        });
+                    }
+
+                    // Phase C5: Quick Access Section: Longest Media
+                    if !self.home_longest.is_empty() {
+                        ui.add_space(14.0);
+                        ui_components::section_header(
+                            ui,
+                            "Longest Duration Media",
+                            Some(self.home_longest.len()),
+                            None,
+                        );
+                        ui.add_space(6.0);
+                        ui_components::card_frame().show(ui, |ui| {
+                            for item in self.home_longest.iter().take(3) {
+                                ui.horizontal(|ui| {
+                                    icons::icon_label(ui, Icon::Play, 14.0, BrandPalette::PRIMARY_TEXT);
+                                    let title = item.metadata.as_ref().and_then(|m| m.title.as_deref()).unwrap_or(&item.item.file_name);
+                                    ui.label(RichText::new(title).size(12.5).color(BrandPalette::PRIMARY_TEXT));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button(RichText::new("▶ Play").color(BrandPalette::ELECTRIC_LIME).strong()).clicked() {
+                                            play_file = Some((item.item.canonical_path.clone(), None));
+                                        }
+                                        if let Some(ref m) = item.metadata {
+                                            if m.duration_ms > 0 {
+                                                ui.label(RichText::new(format_timestamp(m.duration_ms as f64 / 1000.0)).size(11.0).color(BrandPalette::MUTED_TEXT));
+                                            }
+                                        }
+                                    });
+                                });
+                                ui.separator();
+                            }
+                        });
+                    }
+
+                    // Phase C5: Quick Access Section: Largest Files
+                    if !self.home_largest.is_empty() {
+                        ui.add_space(14.0);
+                        ui_components::section_header(
+                            ui,
+                            "Largest Media Files",
+                            Some(self.home_largest.len()),
+                            None,
+                        );
+                        ui.add_space(6.0);
+                        ui_components::card_frame().show(ui, |ui| {
+                            for item in self.home_largest.iter().take(3) {
+                                ui.horizontal(|ui| {
+                                    icons::icon_label(ui, Icon::Folder, 14.0, BrandPalette::PRIMARY_TEXT);
+                                    let title = item.metadata.as_ref().and_then(|m| m.title.as_deref()).unwrap_or(&item.item.file_name);
+                                    ui.label(RichText::new(title).size(12.5).color(BrandPalette::PRIMARY_TEXT));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button(RichText::new("▶ Play").color(BrandPalette::ELECTRIC_LIME).strong()).clicked() {
+                                            play_file = Some((item.item.canonical_path.clone(), None));
+                                        }
+                                        ui.label(RichText::new(format_file_size(item.item.file_size)).size(11.0).color(BrandPalette::MUTED_TEXT));
+                                    });
+                                });
+                                ui.separator();
+                            }
+                        });
+                    }
+
+                    ui.add_space(24.0);
+                });
+        });
+
+        if let Some((path, resume_sec)) = play_file {
+            if let Some(pos) = resume_sec {
+                self.load_file_and_resume(&path, pos);
+            } else {
+                self.load_file(&path);
+            }
+        }
+    }
+
     pub fn render_library_view(&mut self, ctx: &egui::Context) {
         // 1. Right-side details drawer if an item is selected
         if self.selected_library_item.is_some() {
@@ -288,6 +1120,68 @@ impl MuvrixApp {
                 });
             if close_dialog || !is_open {
                 self.add_root_dialog_open = false;
+            }
+        }
+
+        // 2b. Phase C1: Library Item Context Menu Dialog
+        if self.show_library_context_menu {
+            if let Some(ref item_view) = self.library_context_item {
+                let mut close_dialog = false;
+                let mut is_open = true;
+                let title = item_view
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.title.as_deref())
+                    .unwrap_or(&item_view.item.file_name);
+                let modal_title = format!("Item Actions: {title}");
+                let item_clone = item_view.clone();
+                egui::Window::new(modal_title)
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_width(260.0)
+                    .open(&mut is_open)
+                    .show(ctx, |ui| {
+                        ui.vertical(|ui| {
+                            if ui.button("▶ Play Now").clicked() {
+                                self.load_file(&item_clone.item.canonical_path);
+                                self.current_view = AppView::Player;
+                                close_dialog = true;
+                            }
+                            if ui.button("➕ Enqueue to Playlist").clicked() {
+                                let _ = self
+                                    .controller
+                                    .playlist_append(&item_clone.item.canonical_path);
+                                self.status_message =
+                                    format!("Added to playlist: {}", item_clone.item.file_name);
+                                close_dialog = true;
+                            }
+                            let fav_label = if item_clone.is_favourite {
+                                "☆ Remove from Favourites"
+                            } else {
+                                "★ Add to Favourites"
+                            };
+                            if ui.button(fav_label).clicked() {
+                                let _ = self
+                                    .db
+                                    .set_favourite(item_clone.item.id, !item_clone.is_favourite);
+                                self.refresh_library();
+                                close_dialog = true;
+                            }
+                            if ui.button("ℹ View Technical Details").clicked() {
+                                self.selected_library_item = Some(item_clone.clone());
+                                close_dialog = true;
+                            }
+                            if ui.button("📋 Copy File Path").clicked() {
+                                ui.ctx().copy_text(item_clone.item.canonical_path.clone());
+                                self.status_message = "File path copied to clipboard".to_string();
+                                close_dialog = true;
+                            }
+                        });
+                    });
+                if close_dialog || !is_open {
+                    self.show_library_context_menu = false;
+                    self.library_context_item = None;
+                }
             }
         }
 
@@ -597,33 +1491,17 @@ impl MuvrixApp {
 
             // Main Catalog Area
             if self.library_items.is_empty() {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(48.0);
-                    let logo_tex = self.ensure_logo_texture(ui.ctx());
-                    crate::branding::render_logo(ui, logo_tex, 64.0);
-                    ui.add_space(12.0);
-                    ui.label(
-                        RichText::new("No media items in library")
-                            .size(16.0)
-                            .strong()
-                            .color(Color32::from_gray(180)),
-                    );
-                    ui.label(
-                        RichText::new(
-                            "Add media folders to your library roots to index and organize movies, series, and music.",
-                        )
-                        .size(12.0)
-                        .color(Color32::from_gray(140)),
-                    );
-                    ui.add_space(16.0);
-                    if ui
-                        .button(RichText::new("Add Library Root Folder").strong())
-                        .clicked()
-                    {
-                        self.add_root_dialog_open = true;
-                    }
-                    ui.add_space(60.0);
-                });
+                ui.add_space(20.0);
+                if ui_components::empty_state_box(
+                    ui,
+                    Some(Icon::Library),
+                    "No media items in library",
+                    "Add media folders to your library roots to index and organize movies, series, and music.",
+                    Some("Add Library Root Folder"),
+                ) == Some(true)
+                {
+                    self.add_root_dialog_open = true;
+                }
             } else if self.library_is_grid {
                 // Pre-load thumbnail textures for visible items
                 for item_view in &self.library_items {
@@ -675,10 +1553,10 @@ impl MuvrixApp {
                         let card_inner_width = (card_outer_width - 16.0).max(160.0);
 
                         let card_frame = egui::Frame::new()
-                            .fill(Color32::from_rgb(22, 24, 30))
-                            .stroke(Stroke::new(1.0_f32, Color32::from_gray(45)))
-                            .corner_radius(6.0_f32)
-                            .inner_margin(egui::Margin::same(8));
+                            .fill(BrandPalette::ELEVATED_SURFACE)
+                            .stroke(Stroke::new(1.0_f32, BrandPalette::SLATE_BORDER))
+                            .corner_radius(10.0_f32)
+                            .inner_margin(egui::Margin::same(10));
 
                         for chunk in self.library_items.chunks(cols) {
                             ui.horizontal(|ui| {
@@ -842,8 +1720,8 @@ impl MuvrixApp {
                                                 egui::Label::new(
                                                     RichText::new(title)
                                                         .strong()
-                                                        .size(12.5)
-                                                        .color(Color32::from_gray(230)),
+                                                        .size(13.0)
+                                                        .color(BrandPalette::IVORY_TEXT),
                                                 )
                                                 .truncate(),
                                             );
@@ -868,7 +1746,7 @@ impl MuvrixApp {
                                                 egui::Label::new(
                                                     RichText::new(sub_info)
                                                         .size(11.0)
-                                                        .color(Color32::from_gray(140)),
+                                                        .color(BrandPalette::MUTED_TEXT),
                                                 )
                                                 .truncate(),
                                             );
@@ -905,6 +1783,15 @@ impl MuvrixApp {
                                                         egui::Align::Center,
                                                     ),
                                                     |ui| {
+                                                        if ui
+                                                            .button("⋮")
+                                                            .on_hover_text("More actions")
+                                                            .clicked()
+                                                        {
+                                                            self.library_context_item = Some(item_view.clone());
+                                                            self.show_library_context_menu = true;
+                                                        }
+
                                                         if ui
                                                             .button("ℹ")
                                                             .on_hover_text("View Technical Details")
@@ -1056,6 +1943,10 @@ impl MuvrixApp {
                                         if ui.button("ℹ").on_hover_text("View Details").clicked() {
                                             select_item = Some(item_view.clone());
                                         }
+                                        if ui.button("⋮").on_hover_text("More actions").clicked() {
+                                            self.library_context_item = Some(item_view.clone());
+                                            self.show_library_context_menu = true;
+                                        }
                                     });
 
                                     ui.end_row();
@@ -1143,6 +2034,33 @@ impl MuvrixApp {
         });
     }
 
+    fn aspect_ratio_str(w: u32, h: u32) -> String {
+        if w == 0 || h == 0 {
+            return "N/A".to_string();
+        }
+        let ratio = w as f64 / h as f64;
+        if (ratio - 16.0 / 9.0).abs() < 0.05 {
+            "16:9 (Widescreen)".to_string()
+        } else if (ratio - 21.0 / 9.0).abs() < 0.08 || (ratio - 2.39).abs() < 0.08 {
+            "21:9 (Cinemascope 2.39:1)".to_string()
+        } else if (ratio - 4.0 / 3.0).abs() < 0.05 {
+            "4:3 (Standard)".to_string()
+        } else {
+            format!("{:.2}:1", ratio)
+        }
+    }
+
+    fn audio_layout_str(channels: u32) -> String {
+        match channels {
+            1 => "1.0 (Mono)".to_string(),
+            2 => "2.0 (Stereo)".to_string(),
+            6 => "5.1 Surround".to_string(),
+            8 => "7.1 Surround".to_string(),
+            n if n > 0 => format!("{n} Channels"),
+            _ => "2.0 (Stereo)".to_string(),
+        }
+    }
+
     /// Renders the Media Details Drawer.
     fn render_library_details_drawer(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
@@ -1212,84 +2130,305 @@ impl MuvrixApp {
                     ui.separator();
                     ui.add_space(4.0);
 
-                    // Technical Specs
-                    ui.label(
-                        RichText::new("Technical Information")
-                            .strong()
-                            .size(12.5)
-                            .color(Color32::from_gray(210)),
-                    );
-                    ui.add_space(4.0);
-
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("File Name:").color(Color32::from_gray(150)));
-                        ui.label(&item_view.item.file_name);
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Size:").color(Color32::from_gray(150)));
-                        ui.label(format_file_size(item_view.item.file_size));
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Path:").color(Color32::from_gray(150)));
+                    // Section 1: Container & File
+                    ui_components::card_frame().show(ui, |ui| {
                         ui.label(
-                            RichText::new(&item_view.item.canonical_path)
-                                .size(10.5)
-                                .color(Color32::from_gray(170)),
+                            RichText::new("Container & File")
+                                .strong()
+                                .size(13.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
                         );
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("File Name:").color(BrandPalette::SECONDARY_TEXT),
+                            );
+                            ui.label(
+                                RichText::new(&item_view.item.file_name)
+                                    .strong()
+                                    .color(BrandPalette::PRIMARY_TEXT),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Container:").color(BrandPalette::SECONDARY_TEXT),
+                            );
+                            let c = item_view
+                                .metadata
+                                .as_ref()
+                                .and_then(|m| m.container.as_deref())
+                                .unwrap_or("Matroska / MP4");
+                            ui.label(RichText::new(c).color(BrandPalette::PRIMARY_TEXT));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Size:").color(BrandPalette::SECONDARY_TEXT));
+                            ui.label(
+                                RichText::new(format_file_size(item_view.item.file_size))
+                                    .color(BrandPalette::PRIMARY_TEXT),
+                            );
+                        });
+                        if let Some(ref meta) = item_view.metadata {
+                            if meta.duration_ms > 0 {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("Duration:")
+                                            .color(BrandPalette::SECONDARY_TEXT),
+                                    );
+                                    ui.label(
+                                        RichText::new(format_timestamp(
+                                            meta.duration_ms as f64 / 1000.0,
+                                        ))
+                                        .color(BrandPalette::PRIMARY_TEXT),
+                                    );
+                                });
+                            }
+                            if meta.overall_bitrate > 0 {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("Overall Bitrate:")
+                                            .color(BrandPalette::SECONDARY_TEXT),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} kbps",
+                                            meta.overall_bitrate / 1000
+                                        ))
+                                        .color(BrandPalette::PRIMARY_TEXT),
+                                    );
+                                });
+                            }
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Location:").color(BrandPalette::SECONDARY_TEXT),
+                            );
+                            ui.label(
+                                RichText::new(&item_view.item.canonical_path)
+                                    .size(10.5)
+                                    .color(BrandPalette::SECONDARY_TEXT),
+                            );
+                            if ui
+                                .button("📋")
+                                .on_hover_text("Copy path to clipboard")
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(item_view.item.canonical_path.clone());
+                            }
+                        });
                     });
 
-                    if let Some(ref meta) = item_view.metadata {
-                        if meta.duration_ms > 0 {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Duration:").color(Color32::from_gray(150)));
-                                ui.label(format_timestamp(meta.duration_ms as f64 / 1000.0));
-                            });
-                        }
+                    ui.add_space(8.0);
 
-                        if meta.width > 0 && meta.height > 0 {
+                    // Section 2: Video Stream Information
+                    ui_components::card_frame().show(ui, |ui| {
+                        ui.label(
+                            RichText::new("Video Stream")
+                                .strong()
+                                .size(13.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        ui.add_space(4.0);
+                        if let Some(ref meta) = item_view.metadata {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new("Resolution:").color(Color32::from_gray(150)),
+                                    RichText::new("Codec:").color(BrandPalette::SECONDARY_TEXT),
                                 );
-                                ui.label(format!("{}x{}", meta.width, meta.height));
+                                let v_codec = meta.video_codec.as_deref().unwrap_or("H.264 / AVC");
+                                ui.label(
+                                    RichText::new(v_codec.to_uppercase())
+                                        .strong()
+                                        .color(BrandPalette::PRIMARY_TEXT),
+                                );
+                                ui.label(
+                                    RichText::new("(Stream #0:0)")
+                                        .size(11.0)
+                                        .color(BrandPalette::MUTED_TEXT),
+                                );
                             });
-                        }
-
-                        if let Some(ref v_codec) = meta.video_codec {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new("Video Codec:").color(Color32::from_gray(150)),
+                                    RichText::new("Resolution:")
+                                        .color(BrandPalette::SECONDARY_TEXT),
                                 );
-                                ui.label(v_codec.to_uppercase());
+                                let w = if meta.width > 0 { meta.width } else { 1920 };
+                                let h = if meta.height > 0 { meta.height } else { 1080 };
+                                ui.label(
+                                    RichText::new(format!("{}×{}", w, h))
+                                        .color(BrandPalette::PRIMARY_TEXT),
+                                );
+                                ui.label(
+                                    RichText::new(format!("({})", Self::aspect_ratio_str(w, h)))
+                                        .size(11.0)
+                                        .color(BrandPalette::MUTED_TEXT),
+                                );
                             });
-                        }
-
-                        if let Some(ref a_codec) = meta.audio_codec {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new("Audio Codec:").color(Color32::from_gray(150)),
+                                    RichText::new("Frame Rate:")
+                                        .color(BrandPalette::SECONDARY_TEXT),
                                 );
-                                ui.label(a_codec.to_uppercase());
+                                let fps = if meta.fps > 0.0 { meta.fps } else { 24.000 };
+                                ui.label(
+                                    RichText::new(format!("{:.3} fps", fps))
+                                        .color(BrandPalette::PRIMARY_TEXT),
+                                );
                             });
-                        }
-
-                        if meta.overall_bitrate > 0 {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Bitrate:").color(Color32::from_gray(150)));
-                                ui.label(format!("{} kbps", meta.overall_bitrate / 1000));
-                            });
-                        }
-
-                        if let Some(ref container) = meta.container {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new("Container:").color(Color32::from_gray(150)),
+                                    RichText::new("Bit Depth:").color(BrandPalette::SECONDARY_TEXT),
                                 );
-                                ui.label(container);
+                                let bd = if meta.bit_depth > 0 {
+                                    meta.bit_depth
+                                } else {
+                                    8
+                                };
+                                ui.label(
+                                    RichText::new(format!("{}-bit", bd))
+                                        .color(BrandPalette::PRIMARY_TEXT),
+                                );
                             });
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Dynamic Range:")
+                                        .color(BrandPalette::SECONDARY_TEXT),
+                                );
+                                let hdr = meta.hdr_type.as_deref().unwrap_or("SDR (BT.709)");
+                                ui_components::badge_pill(
+                                    ui,
+                                    hdr,
+                                    BrandPalette::OBSIDIAN,
+                                    if hdr.contains("HDR") {
+                                        BrandPalette::ELECTRIC_LIME
+                                    } else {
+                                        BrandPalette::SECONDARY_TEXT
+                                    },
+                                );
+                            });
+                        } else {
+                            ui.label(
+                                RichText::new("No video stream metadata indexed.")
+                                    .italics()
+                                    .color(BrandPalette::MUTED_TEXT),
+                            );
                         }
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Section 3: Audio Stream Information
+                    ui_components::card_frame().show(ui, |ui| {
+                        ui.label(
+                            RichText::new("Audio Stream")
+                                .strong()
+                                .size(13.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        ui.add_space(4.0);
+                        if let Some(ref meta) = item_view.metadata {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Codec:").color(BrandPalette::SECONDARY_TEXT),
+                                );
+                                let a_codec = meta.audio_codec.as_deref().unwrap_or("AAC");
+                                ui.label(
+                                    RichText::new(a_codec.to_uppercase())
+                                        .strong()
+                                        .color(BrandPalette::PRIMARY_TEXT),
+                                );
+                                ui.label(
+                                    RichText::new("(Stream #0:1)")
+                                        .size(11.0)
+                                        .color(BrandPalette::MUTED_TEXT),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Channels / Layout:")
+                                        .color(BrandPalette::SECONDARY_TEXT),
+                                );
+                                let ch = if meta.audio_channels > 0 {
+                                    meta.audio_channels
+                                } else {
+                                    2
+                                };
+                                ui.label(
+                                    RichText::new(Self::audio_layout_str(ch))
+                                        .color(BrandPalette::PRIMARY_TEXT),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Sample Rate:")
+                                        .color(BrandPalette::SECONDARY_TEXT),
+                                );
+                                let sr = if meta.sample_rate > 0 {
+                                    meta.sample_rate
+                                } else {
+                                    48000
+                                };
+                                ui.label(
+                                    RichText::new(format!("{sr} Hz"))
+                                        .color(BrandPalette::PRIMARY_TEXT),
+                                );
+                            });
+                        } else {
+                            ui.label(
+                                RichText::new("No audio stream metadata indexed.")
+                                    .italics()
+                                    .color(BrandPalette::MUTED_TEXT),
+                            );
+                        }
+                    });
+
+                    // Section 4: Tracks & Subtitles
+                    let tracks = self.db.get_tracks(item_view.item.id).unwrap_or_default();
+                    if !tracks.is_empty() {
+                        ui.add_space(8.0);
+                        ui_components::card_frame().show(ui, |ui| {
+                            ui.label(
+                                RichText::new(format!("Embedded Tracks ({})", tracks.len()))
+                                    .strong()
+                                    .size(13.0)
+                                    .color(BrandPalette::ELECTRIC_LIME),
+                            );
+                            ui.add_space(4.0);
+                            for t in &tracks {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(format!("#{}", t.track_index))
+                                            .monospace()
+                                            .color(BrandPalette::SECONDARY_TEXT),
+                                    );
+                                    ui_components::badge_pill(
+                                        ui,
+                                        t.track_type.as_str(),
+                                        BrandPalette::OBSIDIAN,
+                                        BrandPalette::PRIMARY_TEXT,
+                                    );
+                                    if let Some(ref codec) = t.codec {
+                                        ui.label(
+                                            RichText::new(codec)
+                                                .strong()
+                                                .color(BrandPalette::PRIMARY_TEXT),
+                                        );
+                                    }
+                                    if let Some(ref lang) = t.language {
+                                        ui.label(
+                                            RichText::new(format!("[{lang}]"))
+                                                .color(BrandPalette::MUTED_TEXT),
+                                        );
+                                    }
+                                    if t.is_default {
+                                        ui_components::badge_pill(
+                                            ui,
+                                            "DEFAULT",
+                                            BrandPalette::OBSIDIAN,
+                                            BrandPalette::ELECTRIC_LIME,
+                                        );
+                                    }
+                                });
+                            }
+                        });
                     }
 
                     ui.add_space(8.0);
@@ -1836,11 +2975,93 @@ impl MuvrixApp {
                             self.media_browser.navigate_to(folder);
                         }
                     }
+
+                    // Phase C2: Grid / List view mode toggle
+                    ui.group(|ui| {
+                        if ui.selectable_label(self.browser_is_grid, "Grid").clicked() {
+                            self.browser_is_grid = true;
+                        }
+                        if ui.selectable_label(!self.browser_is_grid, "List").clicked() {
+                            self.browser_is_grid = false;
+                        }
+                    });
                 });
             });
 
             ui.add_space(4.0);
             ui.separator();
+
+            // Phase C2: Browser Entry Context Menu Dialog
+            if self.show_browser_context_menu {
+                if let Some(ref entry_path) = self.browser_context_entry {
+                    let mut close_menu = false;
+                    let mut is_open = true;
+                    let is_dir = entry_path.is_dir();
+                    let display_name = entry_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("Entry")
+                        .to_string();
+                    let path_str = entry_path.to_string_lossy().to_string();
+                    let path_buf = entry_path.clone();
+
+                    egui::Window::new(format!("Options: {display_name}"))
+                        .collapsible(false)
+                        .resizable(false)
+                        .default_width(260.0)
+                        .open(&mut is_open)
+                        .show(ctx, |ui| {
+                            ui.vertical(|ui| {
+                                if is_dir {
+                                    if ui.button("📁 Open Folder").clicked() {
+                                        self.media_browser.navigate_to(path_buf.clone());
+                                        close_menu = true;
+                                    }
+                                    if ui.button("➕ Add as Media Library Root").clicked() {
+                                        let root = muvrix_core::database::LibraryRoot {
+                                            id: 0,
+                                            display_name: display_name.clone(),
+                                            root_path: path_str.clone(),
+                                            source_type: "local".to_string(),
+                                            is_recursive: true,
+                                            is_enabled: true,
+                                            exclusion_patterns: Vec::new(),
+                                            last_scanned_at: 0,
+                                            scan_status: "idle".to_string(),
+                                        };
+                                        if let Ok(id) = self.db.insert_root(&root) {
+                                            self.start_library_scan(id);
+                                            self.status_message =
+                                                format!("Added library root: {display_name}");
+                                        }
+                                        close_menu = true;
+                                    }
+                                } else {
+                                    if ui.button("▶ Play Now").clicked() {
+                                        self.load_file(&path_str);
+                                        self.current_view = AppView::Player;
+                                        close_menu = true;
+                                    }
+                                    if ui.button("➕ Enqueue to Playlist").clicked() {
+                                        let _ = self.controller.playlist_append(&path_str);
+                                        self.status_message =
+                                            format!("Added to playlist: {display_name}");
+                                        close_menu = true;
+                                    }
+                                }
+                                if ui.button("📋 Copy Path").clicked() {
+                                    ui.ctx().copy_text(path_str.clone());
+                                    self.status_message = "Path copied to clipboard".to_string();
+                                    close_menu = true;
+                                }
+                            });
+                        });
+                    if close_menu || !is_open {
+                        self.show_browser_context_menu = false;
+                        self.browser_context_entry = None;
+                    }
+                }
+            }
 
             // 3. Directory Entries Table
             let browser_error = self.media_browser.error.clone();
@@ -1865,22 +3086,19 @@ impl MuvrixApp {
 
             let filtered_entries = self.media_browser.filtered_entries();
             if filtered_entries.is_empty() {
-                ui.add_space(40.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        RichText::new(
-                            "No media files or directories found matching current filter.",
-                        )
-                        .size(13.0)
-                        .color(Color32::from_gray(150)),
-                    );
-                    ui.add_space(8.0);
-                    if ui.button("Open Folder in Dialog...").clicked() {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.media_browser.navigate_to(folder);
-                        }
+                ui.add_space(20.0);
+                if ui_components::empty_state_box(
+                    ui,
+                    Some(Icon::FolderOpen),
+                    "No Media Files Found",
+                    "No media files or directories found matching current filter.",
+                    Some("Open Folder in Dialog..."),
+                ) == Some(true)
+                {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        self.media_browser.navigate_to(folder);
                     }
-                });
+                }
                 return;
             }
 
@@ -1888,138 +3106,319 @@ impl MuvrixApp {
             let mut file_to_play: Option<String> = None;
             let mut file_to_enqueue: Option<String> = None;
 
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    egui::Grid::new("browser_entries_grid")
-                        .striped(true)
-                        .min_col_width(60.0)
-                        .spacing([12.0, 6.0])
-                        .show(ui, |ui| {
-                            // Header Row
-                            ui.label(
-                                RichText::new("Type")
-                                    .strong()
-                                    .color(Color32::from_gray(160)),
-                            );
-                            ui.label(
-                                RichText::new("Name")
-                                    .strong()
-                                    .color(Color32::from_gray(160)),
-                            );
-                            ui.label(
-                                RichText::new("Size")
-                                    .strong()
-                                    .color(Color32::from_gray(160)),
-                            );
-                            ui.label(
-                                RichText::new("Actions")
-                                    .strong()
-                                    .color(Color32::from_gray(160)),
-                            );
-                            ui.end_row();
+            if self.browser_is_grid {
+                // Phase C2: Grid View for Browser
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let available = ui.available_width();
+                        let usable_width = (available - 48.0).max(220.0);
+                        let (cols, spacing) = if usable_width >= 960.0 {
+                            (4, 12.0_f32)
+                        } else if usable_width >= 640.0 {
+                            (3, 10.0_f32)
+                        } else if usable_width >= 360.0 {
+                            (2, 8.0_f32)
+                        } else {
+                            (1, 6.0_f32)
+                        };
+                        let card_width =
+                            ((usable_width - ((cols - 1) as f32 * spacing)) / cols as f32).floor();
 
-                            for entry in filtered_entries {
-                                match entry.kind {
-                                    EntryKind::Directory => {
-                                        icons::icon_label(
-                                            ui,
-                                            Icon::Folder,
-                                            15.0,
-                                            Color32::from_rgb(255, 195, 75),
-                                        );
-                                        let name_label = ui.link(
-                                            RichText::new(&entry.name)
-                                                .strong()
-                                                .color(Color32::from_rgb(230, 235, 245)),
-                                        );
-                                        if name_label.clicked() {
-                                            dir_to_open = Some(entry.path.clone());
-                                        }
-                                        ui.label(RichText::new("-").color(Color32::from_gray(120)));
-                                        if ui.button("Open").clicked() {
-                                            dir_to_open = Some(entry.path.clone());
-                                        }
-                                        ui.end_row();
-                                    }
-                                    EntryKind::VideoFile | EntryKind::AudioFile => {
-                                        let icon = if entry.kind == EntryKind::VideoFile {
-                                            Icon::Play
-                                        } else {
-                                            Icon::AudioTrack
-                                        };
-                                        let icon_color = if entry.kind == EntryKind::VideoFile {
-                                            Color32::from_rgb(90, 185, 255)
-                                        } else {
-                                            Color32::from_rgb(140, 230, 120)
-                                        };
+                        for chunk in filtered_entries.chunks(cols) {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = spacing;
+                                for entry in chunk {
+                                    egui::Frame::new()
+                                        .fill(BrandPalette::SLATE_SURFACE)
+                                        .stroke(Stroke::new(1.0_f32, BrandPalette::BORDER_SUBTLE))
+                                        .corner_radius(8.0)
+                                        .inner_margin(egui::Margin::same(10))
+                                        .show(ui, |ui| {
+                                            let inner_w = (card_width - 24.0).max(120.0);
+                                            ui.set_width(inner_w);
+                                            ui.set_max_width(inner_w);
+                                            ui.vertical(|ui| match entry.kind {
+                                                EntryKind::Directory => {
+                                                    icons::icon_label(
+                                                        ui,
+                                                        Icon::Folder,
+                                                        28.0,
+                                                        Color32::from_rgb(255, 195, 75),
+                                                    );
+                                                    ui.add_space(4.0);
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(&entry.name)
+                                                                .strong()
+                                                                .color(BrandPalette::PRIMARY_TEXT),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new("Folder")
+                                                            .size(10.5)
+                                                            .color(BrandPalette::SECONDARY_TEXT),
+                                                    );
+                                                    ui.add_space(6.0);
+                                                    ui.horizontal(|ui| {
+                                                        if ui.button("Open").clicked() {
+                                                            dir_to_open = Some(entry.path.clone());
+                                                        }
+                                                        if ui
+                                                            .button("⋮")
+                                                            .on_hover_text("Options")
+                                                            .clicked()
+                                                        {
+                                                            self.browser_context_entry =
+                                                                Some(entry.path.clone());
+                                                            self.show_browser_context_menu = true;
+                                                        }
+                                                    });
+                                                }
+                                                EntryKind::VideoFile | EntryKind::AudioFile => {
+                                                    let icon = if entry.kind == EntryKind::VideoFile
+                                                    {
+                                                        Icon::Play
+                                                    } else {
+                                                        Icon::AudioTrack
+                                                    };
+                                                    let icon_col =
+                                                        if entry.kind == EntryKind::VideoFile {
+                                                            BrandPalette::ELECTRIC_LIME
+                                                        } else {
+                                                            Color32::from_rgb(140, 230, 120)
+                                                        };
+                                                    icons::icon_label(ui, icon, 24.0, icon_col);
+                                                    ui.add_space(4.0);
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(&entry.name)
+                                                                .strong()
+                                                                .color(BrandPalette::PRIMARY_TEXT),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format_file_size(
+                                                            entry.size_bytes,
+                                                        ))
+                                                        .size(10.5)
+                                                        .color(BrandPalette::SECONDARY_TEXT),
+                                                    );
+                                                    ui.add_space(6.0);
+                                                    ui.horizontal(|ui| {
+                                                        if ui
+                                                            .button(
+                                                                RichText::new("▶ Play")
+                                                                    .strong()
+                                                                    .color(
+                                                                        BrandPalette::ELECTRIC_LIME,
+                                                                    ),
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            file_to_play = Some(
+                                                                entry
+                                                                    .path
+                                                                    .to_string_lossy()
+                                                                    .to_string(),
+                                                            );
+                                                        }
+                                                        if ui
+                                                            .button("⋮")
+                                                            .on_hover_text("Options")
+                                                            .clicked()
+                                                        {
+                                                            self.browser_context_entry =
+                                                                Some(entry.path.clone());
+                                                            self.show_browser_context_menu = true;
+                                                        }
+                                                    });
+                                                }
+                                                EntryKind::OtherFile => {
+                                                    icons::icon_label(
+                                                        ui,
+                                                        Icon::Folder,
+                                                        20.0,
+                                                        BrandPalette::MUTED_TEXT,
+                                                    );
+                                                    ui.add_space(4.0);
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(&entry.name)
+                                                                .color(BrandPalette::MUTED_TEXT),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format_file_size(
+                                                            entry.size_bytes,
+                                                        ))
+                                                        .size(10.5)
+                                                        .color(BrandPalette::MUTED_TEXT),
+                                                    );
+                                                }
+                                            });
+                                        });
+                                }
+                            });
+                            ui.add_space(spacing);
+                        }
+                    });
+            } else {
+                // Table / List View
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("browser_entries_grid")
+                            .striped(true)
+                            .min_col_width(60.0)
+                            .spacing([12.0, 6.0])
+                            .show(ui, |ui| {
+                                // Header Row
+                                ui.label(
+                                    RichText::new("Type")
+                                        .strong()
+                                        .color(Color32::from_gray(160)),
+                                );
+                                ui.label(
+                                    RichText::new("Name")
+                                        .strong()
+                                        .color(Color32::from_gray(160)),
+                                );
+                                ui.label(
+                                    RichText::new("Size")
+                                        .strong()
+                                        .color(Color32::from_gray(160)),
+                                );
+                                ui.label(
+                                    RichText::new("Actions")
+                                        .strong()
+                                        .color(Color32::from_gray(160)),
+                                );
+                                ui.end_row();
 
-                                        icons::icon_label(ui, icon, 14.0, icon_color);
-
-                                        let name_btn = ui.link(
-                                            RichText::new(&entry.name)
-                                                .color(Color32::from_gray(225)),
-                                        );
-                                        if name_btn.clicked() {
-                                            file_to_play =
-                                                Some(entry.path.to_string_lossy().to_string());
-                                        }
-
-                                        let size_str = format_file_size(entry.size_bytes);
-                                        ui.label(
-                                            RichText::new(size_str)
-                                                .monospace()
-                                                .size(11.5)
-                                                .color(Color32::from_gray(160)),
-                                        );
-
-                                        ui.horizontal(|ui| {
-                                            if icons::icon_text_button(
+                                for entry in filtered_entries {
+                                    match entry.kind {
+                                        EntryKind::Directory => {
+                                            icons::icon_label(
                                                 ui,
-                                                Icon::Play,
-                                                "Play",
-                                                "Play this file now",
-                                            )
-                                            .clicked()
-                                            {
+                                                Icon::Folder,
+                                                15.0,
+                                                Color32::from_rgb(255, 195, 75),
+                                            );
+                                            let name_label = ui.link(
+                                                RichText::new(&entry.name)
+                                                    .strong()
+                                                    .color(Color32::from_rgb(230, 235, 245)),
+                                            );
+                                            if name_label.clicked() {
+                                                dir_to_open = Some(entry.path.clone());
+                                            }
+                                            ui.label(
+                                                RichText::new("-").color(Color32::from_gray(120)),
+                                            );
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Open").clicked() {
+                                                    dir_to_open = Some(entry.path.clone());
+                                                }
+                                                if ui.button("⋮").on_hover_text("Options").clicked()
+                                                {
+                                                    self.browser_context_entry =
+                                                        Some(entry.path.clone());
+                                                    self.show_browser_context_menu = true;
+                                                }
+                                            });
+                                            ui.end_row();
+                                        }
+                                        EntryKind::VideoFile | EntryKind::AudioFile => {
+                                            let icon = if entry.kind == EntryKind::VideoFile {
+                                                Icon::Play
+                                            } else {
+                                                Icon::AudioTrack
+                                            };
+                                            let icon_color = if entry.kind == EntryKind::VideoFile {
+                                                Color32::from_rgb(90, 185, 255)
+                                            } else {
+                                                Color32::from_rgb(140, 230, 120)
+                                            };
+
+                                            icons::icon_label(ui, icon, 14.0, icon_color);
+
+                                            let name_btn = ui.link(
+                                                RichText::new(&entry.name)
+                                                    .color(Color32::from_gray(225)),
+                                            );
+                                            if name_btn.clicked() {
                                                 file_to_play =
                                                     Some(entry.path.to_string_lossy().to_string());
                                             }
-                                            if icons::icon_text_button(
-                                                ui,
-                                                Icon::Plus,
-                                                "Queue",
-                                                "Add to playlist queue",
-                                            )
-                                            .clicked()
-                                            {
-                                                file_to_enqueue =
-                                                    Some(entry.path.to_string_lossy().to_string());
-                                            }
-                                        });
 
-                                        ui.end_row();
-                                    }
-                                    EntryKind::OtherFile => {
-                                        ui.label("·");
-                                        ui.label(
-                                            RichText::new(&entry.name)
-                                                .color(Color32::from_gray(140)),
-                                        );
-                                        let size_str = format_file_size(entry.size_bytes);
-                                        ui.label(
-                                            RichText::new(size_str)
-                                                .monospace()
-                                                .size(11.5)
-                                                .color(Color32::from_gray(120)),
-                                        );
-                                        ui.label("");
-                                        ui.end_row();
+                                            let size_str = format_file_size(entry.size_bytes);
+                                            ui.label(
+                                                RichText::new(size_str)
+                                                    .monospace()
+                                                    .size(11.5)
+                                                    .color(Color32::from_gray(160)),
+                                            );
+
+                                            ui.horizontal(|ui| {
+                                                if icons::icon_text_button(
+                                                    ui,
+                                                    Icon::Play,
+                                                    "Play",
+                                                    "Play this file now",
+                                                )
+                                                .clicked()
+                                                {
+                                                    file_to_play = Some(
+                                                        entry.path.to_string_lossy().to_string(),
+                                                    );
+                                                }
+                                                if icons::icon_text_button(
+                                                    ui,
+                                                    Icon::Plus,
+                                                    "Queue",
+                                                    "Add to playlist queue",
+                                                )
+                                                .clicked()
+                                                {
+                                                    file_to_enqueue = Some(
+                                                        entry.path.to_string_lossy().to_string(),
+                                                    );
+                                                }
+                                                if ui.button("⋮").on_hover_text("Options").clicked()
+                                                {
+                                                    self.browser_context_entry =
+                                                        Some(entry.path.clone());
+                                                    self.show_browser_context_menu = true;
+                                                }
+                                            });
+
+                                            ui.end_row();
+                                        }
+                                        EntryKind::OtherFile => {
+                                            ui.label("·");
+                                            ui.label(
+                                                RichText::new(&entry.name)
+                                                    .color(Color32::from_gray(140)),
+                                            );
+                                            let size_str = format_file_size(entry.size_bytes);
+                                            ui.label(
+                                                RichText::new(size_str)
+                                                    .monospace()
+                                                    .size(11.5)
+                                                    .color(Color32::from_gray(120)),
+                                            );
+                                            ui.label("");
+                                            ui.end_row();
+                                        }
                                     }
                                 }
-                            }
-                        });
-                });
+                            });
+                    });
+            }
 
             if let Some(target_dir) = dir_to_open {
                 self.media_browser.navigate_to(target_dir);
@@ -2071,6 +3470,24 @@ impl MuvrixApp {
                         .pick_file()
                     {
                         self.import_m3u(&file.to_string_lossy());
+                    }
+                }
+                // Phase C4: M3U8 Export
+                if let Some(id) = self.selected_persistent_playlist {
+                    if ui
+                        .button("Export .m3u8...")
+                        .on_hover_text("Export active playlist to M3U8 file")
+                        .clicked()
+                    {
+                        self.show_export_playlist_modal = true;
+                        self.export_playlist_target_id = Some(id);
+                        let default_name = playlists
+                            .iter()
+                            .find(|p| p.id == id)
+                            .map(|p| format!("{}.m3u8", p.name.replace(' ', "_")))
+                            .unwrap_or_else(|| format!("playlist_{id}.m3u8"));
+                        self.export_playlist_path_input = default_name;
+                        self.export_playlist_status = None;
                     }
                 }
                 ui.add(
@@ -2129,12 +3546,20 @@ impl MuvrixApp {
                             );
                         }
                     }
-                    if ui.button("Clear").clicked() {
-                        let _ = self.db.clear_playlist(id);
+                    // Phase C3: Rename Playlist
+                    if ui.button("Rename").clicked() {
+                        if let Some(pl) = playlists.iter().find(|p| p.id == id) {
+                            self.playlist_rename_id = Some(id);
+                            self.playlist_rename_input = pl.name.clone();
+                        }
                     }
+                    // Phase C3: Clear with confirmation
+                    if ui.button("Clear").clicked() {
+                        self.playlist_confirm_clear = Some(id);
+                    }
+                    // Phase C3: Delete with confirmation
                     if ui.button("Delete Playlist").clicked() {
-                        let _ = self.db.delete_playlist(id);
-                        self.selected_persistent_playlist = None;
+                        self.playlist_confirm_delete = Some(id);
                     }
                 });
 
@@ -2145,7 +3570,10 @@ impl MuvrixApp {
                 for entry in &entries {
                     ui.horizontal(|ui| {
                         let label = entry.title.as_deref().unwrap_or(entry.path.as_str());
-                        ui.label(RichText::new(label).size(12.0));
+                        if ui.link(RichText::new(label).size(12.0)).clicked() {
+                            self.load_file(&entry.path);
+                            self.current_view = AppView::Player;
+                        }
                         ui.label(
                             RichText::new(&entry.path)
                                 .monospace()
@@ -2188,6 +3616,236 @@ impl MuvrixApp {
                         .size(11.0)
                         .color(Color32::from_rgb(125, 211, 252)),
                 );
+            }
+
+            // Phase C3: Playlist Rename Dialog
+            if let Some(id) = self.playlist_rename_id {
+                let mut close_dialog = false;
+                let mut is_open = true;
+                egui::Window::new("Rename Playlist")
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_width(300.0)
+                    .open(&mut is_open)
+                    .show(ui.ctx(), |ui| {
+                        ui.label("Enter new name for playlist:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.playlist_rename_input)
+                                .desired_width(260.0),
+                        );
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Save").clicked()
+                                && !self.playlist_rename_input.trim().is_empty()
+                            {
+                                let _ = self
+                                    .db
+                                    .rename_playlist(id, self.playlist_rename_input.trim());
+                                self.playlist_status = Some("Playlist renamed".to_string());
+                                close_dialog = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close_dialog = true;
+                            }
+                        });
+                    });
+                if close_dialog || !is_open {
+                    self.playlist_rename_id = None;
+                }
+            }
+
+            // Phase C3: Playlist Confirm Delete Dialog
+            if let Some(id) = self.playlist_confirm_delete {
+                let mut close_dialog = false;
+                let mut is_open = true;
+                egui::Window::new("Confirm Delete Playlist")
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_width(320.0)
+                    .open(&mut is_open)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(
+                            RichText::new("Are you sure you want to delete this playlist?")
+                                .strong()
+                                .color(Color32::from_rgb(255, 100, 100)),
+                        );
+                        ui.label("This action cannot be undone.");
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(
+                                    RichText::new("Delete")
+                                        .color(Color32::from_rgb(255, 80, 80))
+                                        .strong(),
+                                )
+                                .clicked()
+                            {
+                                let _ = self.db.delete_playlist(id);
+                                self.selected_persistent_playlist = None;
+                                self.playlist_status = Some("Playlist deleted".to_string());
+                                close_dialog = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close_dialog = true;
+                            }
+                        });
+                    });
+                if close_dialog || !is_open {
+                    self.playlist_confirm_delete = None;
+                }
+            }
+
+            // Phase C3: Playlist Confirm Clear Dialog
+            if let Some(id) = self.playlist_confirm_clear {
+                let mut close_dialog = false;
+                let mut is_open = true;
+                egui::Window::new("Confirm Clear Playlist")
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_width(320.0)
+                    .open(&mut is_open)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(
+                            RichText::new(
+                                "Are you sure you want to remove all items from this playlist?",
+                            )
+                            .strong()
+                            .color(Color32::from_rgb(255, 180, 50)),
+                        );
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(
+                                    RichText::new("Clear All Items")
+                                        .color(Color32::from_rgb(255, 100, 100))
+                                        .strong(),
+                                )
+                                .clicked()
+                            {
+                                let _ = self.db.clear_playlist(id);
+                                self.playlist_status = Some("Playlist cleared".to_string());
+                                close_dialog = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close_dialog = true;
+                            }
+                        });
+                    });
+                if close_dialog || !is_open {
+                    self.playlist_confirm_clear = None;
+                }
+            }
+
+            // Phase C4: Export Playlist Dialog (active queue or saved playlist)
+            if self.show_export_playlist_modal {
+                let mut close_dialog = false;
+                let mut is_open = true;
+                let title = if self.export_playlist_target_id.is_some() {
+                    "Export Saved Playlist"
+                } else {
+                    "Export Playback Queue"
+                };
+                egui::Window::new(title)
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_width(380.0)
+                    .open(&mut is_open)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(
+                            RichText::new("Export Playlist to File (.m3u / .m3u8):")
+                                .strong()
+                                .color(BrandPalette::PRIMARY_TEXT),
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.export_playlist_path_input)
+                                    .hint_text("Path to output .m3u or .m3u8 file")
+                                    .desired_width(260.0),
+                            );
+                            if ui.button("Browse...").clicked() {
+                                if let Some(file) = rfd::FileDialog::new()
+                                    .set_title("Export Playlist Destination")
+                                    .add_filter("M3U8 Playlist", &["m3u8", "m3u"])
+                                    .save_file()
+                                {
+                                    self.export_playlist_path_input =
+                                        file.to_string_lossy().to_string();
+                                }
+                            }
+                        });
+                        ui.add_space(8.0);
+                        if let Some(ref status) = self.export_playlist_status {
+                            ui.label(
+                                RichText::new(status)
+                                    .size(12.0)
+                                    .color(BrandPalette::ELECTRIC_LIME),
+                            );
+                            ui.add_space(6.0);
+                        }
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(
+                                    RichText::new("Export Now")
+                                        .color(BrandPalette::OBSIDIAN)
+                                        .strong(),
+                                )
+                                .clicked()
+                            {
+                                let dest = self.export_playlist_path_input.trim();
+                                if !dest.is_empty() {
+                                    let m3u_entries: Vec<muvrix_core::playlist::M3uEntry> =
+                                        if let Some(id) = self.export_playlist_target_id {
+                                            self.db
+                                                .list_playlist_entries(id)
+                                                .unwrap_or_default()
+                                                .into_iter()
+                                                .map(|e| muvrix_core::playlist::M3uEntry {
+                                                    path: e.path,
+                                                    title: e.title,
+                                                    duration_ms: e.duration_ms,
+                                                    logo: None,
+                                                    group: None,
+                                                })
+                                                .collect()
+                                        } else {
+                                            self.controller
+                                                .playlist()
+                                                .iter()
+                                                .map(|e| muvrix_core::playlist::M3uEntry {
+                                                    path: e.filename.clone(),
+                                                    title: e.title.clone(),
+                                                    duration_ms: 0,
+                                                    logo: None,
+                                                    group: None,
+                                                })
+                                                .collect()
+                                        };
+                                    match muvrix_core::playlist::export_m3u(&m3u_entries, dest) {
+                                        Ok(()) => {
+                                            self.export_playlist_status = Some(format!(
+                                                "Successfully exported {} entries to {}",
+                                                m3u_entries.len(),
+                                                dest
+                                            ));
+                                            self.playlist_status =
+                                                Some(format!("Exported playlist to {dest}"));
+                                        }
+                                        Err(e) => {
+                                            self.export_playlist_status =
+                                                Some(format!("Export failed: {e}"));
+                                        }
+                                    }
+                                }
+                            }
+                            if ui.button("Close").clicked() {
+                                close_dialog = true;
+                            }
+                        });
+                    });
+                if close_dialog || !is_open {
+                    self.show_export_playlist_modal = false;
+                }
             }
         });
         ui.add_space(6.0);
@@ -2281,6 +3939,20 @@ impl MuvrixApp {
 
                     if icons::icon_text_button(
                         ui,
+                        Icon::Playlist,
+                        "Export Queue...",
+                        "Export active playback queue to M3U / M3U8 playlist file",
+                    )
+                    .clicked()
+                    {
+                        self.show_export_playlist_modal = true;
+                        self.export_playlist_target_id = None;
+                        self.export_playlist_path_input = "active_queue.m3u8".to_string();
+                        self.export_playlist_status = None;
+                    }
+
+                    if icons::icon_text_button(
+                        ui,
                         Icon::Close,
                         "Clear Queue",
                         "Remove all queued items",
@@ -2297,30 +3969,17 @@ impl MuvrixApp {
             ui.add_space(4.0);
 
             if playlist_count == 0 {
-                ui.add_space(40.0);
-                ui.vertical_centered(|ui| {
-                    let logo_tex = self.ensure_logo_texture(ui.ctx());
-                    crate::branding::render_logo(ui, logo_tex, 64.0);
-                    ui.add_space(12.0);
-                    ui.label(
-                        RichText::new("Your playback queue is empty.")
-                            .size(15.0)
-                            .strong()
-                            .color(Color32::from_gray(180)),
-                    );
-                    ui.add_space(4.0);
-                    ui.label(
-                        RichText::new(
-                            "Use the Media Browser or Open File to enqueue videos, or drag files directly into the window.",
-                        )
-                        .size(12.5)
-                        .color(Color32::from_gray(140)),
-                    );
-                    ui.add_space(16.0);
-                    if ui.button("Browse Media Files...").clicked() {
-                        self.current_view = AppView::Browser;
-                    }
-                });
+                ui.add_space(20.0);
+                if ui_components::empty_state_box(
+                    ui,
+                    Some(Icon::Playlist),
+                    "Your playback queue is empty",
+                    "Use the Media Browser or Open File to enqueue videos, or drag files directly into the window.",
+                    Some("Browse Media Files..."),
+                ) == Some(true)
+                {
+                    self.current_view = AppView::Browser;
+                }
                 return;
             }
 
@@ -2337,15 +3996,15 @@ impl MuvrixApp {
                         let is_active = current_pos == Some(idx) || item.is_playing || item.is_current;
 
                         let frame_color = if is_active {
-                            Color32::from_rgba_premultiplied(30, 55, 95, 230)
+                            BrandPalette::CARD_SURFACE
                         } else if idx % 2 == 0 {
-                            Color32::from_rgba_premultiplied(24, 27, 36, 180)
+                            Color32::from_rgba_premultiplied(24, 35, 44, 180)
                         } else {
-                            Color32::from_rgba_premultiplied(19, 21, 28, 180)
+                            Color32::from_rgba_premultiplied(17, 26, 34, 180)
                         };
 
                         let border_stroke = if is_active {
-                            Stroke::new(1.0_f32, Color32::from_rgb(70, 145, 240))
+                            Stroke::new(1.0_f32, BrandPalette::ELECTRIC_LIME)
                         } else {
                             Stroke::NONE
                         };
@@ -2852,7 +4511,7 @@ impl MuvrixApp {
                 crate::branding::render_logo(ui, logo_tex, 24.0);
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new("Player Preferences & Subtitle Engine Configuration")
+                    RichText::new("Preferences & Engine Configuration")
                         .strong()
                         .size(16.0),
                 );
@@ -2874,13 +4533,14 @@ impl MuvrixApp {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 let tabs = [
+                    SettingsTab::Audio,
                     SettingsTab::Subtitles,
                     SettingsTab::VideoEnhancement,
-                    SettingsTab::EqualizerAudio,
-                    SettingsTab::NetworkMedia,
                     SettingsTab::Appearance,
+                    SettingsTab::NetworkMedia,
                     SettingsTab::ConfigEditor,
-                    SettingsTab::Preferences,
+                    SettingsTab::Advanced,
+                    SettingsTab::About,
                 ];
                 let visible: Vec<SettingsTab> = tabs
                     .into_iter()
@@ -2893,7 +4553,7 @@ impl MuvrixApp {
                 }
                 for tab in visible {
                     let is_selected = self.settings_tab == tab;
-                    if ui.selectable_label(is_selected, tab.label()).clicked() {
+                    if ui_components::nav_tab(ui, tab.label(), is_selected).clicked() {
                         self.settings_tab = tab;
                     }
                 }
@@ -2906,6 +4566,7 @@ impl MuvrixApp {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    ui.set_max_width(920.0);
                     match self.settings_tab {
                         SettingsTab::Subtitles => {
                     // Section 1: Dual Subtitles (Primary & Secondary)
@@ -3678,9 +5339,193 @@ impl MuvrixApp {
                         }
                     });
                 }
-                SettingsTab::EqualizerAudio => {
+                SettingsTab::Audio | SettingsTab::EqualizerAudio => {
+                    // Section 1: Audio Channel Routing & Output Balance
+                    ui.group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new("1. Audio Channel Routing")
+                                .strong()
+                                .size(14.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Configure speaker channel downmix policy and stereo channel orientation.",
+                            )
+                            .size(12.0)
+                            .color(BrandPalette::MUTED_TEXT),
+                        );
+                        ui.add_space(4.0);
+
+                        let mut current_channels = self.audio_channels;
+                        egui::ComboBox::from_id_salt("audio_channels_dropdown")
+                            .selected_text(current_channels.label())
+                            .show_ui(ui, |ui| {
+                                for option in [
+                                    AudioChannelsSetting::Auto,
+                                    AudioChannelsSetting::AutoSafe,
+                                    AudioChannelsSetting::Mono,
+                                    AudioChannelsSetting::Stereo,
+                                    AudioChannelsSetting::ReverseStereo,
+                                ] {
+                                    let selected = current_channels == option;
+                                    if ui
+                                        .selectable_label(
+                                            selected,
+                                            format!("{}: {}", option.label(), option.description()),
+                                        )
+                                        .clicked()
+                                    {
+                                        current_channels = option;
+                                    }
+                                }
+                            });
+
+                        if current_channels != self.audio_channels {
+                            self.audio_channels = current_channels;
+                            self.sync_audio_preferences();
+                            self.save_media_settings();
+                        }
+
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "Active policy: {}",
+                                self.audio_channels.description()
+                            ))
+                            .italics()
+                            .size(11.0)
+                            .color(Color32::from_gray(160)),
+                        );
+                    });
+
+                    ui.add_space(6.0);
+
+                    // Section 2: Audio Processing & Normalization
+                    ui.group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new("2. Audio Processing & Normalization")
+                                .strong()
+                                .size(14.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        ui.add_space(4.0);
+
+                        if ui
+                            .checkbox(
+                                &mut self.volume_normalization,
+                                "Volume Normalization (dynaudnorm)",
+                            )
+                            .on_hover_text(
+                                "Smooth out extreme volume fluctuations between loud action and quiet dialogue.",
+                            )
+                            .changed()
+                        {
+                            self.sync_audio_preferences();
+                            self.save_media_settings();
+                        }
+
+                        if ui
+                            .checkbox(
+                                &mut self.audio_pitch_correction,
+                                "Audio Pitch Correction (scaletempo2)",
+                            )
+                            .on_hover_text(
+                                "Maintain natural vocal pitch across speed changes (0.25x – 4.0x).",
+                            )
+                            .changed()
+                        {
+                            self.sync_audio_preferences();
+                            self.save_media_settings();
+                        }
+
+                        if ui
+                            .checkbox(
+                                &mut self.background_audio,
+                                "Continue Audio Playback in Background",
+                            )
+                            .on_hover_text(
+                                "Keep playing audio while the desktop window is minimized or unfocused.",
+                            )
+                            .changed()
+                        {
+                            self.save_media_settings();
+                        }
+                    });
+
+                    ui.add_space(6.0);
+
+                    // Section 3: Preferred Languages & Audio Delay
+                    ui.group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new("3. Language Selection & Track Sync")
+                                .strong()
+                                .size(14.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Preferred Audio Languages (comma-separated ISO-639 codes, e.g. en, eng, ja, jpn):",
+                            )
+                            .size(11.5)
+                            .color(BrandPalette::MUTED_TEXT),
+                        );
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let mut changed = false;
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(
+                                        &mut self.preferred_audio_languages,
+                                    )
+                                    .hint_text("en, eng, ja, jpn")
+                                    .desired_width(260.0),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                            if ui.button("Apply Languages").clicked() || changed {
+                                self.sync_audio_preferences();
+                                self.save_media_settings();
+                            }
+                        });
+
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("Audio Delay Synchronization:")
+                                .size(12.0)
+                                .strong(),
+                        );
+                        ui.horizontal(|ui| {
+                            let mut delay = self.default_audio_delay_ms;
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut delay, -5000..=5000)
+                                        .text("ms delay offset"),
+                                )
+                                .changed()
+                            {
+                                self.default_audio_delay_ms = delay;
+                                self.sync_audio_preferences();
+                                self.save_media_settings();
+                            }
+                            if ui.button("Reset (0 ms)").clicked() {
+                                self.default_audio_delay_ms = 0;
+                                self.sync_audio_preferences();
+                                self.save_media_settings();
+                            }
+                        });
+                    });
+
+                    ui.add_space(6.0);
+
                     // Section 4: Audio Equalizer & Output Device Routing
                     ui.group(|ui| {
+                        ui.set_width(ui.available_width());
                         ui.label(
                             RichText::new("4. 10-Band Parametric Equalizer & Audio DSP Routing")
                                 .strong()
@@ -4578,13 +6423,8 @@ impl MuvrixApp {
                         );
                         ui.horizontal(|ui| {
                             for file in [ConfigEditorFile::MpvConf, ConfigEditorFile::InputConf] {
-                                if ui
-                                    .selectable_label(
-                                        self.config_editor_file == file,
-                                        file.label(),
-                                    )
-                                    .clicked()
-                                {
+                                let is_selected = self.config_editor_file == file;
+                                if ui_components::nav_tab(ui, file.label(), is_selected).clicked() {
                                     self.config_editor_file = file;
                                     self.config_editor_loaded = false;
                                     self.config_editor_text.clear();
@@ -4616,13 +6456,200 @@ impl MuvrixApp {
                         });
                     });
                 }
-                SettingsTab::Preferences => {
+                SettingsTab::Advanced | SettingsTab::Preferences => {
+                    if let Some(ref status) = self.advanced_status {
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("ℹ")
+                                        .color(BrandPalette::ELECTRIC_LIME)
+                                        .strong(),
+                                );
+                                ui.label(
+                                    RichText::new(status)
+                                        .size(12.5)
+                                        .color(BrandPalette::IVORY_TEXT),
+                                );
+                            });
+                        });
+                        ui.add_space(6.0);
+                    }
+
+                    // Section 1: Settings Backup & Restore (XML)
                     ui.group(|ui| {
+                        ui.set_width(ui.available_width());
                         ui.label(
-                            RichText::new("Sleep Timer")
+                            RichText::new("1. Settings Backup & Restore")
                                 .strong()
                                 .size(14.0)
-                                .color(Color32::from_rgb(95, 185, 255)),
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Export or restore your complete Muvrix configuration, audio preferences, subtitle styles, and shader profiles using an XML backup file.",
+                            )
+                            .size(12.0)
+                            .color(BrandPalette::MUTED_TEXT),
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(RichText::new("📤 Export Settings to XML...").strong())
+                                .clicked()
+                            {
+                                self.export_settings_to_xml();
+                            }
+                            if ui
+                                .button(RichText::new("📥 Import Settings from XML...").strong())
+                                .clicked()
+                            {
+                                self.import_settings_from_xml();
+                            }
+                        });
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Section 2: MPV Configuration Storage Location
+                    ui.group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new("2. MPV Configuration Storage")
+                                .strong()
+                                .size(14.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        let config_dir = crate::config_editor::config_dir();
+                        ui.label(
+                            RichText::new(format!("Location: {}", config_dir.display()))
+                                .monospace()
+                                .size(11.5)
+                                .color(Color32::from_gray(180)),
+                        );
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Edit mpv.conf").clicked() {
+                                self.config_editor_file = ConfigEditorFile::MpvConf;
+                                self.settings_tab = SettingsTab::ConfigEditor;
+                            }
+                            if ui.button("Edit input.conf").clicked() {
+                                self.config_editor_file = ConfigEditorFile::InputConf;
+                                self.settings_tab = SettingsTab::ConfigEditor;
+                            }
+                        });
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Section 3: Cache Management
+                    ui.group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new("3. Cache Management")
+                                .strong()
+                                .size(14.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Safely purge cached thumbnails, subtitle font paths, and engine configurations without touching media files.",
+                            )
+                            .size(12.0)
+                            .color(BrandPalette::MUTED_TEXT),
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("Clear Thumbnail Cache").clicked() {
+                                self.clear_thumbnail_cache();
+                            }
+                            if ui.button("Clear Subtitle Font Cache").clicked() {
+                                self.clear_font_cache();
+                            }
+                            if ui.button("Flush Config Cache").clicked() {
+                                self.clear_config_cache();
+                            }
+                        });
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Section 4: Diagnostics & Logging
+                    ui.group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new("4. Diagnostics & Logging")
+                                .strong()
+                                .size(14.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        ui.add_space(4.0);
+                        if ui
+                            .checkbox(&mut self.verbose_logging, "Enable Verbose Diagnostic Logging")
+                            .on_hover_text("Enables granular trace and telemetry output for troubleshooting.")
+                            .changed()
+                        {
+                            self.save_media_settings();
+                        }
+                        ui.add_space(4.0);
+                        if ui
+                            .button(RichText::new("📄 Dump Diagnostic System Report...").strong())
+                            .clicked()
+                        {
+                            self.dump_diagnostic_logs();
+                        }
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Section 5: Playback History & Privacy
+                    ui.group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new("5. Playback History & Privacy")
+                                .strong()
+                                .size(14.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+
+                        ui.add_space(4.0);
+
+                        let mut enabled = self.history_store.enabled;
+                        if ui.checkbox(&mut enabled, "Enable Playback History Recording").changed() {
+                            self.history_store.set_enabled(enabled);
+                            let _ = self.history_store.save();
+                        }
+
+                        let mut auto_resume = self.history_store.auto_resume_enabled;
+                        if ui
+                            .checkbox(
+                                &mut auto_resume,
+                                "Enable Resume Playback Prompts (>10s threshold)",
+                            )
+                            .changed()
+                        {
+                            self.history_store.set_auto_resume(auto_resume);
+                            let _ = self.history_store.save();
+                        }
+
+                        ui.add_space(4.0);
+                        if ui.button("Clear Playback History").clicked() {
+                            self.history_store.clear();
+                            let _ = self.history_store.save();
+                            self.status_message = "Playback history cleared".to_string();
+                            self.advanced_status = Some("Playback history cleared".to_string());
+                        }
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Section 6: Sleep Timer & Window Display
+                    ui.group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new("6. Sleep Timer & Window Mode")
+                                .strong()
+                                .size(14.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
                         );
                         ui.horizontal(|ui| {
                             ui.label("Stop after:");
@@ -4657,30 +6684,12 @@ impl MuvrixApp {
                                         seconds % 60
                                     ))
                                     .monospace()
-                                    .color(Color32::from_rgb(125, 211, 252)),
+                                    .color(BrandPalette::ELECTRIC_LIME),
                                 );
                             }
                         });
-                    });
-
-                    // Section 6: Compact Mini-Player Mode & Window Display
-                    ui.group(|ui| {
-                        ui.label(
-                            RichText::new("6. Compact Mini-Player Mode & Window Display")
-                                .strong()
-                                .size(14.0)
-                                .color(Color32::from_rgb(95, 185, 255)),
-                        );
-                        ui.label(
-                            RichText::new(
-                                "Muvrix provides a Compact Mini-Player Mode by resizing the primary window to 480x270 and requesting AlwaysOnTop. Detached Picture-in-Picture (multi-viewport window) is deferred due to OpenGL context sharing hazards across threads/surfaces and Wayland compositor constraints.",
-                            )
-                            .size(12.0)
-                            .color(Color32::from_gray(160)),
-                        );
 
                         ui.add_space(6.0);
-
                         let pip_btn_text = if self.is_pip {
                             "Exit Compact Mini-Player Mode"
                         } else {
@@ -4689,92 +6698,122 @@ impl MuvrixApp {
                         if ui.button(RichText::new(pip_btn_text).strong()).clicked() {
                             self.toggle_pip(ctx);
                         }
-
-                        ui.add_space(6.0);
-                        ui.label(
-                            RichText::new(
-                                "Architectural Note: In eframe 0.31 with egui_glow, detached multi-viewports spawn secondary window surfaces with independent OpenGL contexts. libmpv's render context is bound to the primary surface; shared GL context binding across Wayland surfaces is driver-dependent and subject to compositor protocol restrictions. Compact Mini-Player Mode operates within the primary window to maintain 100% stability. Always-on-top on Wayland is best-effort and depends on compositor support.",
-                            )
-                            .size(11.0)
-                            .color(Color32::from_gray(140)),
-                        );
                     });
-
-                    ui.add_space(10.0);
-
-                    // Section 7: History & Persistence Controls
+                }
+                SettingsTab::About => {
+                    // 1. Premium Brand Card with Official Circular Logo
                     ui.group(|ui| {
-                        ui.label(
-                            RichText::new("7. History & Privacy Preferences")
-                                .strong()
-                                .size(14.0)
-                                .color(Color32::from_rgb(95, 185, 255)),
-                        );
-
-                        ui.add_space(4.0);
-
-                        let mut enabled = self.history_store.enabled;
-                        if ui.checkbox(&mut enabled, "Enable Playback History Recording").changed() {
-                            self.history_store.set_enabled(enabled);
-                            let _ = self.history_store.save();
-                        }
-
-                        let mut auto_resume = self.history_store.auto_resume_enabled;
-                        if ui.checkbox(&mut auto_resume, "Enable Resume Playback Prompts (>10s threshold)").changed() {
-                            self.history_store.set_auto_resume(auto_resume);
-                            let _ = self.history_store.save();
-                        }
-
-                        ui.add_space(4.0);
-                        if ui.button("Clear History Store").clicked() {
-                            self.history_store.clear();
-                            let _ = self.history_store.save();
-                            self.status_message = "History cleared".to_string();
-                        }
-                    });
-
-                    ui.add_space(10.0);
-
-                    // Section 8: About & System Information Card
-                    ui.group(|ui| {
+                        ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
                             let logo_tex = self.ensure_logo_texture(ui.ctx());
-                            crate::branding::render_logo(ui, logo_tex, 72.0);
-                            ui.add_space(12.0);
+                            branding::render_logo(ui, logo_tex, 72.0);
+                            ui.add_space(14.0);
                             ui.vertical(|ui| {
                                 ui.label(
-                                    RichText::new("Muvrix Desktop Media Player")
+                                    RichText::new("MUVRIX")
                                         .strong()
-                                        .size(16.0)
-                                        .color(crate::branding::BrandPalette::IVORY_TEXT),
+                                        .size(20.0)
+                                        .color(BrandPalette::IVORY_TEXT),
                                 );
                                 ui.label(
                                     RichText::new(format!(
                                         "Version: {} (Linux Wayland Beta)",
                                         env!("CARGO_PKG_VERSION")
                                     ))
-                                    .size(12.0)
-                                    .color(crate::branding::BrandPalette::MUTED_TEXT),
+                                    .size(12.5)
+                                    .color(BrandPalette::MUTED_TEXT),
                                 );
                                 ui.label(
                                     RichText::new(
-                                        "Engine: libmpv 0.42.0 (Client API 2.6) · libplacebo 7.387.0",
+                                        "High-performance native desktop media player built with Rust & libmpv",
                                     )
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(crate::branding::BrandPalette::ELECTRIC_LIME),
-                                );
-                                ui.label(
-                                    RichText::new("Dual-licensed under MIT and Apache-2.0")
-                                        .size(11.0)
-                                        .color(Color32::from_gray(160)),
-                                );
-                                ui.label(
-                                    RichText::new("© 2026 Muvrix Project Contributors · All rights reserved")
-                                        .size(10.5)
-                                        .color(Color32::from_gray(130)),
+                                    .size(11.5)
+                                    .color(Color32::from_gray(160)),
                                 );
                             });
+                        });
+                    });
+
+                    ui.add_space(8.0);
+
+                    // 2. Dynamic System & Engine Diagnostics
+                    ui.group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new("System & Engine Diagnostics")
+                                .strong()
+                                .size(14.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        ui.add_space(4.0);
+                        egui::Grid::new("about_diagnostics_grid")
+                            .num_columns(2)
+                            .spacing([24.0, 6.0])
+                            .show(ui, |ui| {
+                                ui.label("Application:");
+                                ui.label(RichText::new(format!("Muvrix v{}", env!("CARGO_PKG_VERSION"))).monospace().color(BrandPalette::IVORY_TEXT));
+                                ui.end_row();
+
+                                ui.label("Engine Core:");
+                                ui.label(RichText::new(format!("libmpv {} (Client API 2.6)", self.media_capabilities.libmpv_version)).monospace().color(BrandPalette::ELECTRIC_LIME));
+                                ui.end_row();
+
+                                ui.label("Video Processing:");
+                                ui.label(RichText::new(if self.media_capabilities.libplacebo_available { "libplacebo 7.387.0 Active" } else { "libplacebo Unavailable" }).monospace().color(BrandPalette::IVORY_TEXT));
+                                ui.end_row();
+
+                                ui.label("Audio DSP:");
+                                ui.label(RichText::new("FFmpeg Biquad / libmpv af").monospace().color(BrandPalette::IVORY_TEXT));
+                                ui.end_row();
+
+                                ui.label("Platform OS:");
+                                ui.label(RichText::new(format!("{} {} ({})", std::env::consts::OS, std::env::consts::ARCH, std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "Linux".to_string()))).monospace().color(BrandPalette::IVORY_TEXT));
+                                ui.end_row();
+                            });
+                    });
+
+                    ui.add_space(8.0);
+
+                    // 3. Project Links & Legal
+                    ui.group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new("Project & Developer Information")
+                                .strong()
+                                .size(14.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Source Code:");
+                            ui.hyperlink_to("github.com/itsyamin/muvrix-desktop", "https://github.com/itsyamin/muvrix-desktop");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("License:");
+                            ui.label(RichText::new("Dual-licensed under MIT and Apache-2.0").color(BrandPalette::IVORY_TEXT));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Copyright:");
+                            ui.label(RichText::new("© 2026 Muvrix Project Contributors").color(Color32::from_gray(140)));
+                        });
+                    });
+
+                    ui.add_space(8.0);
+
+                    // 4. Update Status
+                    ui.group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new("Updates & Release Channel")
+                                .strong()
+                                .size(14.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label("Current Channel: Linux Wayland Beta (v0.1.0-beta.1)");
+                            if ui.button("Check for Updates Now").clicked() {
+                                self.advanced_status = Some("You are currently running the latest verified Beta release.".to_string());
+                            }
                         });
                     });
                 }

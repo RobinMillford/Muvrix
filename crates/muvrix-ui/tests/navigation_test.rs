@@ -11,7 +11,11 @@ use muvrix_ui::views::{AppView, SettingsTab};
 
 #[test]
 fn test_app_view_transitions() {
-    let mut current_view = AppView::Player;
+    let mut current_view = AppView::default();
+    assert_eq!(current_view, AppView::Home);
+
+    // Switch to player
+    current_view = AppView::Player;
     assert_eq!(current_view, AppView::Player);
 
     // Switch to browser
@@ -34,9 +38,9 @@ fn test_app_view_transitions() {
     current_view = AppView::Settings;
     assert_eq!(current_view, AppView::Settings);
 
-    // Switch back to player
-    current_view = AppView::Player;
-    assert_eq!(current_view, AppView::Player);
+    // Switch back to home
+    current_view = AppView::Home;
+    assert_eq!(current_view, AppView::Home);
 }
 
 #[test]
@@ -216,18 +220,27 @@ fn test_equalizer_settings_and_presets() {
 
 #[test]
 fn test_settings_tab_navigation() {
-    let mut current_tab = SettingsTab::Subtitles;
-    assert_eq!(current_tab.label(), "Subtitles & Engine");
+    let mut current_tab = SettingsTab::Audio;
+    assert_eq!(current_tab.label(), "Audio & DSP");
+
+    current_tab = SettingsTab::Subtitles;
+    assert_eq!(current_tab.label(), "Subtitles & Fonts");
 
     current_tab = SettingsTab::VideoEnhancement;
     assert_eq!(current_tab.label(), "Video & Shaders");
 
-    current_tab = SettingsTab::EqualizerAudio;
-    assert_eq!(current_tab.label(), "Audio & Equalizer");
+    current_tab = SettingsTab::Appearance;
+    assert_eq!(current_tab.label(), "Appearance");
 
     current_tab = SettingsTab::NetworkMedia;
     assert_eq!(current_tab.label(), "Network Sources");
 
-    current_tab = SettingsTab::Preferences;
-    assert_eq!(current_tab.label(), "Window & History");
+    current_tab = SettingsTab::ConfigEditor;
+    assert_eq!(current_tab.label(), "Config Editor");
+
+    current_tab = SettingsTab::Advanced;
+    assert_eq!(current_tab.label(), "Advanced & Backup");
+
+    current_tab = SettingsTab::About;
+    assert_eq!(current_tab.label(), "About Muvrix");
 }

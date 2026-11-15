@@ -512,6 +512,50 @@ pub fn primary_icon_button(
     }
 }
 
+/// Prominent Play/Pause button in signature Electric Lime with dark obsidian icon.
+pub fn electric_play_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    size: Vec2,
+    tooltip: &str,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (bg_fill, stroke, icon_color) = if response.is_pointer_button_down_on() {
+            (
+                Color32::from_rgb(170, 220, 85),
+                Stroke::new(1.0_f32, Color32::from_rgb(150, 200, 70)),
+                Color32::from_rgb(8, 13, 18),
+            )
+        } else if response.hovered() {
+            (
+                Color32::from_rgb(215, 255, 130),
+                Stroke::new(1.0_f32, Color32::from_rgb(230, 255, 160)),
+                Color32::from_rgb(8, 13, 18),
+            )
+        } else {
+            (
+                Color32::from_rgb(197, 243, 106),
+                Stroke::NONE,
+                Color32::from_rgb(8, 13, 18),
+            )
+        };
+
+        ui.painter()
+            .rect(rect, 8.0_f32, bg_fill, stroke, StrokeKind::Inside);
+
+        let icon_dim = (size.x.min(size.y) * 0.55).clamp(14.0, 22.0);
+        let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(icon_dim));
+        paint_icon(ui.painter(), icon_rect, icon, icon_color);
+    }
+
+    if !tooltip.is_empty() {
+        response.on_hover_text(tooltip)
+    } else {
+        response
+    }
+}
+
 /// A button containing a vector icon followed by text.
 pub fn icon_text_button(
     ui: &mut egui::Ui,

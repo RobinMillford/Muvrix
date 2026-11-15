@@ -51,8 +51,9 @@ docs/mpv-engine/
 docs/verification/
 docs/phase-*
 docs/audits/
-# Local engineering investigations, evidence and audit artifacts
 docs/engineering/
+docs/screenshots/
+PHASE_*.md
 
 # Local agent/editor state and scratch output
 .freebuff/

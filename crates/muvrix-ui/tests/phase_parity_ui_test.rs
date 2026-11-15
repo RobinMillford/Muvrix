@@ -28,6 +28,9 @@ fn settings_search_matches_sections_and_keywords() {
     assert!(SettingsTab::ConfigEditor.matches_search("mpv.conf"));
     assert!(SettingsTab::Subtitles.matches_search("shadow"));
     assert!(SettingsTab::Preferences.matches_search("sleep"));
+    assert!(SettingsTab::Audio.matches_search("normalization"));
+    assert!(SettingsTab::Advanced.matches_search("backup"));
+    assert!(SettingsTab::About.matches_search("libmpv"));
     assert!(!SettingsTab::NetworkMedia.matches_search("subtitle"));
     assert!(SettingsTab::NetworkMedia.matches_search(""));
 }

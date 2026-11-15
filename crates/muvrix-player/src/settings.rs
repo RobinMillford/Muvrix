@@ -15,6 +15,64 @@ fn default_volume() -> f64 {
     100.0
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_audio_boost_cap() -> i32 {
+    30
+}
+
+/// Audio channel routing mode for the playback engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioChannelsSetting {
+    #[default]
+    Auto,
+    AutoSafe,
+    Mono,
+    Stereo,
+    ReverseStereo,
+}
+
+impl AudioChannelsSetting {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::AutoSafe => "Auto Safe",
+            Self::Mono => "Mono",
+            Self::Stereo => "Stereo",
+            Self::ReverseStereo => "Reversed Stereo",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Auto => "Allow playback engine to determine appropriate channel configuration.",
+            Self::AutoSafe => "Use a safe automatic channel configuration avoiding exotic layouts.",
+            Self::Mono => "Downmix audio stream into a single mono channel.",
+            Self::Stereo => "Downmix audio stream into standard 2-channel stereo.",
+            Self::ReverseStereo => {
+                "Swap left and right audio channels for inverted speaker/headphone setups."
+            }
+        }
+    }
+
+    pub fn mpv_channels_option(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::AutoSafe => "auto-safe",
+            Self::Mono => "mono",
+            Self::Stereo => "stereo",
+            Self::ReverseStereo => "stereo",
+        }
+    }
+
+    pub fn needs_pan_filter(&self) -> bool {
+        matches!(self, Self::ReverseStereo)
+    }
+}
+
 /// Application appearance mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +115,22 @@ pub struct PersistedMediaSettings {
     pub theme_mode: ThemeMode,
     #[serde(default)]
     pub accent_color: AccentColor,
+    #[serde(default)]
+    pub audio_channels: AudioChannelsSetting,
+    #[serde(default)]
+    pub volume_normalization: bool,
+    #[serde(default = "default_true")]
+    pub audio_pitch_correction: bool,
+    #[serde(default)]
+    pub preferred_audio_languages: String,
+    #[serde(default)]
+    pub default_audio_delay_ms: i32,
+    #[serde(default = "default_audio_boost_cap")]
+    pub volume_boost_cap: i32,
+    #[serde(default = "default_true")]
+    pub background_audio: bool,
+    #[serde(default)]
+    pub verbose_logging: bool,
 }
 
 impl Default for PersistedMediaSettings {
@@ -72,6 +146,14 @@ impl Default for PersistedMediaSettings {
             subtitle_styling: SubtitleStyling::default(),
             theme_mode: ThemeMode::Obsidian,
             accent_color: AccentColor::Lime,
+            audio_channels: AudioChannelsSetting::default(),
+            volume_normalization: false,
+            audio_pitch_correction: true,
+            preferred_audio_languages: String::new(),
+            default_audio_delay_ms: 0,
+            volume_boost_cap: 30,
+            background_audio: true,
+            verbose_logging: false,
         }
     }
 }

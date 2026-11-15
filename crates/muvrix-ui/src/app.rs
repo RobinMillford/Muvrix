@@ -20,10 +20,10 @@ use muvrix_core::thumbnails::ThumbnailCache;
 use muvrix_player::equalizer::{AudioDeviceInfo, EqualizerManager, EqualizerSettings};
 use muvrix_player::shader::{Anime4KPreset, ShaderManager, ShaderQuality, VideoAdjustmentSettings};
 use muvrix_player::{
-    classify_source, plan_presentation, AbLoopState, AccentColor, DecodeObservation, DecodePath,
-    DecodePolicy, Event, MediaCapabilities, MpvHandle, MpvRenderContext, MpvStreamBridge,
-    MpvexCommand, PlaybackController, PlaybackState, PresentationState, RepeatMode, SeekMode,
-    SubtitleStyling, ThemeMode, TrackInfo, TrackType,
+    classify_source, plan_presentation, AbLoopState, AccentColor, AudioChannelsSetting,
+    DecodeObservation, DecodePath, DecodePolicy, Event, MediaCapabilities, MpvHandle,
+    MpvRenderContext, MpvStreamBridge, MpvexCommand, PlaybackController, PlaybackState,
+    PresentationState, RepeatMode, SeekMode, SubtitleStyling, ThemeMode, TrackInfo, TrackType,
 };
 
 use crate::branding::{self, BrandPalette};
@@ -35,6 +35,7 @@ use crate::os_integration::{
     should_inhibit, MediaAction, MediaSession, MediaSnapshot, SleepInhibitor,
 };
 use crate::render_engine::RenderEngine;
+use crate::ui_components;
 use crate::views::{AppView, SettingsTab};
 use crate::wake::{WakeBridge, WakeHandle};
 
@@ -179,7 +180,19 @@ pub struct MuvrixApp {
     pub(crate) active_styling: SubtitleStyling,
     pub(crate) theme_mode: ThemeMode,
     pub(crate) accent_color: AccentColor,
+    pub(crate) audio_channels: AudioChannelsSetting,
+    pub(crate) volume_normalization: bool,
+    pub(crate) audio_pitch_correction: bool,
+    pub(crate) preferred_audio_languages: String,
+    pub(crate) default_audio_delay_ms: i32,
+    pub(crate) background_audio: bool,
+    pub(crate) verbose_logging: bool,
+    pub(crate) advanced_status: Option<String>,
     pub(crate) ui_overlay_visible: bool,
+    pub(crate) osd_manually_hidden: bool,
+    pub(crate) last_mouse_activity: Instant,
+    pub(crate) last_mouse_pos: Option<Pos2>,
+    pub(crate) osd_autohide_delay: Duration,
     pub(crate) sleep_timer: SleepTimer,
     pub(crate) sleep_deadline: Option<Instant>,
     pub(crate) settings_search: String,
@@ -279,6 +292,43 @@ pub struct MuvrixApp {
     pub(crate) telemetry_path: Option<String>,
     pub(crate) last_telemetry: Instant,
     pub(crate) session_start: Instant,
+
+    // Phase C1: Library per-card context menu
+    pub(crate) library_context_item: Option<muvrix_core::database::LibraryItemView>,
+    pub(crate) show_library_context_menu: bool,
+
+    // Phase C2: Browser grid view + context menu
+    pub(crate) browser_is_grid: bool,
+    pub(crate) browser_context_entry: Option<std::path::PathBuf>,
+    pub(crate) show_browser_context_menu: bool,
+
+    // Phase C3: Playlist rename + confirmation dialogs
+    pub(crate) playlist_rename_id: Option<i64>,
+    pub(crate) playlist_rename_input: String,
+    pub(crate) playlist_confirm_delete: Option<i64>,
+    pub(crate) playlist_confirm_clear: Option<i64>,
+
+    // Phase C5: Global search
+    pub(crate) global_search_query: String,
+    pub(crate) global_search_active: bool,
+    pub(crate) global_search_videos: Vec<muvrix_core::database::LibraryItemView>,
+    pub(crate) global_search_audio: Vec<muvrix_core::database::LibraryItemView>,
+    pub(crate) global_search_playlists: Vec<muvrix_core::database::Playlist>,
+    pub(crate) global_search_last_query: String,
+
+    // Phase C5: Home view quick-access sections
+    pub(crate) home_recently_added: Vec<muvrix_core::database::LibraryItemView>,
+    pub(crate) home_favorites: Vec<muvrix_core::database::LibraryItemView>,
+    pub(crate) home_longest: Vec<muvrix_core::database::LibraryItemView>,
+    pub(crate) home_largest: Vec<muvrix_core::database::LibraryItemView>,
+    pub(crate) home_sections_loaded: bool,
+
+    // Phase C Final Fix: Carousel offset + Playlist export modal
+    pub(crate) home_carousel_scroll_offset: f32,
+    pub(crate) show_export_playlist_modal: bool,
+    pub(crate) export_playlist_path_input: String,
+    pub(crate) export_playlist_status: Option<String>,
+    pub(crate) export_playlist_target_id: Option<i64>,
 }
 
 impl MuvrixApp {
@@ -542,13 +592,14 @@ impl MuvrixApp {
             ThumbnailCache::new(ThumbnailCache::default_cache_dir(), 500 * 1024 * 1024);
 
         let current_view = match std::env::var("MUVRIX_INITIAL_VIEW").as_deref() {
+            Ok("player") => AppView::Player,
             Ok("library") => AppView::Library,
             Ok("browser") => AppView::Browser,
             Ok("playlist") => AppView::Playlist,
             Ok("lyrics") => AppView::Lyrics,
             Ok("history" | "recent") => AppView::Recent,
             Ok("settings") => AppView::Settings,
-            _ => AppView::Player,
+            _ => AppView::Home,
         };
         let show_playlist_drawer = std::env::var("MUVRIX_OPEN_DRAWER")
             .map(|v| v == "1")
@@ -606,7 +657,19 @@ impl MuvrixApp {
             active_styling: persisted.subtitle_styling.clone(),
             theme_mode: persisted.theme_mode,
             accent_color: persisted.accent_color,
+            audio_channels: persisted.audio_channels,
+            volume_normalization: persisted.volume_normalization,
+            audio_pitch_correction: persisted.audio_pitch_correction,
+            preferred_audio_languages: persisted.preferred_audio_languages.clone(),
+            default_audio_delay_ms: persisted.default_audio_delay_ms,
+            background_audio: persisted.background_audio,
+            verbose_logging: persisted.verbose_logging,
+            advanced_status: None,
             ui_overlay_visible: true,
+            osd_manually_hidden: false,
+            last_mouse_activity: Instant::now(),
+            last_mouse_pos: None,
+            osd_autohide_delay: Duration::from_secs(3),
             sleep_timer: SleepTimer::Off,
             sleep_deadline: None,
             settings_search: String::new(),
@@ -733,11 +796,15 @@ impl MuvrixApp {
             browsing_loading: false,
             browsing_error: None,
             settings_tab: match std::env::var("MUVRIX_SETTINGS_TAB").as_deref() {
+                Ok("audio" | "equalizer") => SettingsTab::Audio,
                 Ok("enhancement" | "video") => SettingsTab::VideoEnhancement,
-                Ok("equalizer" | "audio") => SettingsTab::EqualizerAudio,
+                Ok("subtitles" | "subs") => SettingsTab::Subtitles,
                 Ok("network" | "webdav") => SettingsTab::NetworkMedia,
-                Ok("preferences" | "privacy" | "window") => SettingsTab::Preferences,
-                _ => SettingsTab::Subtitles,
+                Ok("appearance" | "theme") => SettingsTab::Appearance,
+                Ok("config") => SettingsTab::ConfigEditor,
+                Ok("advanced" | "preferences" | "privacy" | "window") => SettingsTab::Advanced,
+                Ok("about") => SettingsTab::About,
+                _ => SettingsTab::Audio,
             },
             lyrics: None,
             lyrics_auto_scroll: true,
@@ -745,6 +812,36 @@ impl MuvrixApp {
             editing_bookmark_id: None,
             editing_bookmark_label: String::new(),
             editing_bookmark_note: String::new(),
+            // Phase C1
+            library_context_item: None,
+            show_library_context_menu: false,
+            // Phase C2
+            browser_is_grid: false,
+            browser_context_entry: None,
+            show_browser_context_menu: false,
+            // Phase C3
+            playlist_rename_id: None,
+            playlist_rename_input: String::new(),
+            playlist_confirm_delete: None,
+            playlist_confirm_clear: None,
+            // Phase C5
+            global_search_query: String::new(),
+            global_search_active: false,
+            global_search_videos: Vec::new(),
+            global_search_audio: Vec::new(),
+            global_search_playlists: Vec::new(),
+            global_search_last_query: String::new(),
+            home_recently_added: Vec::new(),
+            home_favorites: Vec::new(),
+            home_longest: Vec::new(),
+            home_largest: Vec::new(),
+            home_sections_loaded: false,
+            // Phase C Final Fix
+            home_carousel_scroll_offset: 0.0,
+            show_export_playlist_modal: false,
+            export_playlist_path_input: String::new(),
+            export_playlist_status: None,
+            export_playlist_target_id: None,
         };
 
         app.refresh_library();
@@ -858,6 +955,256 @@ impl MuvrixApp {
             }
         }
 
+        // Phase C diagnostic, test seeding, and visual QA hooks
+        if std::env::var("MUVRIX_SEED_LIBRARY").is_ok() {
+            let root = muvrix_core::database::LibraryRoot {
+                id: 0,
+                display_name: "Demo Media".to_string(),
+                root_path: "/media/demo".to_string(),
+                source_type: "local".to_string(),
+                is_recursive: true,
+                is_enabled: true,
+                exclusion_patterns: Vec::new(),
+                last_scanned_at: 1731670000,
+                scan_status: "idle".to_string(),
+            };
+            let root_id = app.db.insert_root(&root).unwrap_or(1);
+            let sample_items = [
+                (
+                    "Cosmos.Laundromat.2015.4K.mkv",
+                    "mkv",
+                    muvrix_core::database::MediaType::Video,
+                    1_420_000_000,
+                    "Cosmos Laundromat (First Cycle)",
+                    "H.264",
+                    3840,
+                    2160,
+                    730_000,
+                    true,
+                ),
+                (
+                    "Big.Buck.Bunny.1080p.mp4",
+                    "mp4",
+                    muvrix_core::database::MediaType::Video,
+                    650_000_000,
+                    "Big Buck Bunny",
+                    "H.264",
+                    1920,
+                    1080,
+                    596_000,
+                    true,
+                ),
+                (
+                    "Sintel.2010.1080p.mkv",
+                    "mkv",
+                    muvrix_core::database::MediaType::Video,
+                    820_000_000,
+                    "Sintel",
+                    "HEVC",
+                    1920,
+                    1080,
+                    888_000,
+                    false,
+                ),
+                (
+                    "Tears.of.Steel.4K.mkv",
+                    "mkv",
+                    muvrix_core::database::MediaType::Video,
+                    2_150_000_000,
+                    "Tears of Steel",
+                    "VP9",
+                    3840,
+                    2160,
+                    734_000,
+                    false,
+                ),
+                (
+                    "Elephants.Dream.720p.avi",
+                    "avi",
+                    muvrix_core::database::MediaType::Video,
+                    320_000_000,
+                    "Elephants Dream",
+                    "MPEG-4",
+                    1280,
+                    720,
+                    653_000,
+                    false,
+                ),
+                (
+                    "Solar.Wind.Symphony.flac",
+                    "flac",
+                    muvrix_core::database::MediaType::Audio,
+                    45_000_000,
+                    "Solar Wind Symphony",
+                    "FLAC",
+                    0,
+                    0,
+                    312_000,
+                    true,
+                ),
+                (
+                    "Cinematic.Soundtrack.mp3",
+                    "mp3",
+                    muvrix_core::database::MediaType::Audio,
+                    12_500_000,
+                    "Cinematic Ambient Theme",
+                    "MP3",
+                    0,
+                    0,
+                    245_000,
+                    false,
+                ),
+            ];
+            for (fname, ext, mtype, fsize, title, codec, w, h, dur, fav) in sample_items {
+                let item = muvrix_core::database::MediaItem {
+                    id: 0,
+                    root_id,
+                    relative_path: fname.to_string(),
+                    canonical_path: format!("/media/demo/{fname}"),
+                    file_name: fname.to_string(),
+                    file_extension: ext.to_string(),
+                    media_type: mtype,
+                    file_size: fsize,
+                    modified_time: 1731670000,
+                    added_time: 1731670000,
+                    last_scanned_at: 1731670000,
+                    availability_state: muvrix_core::database::AvailabilityState::Available,
+                    metadata_status: muvrix_core::database::MetadataStatus::Extracted,
+                };
+                if let Ok(id) = app.db.upsert_media_item(&item) {
+                    let meta = muvrix_core::database::MediaMetadata {
+                        media_id: id,
+                        title: Some(title.to_string()),
+                        artist: if mtype == muvrix_core::database::MediaType::Audio {
+                            Some("Muvrix Soundworks".to_string())
+                        } else {
+                            None
+                        },
+                        album: None,
+                        genre: Some("Cinema".to_string()),
+                        release_year: Some(2024),
+                        duration_ms: dur,
+                        width: w,
+                        height: h,
+                        video_codec: if mtype == muvrix_core::database::MediaType::Video {
+                            Some(codec.to_string())
+                        } else {
+                            None
+                        },
+                        audio_codec: Some("AAC".to_string()),
+                        audio_channels: 2,
+                        sample_rate: 48000,
+                        overall_bitrate: 8_000_000,
+                        ..Default::default()
+                    };
+                    let _ = app.db.upsert_metadata(&meta);
+                    if fav {
+                        let _ = app.db.set_favourite(id, true);
+                    }
+                }
+            }
+            app.refresh_library();
+            app.load_home_sections(true);
+        }
+
+        if let Ok(lib_mode) = std::env::var("MUVRIX_LIBRARY_VIEW") {
+            app.library_is_grid = lib_mode != "list";
+        }
+        if let Ok(search) = std::env::var("MUVRIX_LIBRARY_SEARCH") {
+            app.library_filter.search_query = Some(search);
+            app.refresh_library();
+        }
+        if let Ok(filter) = std::env::var("MUVRIX_LIBRARY_FILTER") {
+            match filter.as_str() {
+                "video" => {
+                    app.library_filter.media_type = Some(muvrix_core::database::MediaType::Video);
+                }
+                "audio" => {
+                    app.library_filter.media_type = Some(muvrix_core::database::MediaType::Audio);
+                }
+                "fav" => {
+                    app.library_filter.favourites_only = true;
+                }
+                "4k" => {
+                    app.library_filter.resolution_tier = Some("4K".to_string());
+                }
+                "1080p" => {
+                    app.library_filter.resolution_tier = Some("1080p".to_string());
+                }
+                _ => {}
+            }
+            app.refresh_library();
+        }
+        if let Ok(q) = std::env::var("MUVRIX_GLOBAL_SEARCH") {
+            app.settings_search = q.clone();
+            app.global_search_query = q.clone();
+            app.global_search_active = true;
+            app.run_global_search(&q);
+        }
+        if let Ok(grid) = std::env::var("MUVRIX_BROWSER_GRID") {
+            app.browser_is_grid = grid == "1" || grid == "true";
+        }
+        if let Ok(dir) = std::env::var("MUVRIX_BROWSER_DIR") {
+            app.media_browser.navigate_to(std::path::PathBuf::from(dir));
+        }
+        if std::env::var("MUVRIX_OPEN_DETAILS_DRAWER").is_ok() {
+            if let Some(item) = app.library_items.first().cloned() {
+                app.selected_library_item = Some(item);
+            }
+        }
+        if let Ok(err) = std::env::var("MUVRIX_SHOW_ERROR") {
+            app.status_message = format!("Error: {err}");
+            app.media_browser.error = Some(err);
+        }
+        if std::env::var("MUVRIX_SIMULATE_SCAN").is_ok() {
+            app.scan_progress = Some(muvrix_core::scanner::ScanProgress {
+                root_id: 1,
+                discovered_count: 42,
+                indexed_count: 38,
+                skipped_count: 3,
+                missing_count: 1,
+                error_count: 0,
+                current_path: Some("/media/movies/Inception.2010.4K.mkv".to_string()),
+                is_finished: false,
+                is_cancelled: false,
+            });
+        }
+        if let Ok(export_dest) = std::env::var("MUVRIX_EXPORT_PLAYLIST_PATH") {
+            let entries = app.controller.playlist();
+            let m3u_entries: Vec<muvrix_core::playlist::M3uEntry> = entries
+                .iter()
+                .map(|e| muvrix_core::playlist::M3uEntry {
+                    path: e.filename.clone(),
+                    title: e.title.clone(),
+                    duration_ms: 0,
+                    logo: None,
+                    group: None,
+                })
+                .collect();
+            if let Err(e) = muvrix_core::playlist::export_m3u(&m3u_entries, &export_dest) {
+                log::error!("Automated MUVRIX_EXPORT_PLAYLIST_PATH failed: {e}");
+            } else {
+                log::info!(
+                    "Automated MUVRIX_EXPORT_PLAYLIST_PATH successfully wrote to {export_dest}"
+                );
+                app.export_playlist_status = Some(format!(
+                    "Exported {} entries to {}",
+                    m3u_entries.len(),
+                    export_dest
+                ));
+            }
+        }
+        if std::env::var("MUVRIX_OPEN_EXPORT_MODAL").is_ok() {
+            app.show_export_playlist_modal = true;
+            app.export_playlist_path_input = "exported_queue.m3u8".to_string();
+            app.export_playlist_status = Some("Ready to export".to_string());
+        }
+        if let Ok(offset_str) = std::env::var("MUVRIX_CAROUSEL_OFFSET") {
+            if let Ok(offset) = offset_str.parse::<f32>() {
+                app.home_carousel_scroll_offset = offset;
+            }
+        }
+
         Ok(app)
     }
 
@@ -944,6 +1291,8 @@ impl MuvrixApp {
 
                         // Refresh active media bookmarks
                         self.refresh_active_bookmarks();
+                        self.current_view = AppView::Player;
+                        self.sync_audio_preferences();
                     }
                     Err(e) => {
                         let err_msg = format!("Failed to initiate playback on '{path_str}': {e}");
@@ -960,6 +1309,16 @@ impl MuvrixApp {
                 self.controller.set_error(err_msg);
                 log::error!("Failed to resolve media path '{trimmed}': {e}");
             }
+        }
+    }
+
+    /// Loads a media file and immediately resumes playback at the designated timestamp.
+    pub fn load_file_and_resume(&mut self, raw_path: &str, resume_pos: f64) {
+        self.load_file(raw_path);
+        if resume_pos > 0.0 {
+            let _ = self.controller.seek(resume_pos, SeekMode::Absolute);
+            self.pending_resume_prompt = None;
+            let _ = self.controller.play();
         }
     }
 
@@ -1750,6 +2109,13 @@ impl MuvrixApp {
             self.open_file_dialog();
         }
 
+        // H: Toggle UI overlay / OSD
+        if ctx.input(|i| i.key_pressed(egui::Key::H)) {
+            self.ui_overlay_visible = !self.ui_overlay_visible;
+            self.osd_manually_hidden = !self.ui_overlay_visible;
+            self.last_mouse_activity = Instant::now();
+        }
+
         // P: Toggle Playlist drawer
         if ctx.input(|i| i.key_pressed(egui::Key::P)) {
             self.show_playlist_drawer = !self.show_playlist_drawer;
@@ -1775,6 +2141,86 @@ impl MuvrixApp {
         }
     }
 
+    /// Automatically hides on-screen playback controls during uninterrupted playback.
+    fn update_osd_autohide(&mut self, ctx: &egui::Context) {
+        // Any open modals or drawers prevent controls from auto-hiding
+        let modal_active = self.show_shortcuts
+            || self.show_diagnostics
+            || self.show_playlist_drawer
+            || self.add_root_dialog_open
+            || self.pending_resume_prompt.is_some()
+            || self.crash_notice.is_some();
+
+        if modal_active {
+            self.last_mouse_activity = Instant::now();
+            self.ui_overlay_visible = true;
+            return;
+        }
+
+        // Only auto-hide in the Player view during active, non-paused playback
+        if self.current_view != AppView::Player {
+            self.ui_overlay_visible = true;
+            return;
+        }
+
+        // Test-override hooks if present
+        if std::env::var("MUVRIX_FORCE_OSD")
+            .map(|v| v == "0")
+            .unwrap_or(false)
+        {
+            self.ui_overlay_visible = false;
+            return;
+        }
+        if std::env::var("MUVRIX_FORCE_OSD")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            self.ui_overlay_visible = true;
+            return;
+        }
+
+        let is_playing =
+            *self.controller.state() == PlaybackState::Playing && !self.controller.is_paused();
+
+        let current_mouse_pos = ctx.input(|i| i.pointer.hover_pos());
+        let mouse_moved = match (self.last_mouse_pos, current_mouse_pos) {
+            (Some(last), Some(cur)) => last.distance(cur) > 2.0,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        let mouse_active = ctx
+            .input(|i| i.pointer.any_down() || i.pointer.any_pressed() || i.pointer.any_released());
+
+        let screen_h = ctx.screen_rect().height();
+        let cursor_over_controls = current_mouse_pos
+            .is_some_and(|pos| pos.y <= 52.0 || pos.y >= (screen_h - 110.0).max(0.0));
+
+        if mouse_moved || mouse_active {
+            self.last_mouse_activity = Instant::now();
+            self.last_mouse_pos = current_mouse_pos;
+            self.ui_overlay_visible = true;
+            self.osd_manually_hidden = false;
+        } else if cursor_over_controls && self.ui_overlay_visible {
+            // Hovering over controls keeps them visible without timer expiring
+            self.last_mouse_activity = Instant::now();
+        }
+
+        if is_playing {
+            if !self.osd_manually_hidden && !cursor_over_controls {
+                let elapsed = self.last_mouse_activity.elapsed();
+                if elapsed >= self.osd_autohide_delay {
+                    self.ui_overlay_visible = false;
+                } else {
+                    let remaining = self.osd_autohide_delay.saturating_sub(elapsed);
+                    ctx.request_repaint_after(remaining);
+                }
+            }
+        } else if !self.osd_manually_hidden {
+            // Paused playback: controls stay visible unless user explicitly toggled Key::H
+            self.ui_overlay_visible = true;
+        }
+    }
+
     pub fn refresh_library(&mut self) {
         let pagination = Pagination {
             offset: self.library_page * 24,
@@ -1789,6 +2235,125 @@ impl MuvrixApp {
             self.library_items = items;
             self.library_total_count = total;
         }
+    }
+
+    /// Performs global search across all library items and playlists.
+    /// Results are stored in `global_search_videos`, `global_search_audio`,
+    /// and `global_search_playlists`.
+    pub fn run_global_search(&mut self, query: &str) {
+        use muvrix_core::database::{
+            LibraryFilter, LibrarySortField, MediaType, Pagination, SortDirection,
+        };
+        let q = query.trim().to_string();
+        if q.is_empty() {
+            self.global_search_videos.clear();
+            self.global_search_audio.clear();
+            self.global_search_playlists.clear();
+            self.global_search_last_query.clear();
+            return;
+        }
+        // Video results
+        let video_filter = LibraryFilter {
+            search_query: Some(q.clone()),
+            media_type: Some(MediaType::Video),
+            ..Default::default()
+        };
+        if let Ok((items, _)) = self.db.query_library(
+            &video_filter,
+            LibrarySortField::Title,
+            SortDirection::Ascending,
+            Pagination {
+                offset: 0,
+                limit: 10,
+            },
+        ) {
+            self.global_search_videos = items;
+        }
+        // Audio results
+        let audio_filter = LibraryFilter {
+            search_query: Some(q.clone()),
+            media_type: Some(MediaType::Audio),
+            ..Default::default()
+        };
+        if let Ok((items, _)) = self.db.query_library(
+            &audio_filter,
+            LibrarySortField::Title,
+            SortDirection::Ascending,
+            Pagination {
+                offset: 0,
+                limit: 10,
+            },
+        ) {
+            self.global_search_audio = items;
+        }
+        // Playlist results (filter by name)
+        let lower_q = q.to_ascii_lowercase();
+        self.global_search_playlists = self
+            .db
+            .list_playlists()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.name.to_ascii_lowercase().contains(&lower_q))
+            .collect();
+        self.global_search_last_query = q;
+    }
+
+    /// Loads quick-access home sections (recently added, favorites, longest, largest).
+    /// Only executes once per session unless `force_reload` is true.
+    pub fn load_home_sections(&mut self, force_reload: bool) {
+        use muvrix_core::database::{LibraryFilter, LibrarySortField, Pagination, SortDirection};
+        if self.home_sections_loaded && !force_reload {
+            return;
+        }
+        let pagination = Pagination {
+            offset: 0,
+            limit: 8,
+        };
+
+        // Recently Added
+        if let Ok((items, _)) = self.db.query_library(
+            &LibraryFilter::default(),
+            LibrarySortField::DateAdded,
+            SortDirection::Descending,
+            pagination,
+        ) {
+            self.home_recently_added = items;
+        }
+
+        // Favorites
+        if let Ok((items, _)) = self.db.query_library(
+            &LibraryFilter {
+                favourites_only: true,
+                ..Default::default()
+            },
+            LibrarySortField::Title,
+            SortDirection::Ascending,
+            pagination,
+        ) {
+            self.home_favorites = items;
+        }
+
+        // Longest
+        if let Ok((items, _)) = self.db.query_library(
+            &LibraryFilter::default(),
+            LibrarySortField::Duration,
+            SortDirection::Descending,
+            pagination,
+        ) {
+            self.home_longest = items;
+        }
+
+        // Largest
+        if let Ok((items, _)) = self.db.query_library(
+            &LibraryFilter::default(),
+            LibrarySortField::FileSize,
+            SortDirection::Descending,
+            pagination,
+        ) {
+            self.home_largest = items;
+        }
+
+        self.home_sections_loaded = true;
     }
 
     pub fn refresh_audio_devices(&mut self) {
@@ -2100,8 +2665,299 @@ impl MuvrixApp {
             subtitle_styling: self.active_styling.clone(),
             theme_mode: self.theme_mode,
             accent_color: self.accent_color,
+            audio_channels: self.audio_channels,
+            volume_normalization: self.volume_normalization,
+            audio_pitch_correction: self.audio_pitch_correction,
+            preferred_audio_languages: self.preferred_audio_languages.clone(),
+            default_audio_delay_ms: self.default_audio_delay_ms,
+            volume_boost_cap: self.equalizer_settings.volume_boost as i32,
+            background_audio: self.background_audio,
+            verbose_logging: self.verbose_logging,
         };
         let _ = settings.save(None);
+    }
+
+    /// Synchronizes audio channels, volume normalization filter, pitch correction, and languages with libmpv.
+    pub fn sync_audio_preferences(&self) {
+        let _ = self.controller.set_audio_channels(self.audio_channels);
+        let _ = self
+            .controller
+            .set_audio_pitch_correction(self.audio_pitch_correction);
+        let _ = self
+            .controller
+            .set_audio_languages(&self.preferred_audio_languages);
+        let _ = self
+            .controller
+            .set_audio_delay(self.default_audio_delay_ms as f64 / 1000.0);
+        let mut filters = Vec::new();
+        if self.volume_normalization {
+            filters.push("dynaudnorm");
+        }
+        if self.audio_channels.needs_pan_filter() {
+            filters.push("pan=[stereo|c0=c1|c1=c0]");
+        }
+        let _ = self
+            .controller
+            .handle()
+            .set_property_string("af", &filters.join(","));
+    }
+
+    /// Exports current application configuration to a user-selected XML backup file.
+    pub fn export_settings_to_xml(&mut self) {
+        if let Some(file) = rfd::FileDialog::new()
+            .set_title("Export Muvrix Settings Backup")
+            .set_file_name("muvrix-settings-backup.xml")
+            .add_filter("XML Backup", &["xml"])
+            .save_file()
+        {
+            let backup = muvrix_core::backup::BackupSettings {
+                schema_version: muvrix_core::backup::CURRENT_BACKUP_SCHEMA,
+                app_version: env!("CARGO_PKG_VERSION").to_string(),
+                created_at_unix: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                audio_channels: format!("{:?}", self.audio_channels).to_lowercase(),
+                volume_normalization: self.volume_normalization,
+                audio_pitch_correction: self.audio_pitch_correction,
+                preferred_audio_languages: self.preferred_audio_languages.clone(),
+                default_audio_delay_ms: self.default_audio_delay_ms,
+                volume_boost_cap: self.equalizer_settings.volume_boost as i32,
+                volume: self.controller.volume(),
+                theme_mode: format!("{:?}", self.theme_mode).to_lowercase(),
+                accent_color: format!("{:?}", self.accent_color).to_lowercase(),
+                sub_font: self.active_styling.font.clone(),
+                sub_font_size: self.active_styling.font_size as u32,
+                sub_color: self.active_styling.color.clone(),
+                sub_border_color: self.active_styling.border_color.clone(),
+                sub_border_size: self.active_styling.border_size,
+                sub_shadow_offset: self.active_styling.sub_shadow_offset,
+                sub_back_color: self.active_styling.sub_back_color.clone(),
+                sub_margin_y: 22,
+                sub_pos: self.active_styling.pos as u32,
+                sub_speed: self.active_styling.sub_speed,
+                sub_justify: format!("{:?}", self.active_styling.sub_justify).to_lowercase(),
+                ass_override: self.active_styling.ass_override,
+                anime4k_preset: format!("{:?}", self.anime4k_preset).to_lowercase(),
+                anime4k_quality: format!("{:?}", self.anime4k_quality).to_lowercase(),
+                tone_mapping: format!("{:?}", self.video_settings.tone_mapping).to_lowercase(),
+                deband: self.video_settings.deband,
+                history_enabled: self.history_store.enabled,
+                auto_resume_enabled: self.history_store.auto_resume_enabled,
+                verbose_logging: self.verbose_logging,
+                background_audio: self.background_audio,
+            };
+
+            let xml = backup.to_xml();
+            match std::fs::write(&file, xml.as_bytes()) {
+                Ok(()) => {
+                    self.advanced_status =
+                        Some(format!("Exported XML backup to {}", file.display()));
+                }
+                Err(e) => {
+                    self.advanced_status = Some(format!("Failed to export XML: {e}"));
+                }
+            }
+        }
+    }
+
+    /// Imports application settings from a user-selected XML backup file.
+    pub fn import_settings_from_xml(&mut self) {
+        if let Some(file) = rfd::FileDialog::new()
+            .set_title("Import Muvrix Settings Backup")
+            .add_filter("XML Backup", &["xml"])
+            .pick_file()
+        {
+            match std::fs::read_to_string(&file) {
+                Ok(content) => match muvrix_core::backup::BackupSettings::from_xml(&content) {
+                    Ok(backup) => {
+                        self.volume_normalization = backup.volume_normalization;
+                        self.audio_pitch_correction = backup.audio_pitch_correction;
+                        self.preferred_audio_languages = backup.preferred_audio_languages;
+                        self.default_audio_delay_ms = backup.default_audio_delay_ms;
+                        self.background_audio = backup.background_audio;
+                        self.verbose_logging = backup.verbose_logging;
+                        self.history_store.set_enabled(backup.history_enabled);
+                        self.history_store
+                            .set_auto_resume(backup.auto_resume_enabled);
+                        let _ = self.history_store.save();
+
+                        self.sync_audio_preferences();
+                        self.save_media_settings();
+                        self.advanced_status = Some(format!(
+                            "Imported settings from {} (schema v{})",
+                            file.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("backup"),
+                            backup.schema_version
+                        ));
+                    }
+                    Err(e) => {
+                        self.advanced_status = Some(format!("Invalid XML backup: {e}"));
+                    }
+                },
+                Err(e) => {
+                    self.advanced_status = Some(format!("Failed to read backup file: {e}"));
+                }
+            }
+        }
+    }
+
+    /// Clears generated thumbnail images and in-memory textures.
+    pub fn clear_thumbnail_cache(&mut self) {
+        self.thumbnail_textures.clear();
+        let cache_dir = muvrix_core::thumbnails::ThumbnailCache::default_cache_dir();
+        if cache_dir.exists() {
+            let _ = std::fs::remove_dir_all(&cache_dir);
+            let _ = std::fs::create_dir_all(&cache_dir);
+        }
+        self.advanced_status = Some("Thumbnail cache cleared".to_string());
+    }
+
+    /// Flushes and resets subtitle font cache directory in MPV.
+    pub fn clear_font_cache(&mut self) {
+        self.active_styling.sub_fonts_dir.clear();
+        let _ = self
+            .controller
+            .handle()
+            .set_property_string("sub-fonts-dir", "");
+        self.save_media_settings();
+        self.advanced_status = Some("Subtitle font cache reset".to_string());
+    }
+
+    /// Reloads persistent media settings from disk and synchronizes MPV.
+    pub fn clear_config_cache(&mut self) {
+        let loaded = muvrix_player::PersistedMediaSettings::load(None);
+        self.theme_mode = loaded.theme_mode;
+        self.accent_color = loaded.accent_color;
+        self.audio_channels = loaded.audio_channels;
+        self.volume_normalization = loaded.volume_normalization;
+        self.audio_pitch_correction = loaded.audio_pitch_correction;
+        self.preferred_audio_languages = loaded.preferred_audio_languages;
+        self.default_audio_delay_ms = loaded.default_audio_delay_ms;
+        self.background_audio = loaded.background_audio;
+        self.verbose_logging = loaded.verbose_logging;
+        self.sync_audio_preferences();
+        self.advanced_status = Some("Reloaded settings and flushed config cache".to_string());
+    }
+
+    /// Collects and dumps diagnostic system, engine, and playback telemetry to a file.
+    pub fn dump_diagnostic_logs(&mut self) {
+        if let Some(file) = rfd::FileDialog::new()
+            .set_title("Save Muvrix Diagnostic Report")
+            .set_file_name("muvrix-diagnostics.txt")
+            .add_filter("Text Report", &["txt"])
+            .save_file()
+        {
+            let mut report = String::new();
+            report.push_str(
+                "======================================================================\n",
+            );
+            report.push_str(
+                "                   MUVRIX DIAGNOSTIC SYSTEM DUMP                     \n",
+            );
+            report.push_str(
+                "======================================================================\n\n",
+            );
+            report.push_str(&format!(
+                "Application Version: {}\n",
+                env!("CARGO_PKG_VERSION")
+            ));
+            report.push_str(&format!(
+                "Target OS / Arch:    {} {}\n",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ));
+            report.push_str(&format!(
+                "Desktop Session:     {}\n",
+                std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".to_string())
+            ));
+            report.push_str(&format!(
+                "Wayland Display:     {}\n",
+                std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "none".to_string())
+            ));
+            report.push_str(&format!(
+                "X11 Display:         {}\n",
+                std::env::var("DISPLAY").unwrap_or_else(|_| "none".to_string())
+            ));
+            report.push_str(&format!(
+                "Engine Core:         libmpv {}\n",
+                self.media_capabilities.libmpv_version
+            ));
+            report.push_str(&format!(
+                "libplacebo Active:   {}\n",
+                self.media_capabilities.libplacebo_available
+            ));
+            report.push_str(&format!(
+                "Decoder Status:      {:?}\n",
+                self.decode_observation
+            ));
+            report.push_str(&format!(
+                "Output Color HDR:    native_hdr_available={}\n",
+                self.output.native_hdr_available
+            ));
+            report.push_str(&format!(
+                "Playback State:      {:?}\n",
+                self.controller.state()
+            ));
+            report.push_str(&format!(
+                "Current Media:       {:?}\n",
+                self.controller.current_file()
+            ));
+            report.push_str(&format!(
+                "A/V Position / Dur:  {:.2}s / {:.2}s\n",
+                self.controller.time_pos(),
+                self.controller.duration()
+            ));
+            report.push_str(&format!(
+                "Volume / Boost Max:  {:.1}% / {:.1}%\n",
+                self.controller.volume(),
+                self.controller.volume_boost_max()
+            ));
+            report.push_str(&format!(
+                "Audio Channels:      {:?} (option: {})\n",
+                self.audio_channels,
+                self.audio_channels.mpv_channels_option()
+            ));
+            report.push_str(&format!(
+                "Volume Normalization:{}\n",
+                self.volume_normalization
+            ));
+            report.push_str(&format!(
+                "Audio Pitch Correct: {}\n",
+                self.audio_pitch_correction
+            ));
+            report.push_str(&format!(
+                "Preferred Languages: {}\n",
+                self.preferred_audio_languages
+            ));
+            report.push_str(&format!(
+                "Equalizer Enabled:   {}\n",
+                self.equalizer_settings.is_enabled
+            ));
+            report.push_str(&format!(
+                "History Recording:   {}\n",
+                self.history_store.enabled
+            ));
+            report.push_str(&format!(
+                "Auto Resume Active:  {}\n",
+                self.history_store.auto_resume_enabled
+            ));
+            report.push_str(&format!(
+                "Total Indexed Media: {}\n",
+                self.library_total_count
+            ));
+
+            match std::fs::write(&file, report.as_bytes()) {
+                Ok(()) => {
+                    self.advanced_status =
+                        Some(format!("Saved diagnostic report to {}", file.display()));
+                }
+                Err(e) => {
+                    self.advanced_status = Some(format!("Failed to save diagnostics: {e}"));
+                }
+            }
+        }
     }
 }
 
@@ -2260,6 +3116,7 @@ impl MuvrixApp {
         self.flush_telemetry();
         self.update_frame_timing();
         self.handle_keyboard_inputs(ctx);
+        self.update_osd_autohide(ctx);
 
         // Handle drag and drop media files into the application
         ctx.input(|i| {
@@ -2283,6 +3140,9 @@ impl MuvrixApp {
         // Optional automated window screenshot capture for verification
         if let Ok(capture_path) = std::env::var("MUVRIX_CAPTURE_WINDOW_PNG") {
             self.screenshot_frames += 1;
+            if self.screenshot_frames < 25 {
+                ctx.request_repaint();
+            }
             let media_ready = self.controller.current_file().is_none()
                 || self.controller.duration() > 0.0
                 || self.screenshot_frames >= 30;
@@ -2427,6 +3287,12 @@ impl MuvrixApp {
         // ---------------------------------------------------------------------
         egui::TopBottomPanel::top("player_top_bar")
             .resizable(false)
+            .frame(
+                egui::Frame::NONE
+                    .fill(BrandPalette::OBSIDIAN)
+                    .stroke(egui::Stroke::new(1.0_f32, BrandPalette::BORDER_SLATE))
+                    .inner_margin(egui::Margin::symmetric(12, 6)),
+            )
             .show(ctx, |ui| {
                 if !self.ui_overlay_visible {
                     return;
@@ -2454,46 +3320,86 @@ impl MuvrixApp {
                     ui.separator();
                     ui.add_space(4.0);
 
-                    // Navigation View Tabs (Player, Library, Browser, Playlist, Lyrics, History, Settings)
-                    for view in &[
-                        AppView::Player,
-                        AppView::Library,
-                        AppView::Browser,
-                        AppView::Playlist,
-                        AppView::Lyrics,
-                        AppView::Recent,
-                        AppView::Settings,
-                    ] {
-                        let is_active = self.current_view == *view;
-                        let text = if available_w <= 960.0 {
-                            match *view {
-                                AppView::Player => "Player".to_string(),
-                                AppView::Library => "Lib".to_string(),
-                                AppView::Browser => "Files".to_string(),
-                                AppView::Playlist => "Queue".to_string(),
-                                AppView::Lyrics => "Lyrics".to_string(),
-                                AppView::Recent => "History".to_string(),
-                                AppView::Settings => "Settings".to_string(),
+                    let is_wide = available_w >= 1400.0;
+                    if is_wide {
+                        // At 1400px+ show all 8 tabs
+                        for view in &[
+                            AppView::Home,
+                            AppView::Player,
+                            AppView::Library,
+                            AppView::Browser,
+                            AppView::Playlist,
+                            AppView::Lyrics,
+                            AppView::Recent,
+                            AppView::Settings,
+                        ] {
+                            let is_active = self.current_view == *view;
+                            let text = if *view == AppView::Playlist
+                                && self.controller.playlist_count() > 0
+                            {
+                                format!("Playlist ({})", self.controller.playlist_count())
+                            } else {
+                                view.label().to_string()
+                            };
+
+                            if ui_components::nav_tab(ui, &text, is_active).clicked() {
+                                self.current_view = *view;
                             }
-                        } else if *view == AppView::Playlist
-                            && self.controller.playlist_count() > 0
-                        {
-                            format!("Playlist ({})", self.controller.playlist_count())
-                        } else {
-                            view.label().to_string()
-                        };
-
-                        let rich = if is_active {
-                            RichText::new(&text)
-                                .strong()
-                                .color(Color32::from_rgb(95, 195, 255))
-                        } else {
-                            RichText::new(&text).color(Color32::from_gray(185))
-                        };
-
-                        if ui.selectable_label(is_active, rich).clicked() {
-                            self.current_view = *view;
                         }
+                    } else {
+                        // At <1400px show primary tabs + More dropdown for secondary tabs
+                        for view in &[
+                            AppView::Home,
+                            AppView::Player,
+                            AppView::Library,
+                            AppView::Playlist,
+                            AppView::Settings,
+                        ] {
+                            let is_active = self.current_view == *view;
+                            let text = if *view == AppView::Playlist
+                                && self.controller.playlist_count() > 0
+                            {
+                                format!("Playlist ({})", self.controller.playlist_count())
+                            } else {
+                                view.label().to_string()
+                            };
+
+                            if ui_components::nav_tab(ui, &text, is_active).clicked() {
+                                self.current_view = *view;
+                            }
+                        }
+
+                        // Secondary views dropdown (Files / Lyrics / History)
+                        let secondary_views = [
+                            (AppView::Browser, "Files (Browser)"),
+                            (AppView::Lyrics, "Lyrics"),
+                            (AppView::Recent, "History (Recent)"),
+                        ];
+                        let active_secondary = secondary_views.iter().find(|(v, _)| *v == self.current_view);
+                        let more_label = if let Some((_, label)) = active_secondary {
+                            format!("{} ▾", label)
+                        } else {
+                            "More ▾".to_string()
+                        };
+                        let is_sec_active = active_secondary.is_some();
+                        let more_rich = if is_sec_active {
+                            RichText::new(&more_label)
+                                .strong()
+                                .color(BrandPalette::ELECTRIC_LIME)
+                        } else {
+                            RichText::new(&more_label).color(BrandPalette::SECONDARY_TEXT)
+                        };
+
+                        egui::ComboBox::from_id_salt("nav_more_views_combo")
+                            .selected_text(more_rich)
+                            .show_ui(ui, |ui| {
+                                for (view, label) in secondary_views {
+                                    let is_sel = self.current_view == view;
+                                    if ui_components::nav_tab(ui, label, is_sel).clicked() {
+                                        self.current_view = view;
+                                    }
+                                }
+                            });
                     }
 
                     ui.add_space(3.0);
@@ -2501,34 +3407,48 @@ impl MuvrixApp {
                     ui.add_space(3.0);
 
                     // User file actions with clean vector icons
-                    let (open_text, subs_text) = if available_w > 1050.0 {
-                        ("Open File...", "Add Subs...")
-                    } else if available_w > 860.0 {
-                        ("Open...", "Subs...")
+                    if is_wide {
+                        if icons::icon_text_button(
+                            ui,
+                            Icon::FolderOpen,
+                            "Open File...",
+                            "Open media file from disk (Ctrl+O)",
+                        )
+                        .clicked()
+                        {
+                            self.open_file_dialog();
+                        }
+
+                        if icons::icon_text_button(
+                            ui,
+                            Icon::Subtitles,
+                            "Add Subs...",
+                            "Load external subtitle file (SRT, ASS, VTT)",
+                        )
+                        .clicked()
+                        {
+                            self.add_subtitle_dialog();
+                        }
                     } else {
-                        ("Open", "Subs")
-                    };
+                        if icons::icon_button(
+                            ui,
+                            Icon::FolderOpen,
+                            "Open media file from disk (Ctrl+O)",
+                        )
+                        .clicked()
+                        {
+                            self.open_file_dialog();
+                        }
 
-                    if icons::icon_text_button(
-                        ui,
-                        Icon::FolderOpen,
-                        open_text,
-                        "Open media file from disk (Ctrl+O)",
-                    )
-                    .clicked()
-                    {
-                        self.open_file_dialog();
-                    }
-
-                    if icons::icon_text_button(
-                        ui,
-                        Icon::Subtitles,
-                        subs_text,
-                        "Load external subtitle file (SRT, ASS, VTT)",
-                    )
-                    .clicked()
-                    {
-                        self.add_subtitle_dialog();
+                        if icons::icon_button(
+                            ui,
+                            Icon::Subtitles,
+                            "Load external subtitle file (SRT, ASS, VTT)",
+                        )
+                        .clicked()
+                        {
+                            self.add_subtitle_dialog();
+                        }
                     }
 
                     ui.add_space(3.0);
@@ -2550,9 +3470,9 @@ impl MuvrixApp {
 
                     let is_loaded = self.controller.current_file().is_some();
                     let label_color = if is_loaded {
-                        Color32::from_gray(230)
+                        BrandPalette::PRIMARY_TEXT
                     } else {
-                        Color32::from_gray(140)
+                        BrandPalette::SECONDARY_TEXT
                     };
 
                     // Compute dynamic right-side reserved width
@@ -2560,14 +3480,19 @@ impl MuvrixApp {
                     let vfmt = self.controller.video_format().to_string();
                     let afmt = self.controller.audio_codec().to_string();
                     let hw = self.controller.hwdec_current().to_string();
-                    let show_badge = (w > 0 || !vfmt.is_empty()) && available_w >= 1150.0;
+                    let has_media_meta = w > 0 || !vfmt.is_empty();
 
                     let is_player = self.current_view == AppView::Player;
-                    let dev_w = 80.0;
-                    let help_w = if available_w > 1100.0 { 95.0 } else { 55.0 };
-                    let player_extra_w = if is_player { 60.0 } else { 0.0 };
-                    let badge_w = if show_badge { 220.0 } else { 0.0 };
-                    let total_right_w = dev_w + help_w + player_extra_w + badge_w + 40.0;
+                    let player_extra_w = if is_player { 68.0 } else { 0.0 };
+                    let dev_w = if is_wide { 95.0 } else { 60.0 };
+                    let help_w = if is_wide { 110.0 } else { 34.0 };
+                    let badge_w = if has_media_meta {
+                        if is_wide { 240.0 } else { 90.0 }
+                    } else {
+                        0.0
+                    };
+                    let right_padding = 40.0;
+                    let total_right_w = player_extra_w + dev_w + help_w + badge_w + right_padding;
 
                     let remaining_w = ui.available_width();
                     let title_w = (remaining_w - total_right_w).max(40.0);
@@ -2614,9 +3539,10 @@ impl MuvrixApp {
                             ui.separator();
                         }
 
-                        // Developer & Test Menu (moved out of user toolbar)
+                        // Developer & Test Menu
+                        let dev_text = if is_wide { "Developer" } else { "Dev" };
                         egui::ComboBox::from_id_salt("dev_menu_combo")
-                            .selected_text("Developer")
+                            .selected_text(dev_text)
                             .show_ui(ui, |ui| {
                                 let diag_label = if self.show_diagnostics {
                                     "Hide Diagnostics Overlay"
@@ -2695,15 +3621,20 @@ impl MuvrixApp {
                         ui.separator();
 
                         // Keyboard shortcuts help button
-                        let help_text = if available_w > 1100.0 {
-                            "Shortcuts (F1)"
-                        } else {
-                            "Help"
-                        };
-                        if icons::icon_text_button(
+                        if is_wide {
+                            if icons::icon_text_button(
+                                ui,
+                                Icon::Shortcuts,
+                                "Shortcuts (F1)",
+                                "View keyboard shortcuts (F1)",
+                            )
+                            .clicked()
+                            {
+                                self.show_shortcuts = !self.show_shortcuts;
+                            }
+                        } else if icons::icon_button(
                             ui,
                             Icon::Shortcuts,
-                            help_text,
                             "View keyboard shortcuts (F1)",
                         )
                         .clicked()
@@ -2711,22 +3642,56 @@ impl MuvrixApp {
                             self.show_shortcuts = !self.show_shortcuts;
                         }
 
-                        // Media metadata badge if active and width allows
-                        if show_badge {
+                        // Stream metadata badge
+                        if has_media_meta {
                             ui.separator();
                             let v_clean = format_codec_name(&vfmt);
                             let a_clean = format_codec_name(&afmt);
-                            let badge = if !a_clean.is_empty() && available_w > 1250.0 {
-                                format!("{}×{} · {} · {} · HW: {}", w, h, v_clean, a_clean, hw)
+                            if is_wide {
+                                let badge = if !a_clean.is_empty() {
+                                    format!("{}×{} · {} · {} · HW: {}", w, h, v_clean, a_clean, hw)
+                                } else {
+                                    format!("{}×{} · {} · HW: {}", w, h, v_clean, hw)
+                                };
+                                ui_components::badge_pill(
+                                    ui,
+                                    &badge,
+                                    BrandPalette::SLATE_SURFACE,
+                                    BrandPalette::ELECTRIC_LIME,
+                                );
                             } else {
-                                format!("{}×{} · {} · HW: {}", w, h, v_clean, hw)
-                            };
-                            ui.label(
-                                RichText::new(badge)
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(Color32::from_rgb(115, 205, 255)),
-                            );
+                                let res_label = if w >= 3840 {
+                                    "4K".to_string()
+                                } else if w >= 1920 {
+                                    "1080p".to_string()
+                                } else if w >= 1280 {
+                                    "720p".to_string()
+                                } else if h > 0 {
+                                    format!("{}p", h)
+                                } else {
+                                    "Video".to_string()
+                                };
+                                let compact_meta = if !hw.is_empty() && hw != "no" {
+                                    format!("{} · {}", res_label, hw)
+                                } else {
+                                    res_label
+                                };
+                                let rich_tip = format!(
+                                    "Resolution: {}×{}\nVideo Codec: {}\nAudio Codec: {}\nHardware Acceleration: {}",
+                                    w,
+                                    h,
+                                    if v_clean.is_empty() { "Unknown" } else { &v_clean },
+                                    if a_clean.is_empty() { "None" } else { &a_clean },
+                                    if hw.is_empty() { "none" } else { &hw }
+                                );
+                                ui_components::badge_pill(
+                                    ui,
+                                    &compact_meta,
+                                    BrandPalette::SLATE_SURFACE,
+                                    BrandPalette::ELECTRIC_LIME,
+                                )
+                                .on_hover_text(rich_tip);
+                            }
                         }
                     });
                 });
@@ -2739,6 +3704,7 @@ impl MuvrixApp {
         if self.current_view != AppView::Player {
             self.render_mini_player_deck(ctx);
             match self.current_view {
+                AppView::Home => self.render_home_view(ctx),
                 AppView::Library => self.render_library_view(ctx),
                 AppView::Browser => self.render_browser_view(ctx),
                 AppView::Playlist => self.render_playlist_view(ctx),
@@ -2855,6 +3821,12 @@ impl MuvrixApp {
             // ---------------------------------------------------------------------
             egui::TopBottomPanel::bottom("player_controls")
                 .resizable(false)
+                .frame(
+                    egui::Frame::NONE
+                        .fill(BrandPalette::ELEVATED_CARD)
+                        .stroke(egui::Stroke::new(1.0_f32, BrandPalette::BORDER_SLATE))
+                        .inner_margin(egui::Margin::symmetric(14, 8)),
+                )
                 .show(ctx, |ui| {
                     if !self.ui_overlay_visible {
                         return;
@@ -2879,7 +3851,7 @@ impl MuvrixApp {
                             RichText::new(&cur_str)
                                 .monospace()
                                 .size(12.0)
-                                .color(Color32::from_gray(215)),
+                                .color(BrandPalette::PRIMARY_TEXT),
                         );
 
                         // Full-width seeker slider with hover timestamp tooltip
@@ -2898,9 +3870,15 @@ impl MuvrixApp {
                         let response = ui.add_sized([slider_width, 18.0], slider);
 
                         // Context-aware hover information: chapter title, bookmark pin details, or seek timestamp
-                        let mut custom_hover: Option<String> = None;
-                        if let Some(mouse_pos) = response.hover_pos() {
+                        let (hover_sec, custom_hover) = if let Some(mouse_pos) =
+                            response.hover_pos()
+                        {
                             if duration > 0.0 {
+                                let frac = ((mouse_pos.x - response.rect.min.x)
+                                    / response.rect.width())
+                                .clamp(0.0, 1.0);
+                                let sec = (frac as f64) * duration;
+                                let mut hover_detail = None;
                                 for bm in &self.active_bookmarks {
                                     let frac =
                                         (bm.timestamp_seconds() / duration).clamp(0.0, 1.0) as f32;
@@ -2911,7 +3889,7 @@ impl MuvrixApp {
                                             .as_deref()
                                             .map(|n| format!(" — {}", n))
                                             .unwrap_or_default();
-                                        custom_hover = Some(format!(
+                                        hover_detail = Some(format!(
                                             "🔖 {} ({}){}",
                                             bm.label,
                                             format_timestamp(bm.timestamp_seconds()),
@@ -2920,12 +3898,12 @@ impl MuvrixApp {
                                         break;
                                     }
                                 }
-                                if custom_hover.is_none() {
+                                if hover_detail.is_none() {
                                     for ch in self.controller.chapters() {
                                         let frac = (ch.time / duration).clamp(0.0, 1.0) as f32;
                                         let x = response.rect.min.x + frac * response.rect.width();
                                         if (mouse_pos.x - x).abs() <= 7.0 {
-                                            custom_hover = Some(format!(
+                                            hover_detail = Some(format!(
                                                 "📑 {} ({})",
                                                 ch.title,
                                                 format_timestamp(ch.time)
@@ -2934,11 +3912,21 @@ impl MuvrixApp {
                                         }
                                     }
                                 }
+                                (Some(sec), hover_detail)
+                            } else {
+                                (None, None)
                             }
-                        }
+                        } else {
+                            (None, None)
+                        };
 
-                        let tooltip = custom_hover
-                            .unwrap_or_else(|| format!("Seek to {}", format_timestamp(slider_val)));
+                        let tooltip = custom_hover.unwrap_or_else(|| {
+                            if let Some(sec) = hover_sec {
+                                format!("Seek to {}", format_timestamp(sec))
+                            } else {
+                                format!("Seek to {}", format_timestamp(slider_val))
+                            }
+                        });
                         let response = response.on_hover_text(tooltip);
 
                         // Draw visual chapter marks on slider track echoing logo notches
@@ -3035,13 +4023,21 @@ impl MuvrixApp {
                             let _ = self.controller.seek(self.seek_target, SeekMode::Absolute);
                             self.is_seeking = false;
                         }
+                        if response.clicked() {
+                            let click_sec = if let Some(sec) = hover_sec {
+                                sec
+                            } else {
+                                slider_val
+                            };
+                            let _ = self.controller.seek(click_sec, SeekMode::Absolute);
+                        }
 
                         // Duration timestamp
                         ui.label(
                             RichText::new(&dur_str)
                                 .monospace()
                                 .size(12.0)
-                                .color(Color32::from_gray(185)),
+                                .color(BrandPalette::MUTED_TEXT),
                         )
                         .on_hover_text(format!(
                             "Duration: {} (Remaining: -{})",
@@ -3061,11 +4057,11 @@ impl MuvrixApp {
                             _ => (Icon::Play, "Play (Space)"),
                         };
 
-                        // Primary Play/Pause button
-                        if icons::primary_icon_button(
+                        // Primary Play/Pause button in Electric Lime
+                        if icons::electric_play_button(
                             ui,
                             play_icon,
-                            Vec2::new(34.0, 26.0),
+                            Vec2::new(38.0, 28.0),
                             play_tip,
                         )
                         .clicked()
