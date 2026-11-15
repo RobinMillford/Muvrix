@@ -25,9 +25,9 @@ pub use metadata::{
     FallbackMetadataExtractor, MediaMetadataExtractor, MetadataError, MetadataResult,
 };
 pub use network::{
-    generate_credential_ref, redact_credentials_from_url, CredentialError, CredentialVault,
-    MockNetworkProvider, NetworkError, NetworkProvider, NetworkResult, PresentedHostKey,
-    RemoteFileEntry, SftpProvider, SmbProvider, WebDavProvider,
+    credential_ref_username, generate_credential_ref, redact_credentials_from_url, CredentialError,
+    CredentialVault, MockNetworkProvider, NetworkError, NetworkProvider, NetworkResult,
+    PresentedHostKey, RemoteFileEntry, SftpProvider, SmbProvider, WebDavProvider,
 };
 pub use path::{
     expand_tilde, find_project_root, is_streaming_url, resolve_media_path, resolve_preset,

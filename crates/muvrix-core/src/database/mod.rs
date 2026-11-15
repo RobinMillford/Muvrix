@@ -183,6 +183,26 @@ impl DatabaseManager {
         Repository::get_media_items_by_root(&conn, root_id).map_err(DatabaseError::Sqlite)
     }
 
+    /// Returns the next batch of items awaiting metadata/thumbnail enrichment.
+    pub fn pending_media_items(&self, limit: usize) -> DbResult<Vec<MediaItem>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::pending_media_items(&conn, limit).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn pending_media_items_after(
+        &self,
+        after_id: i64,
+        limit: usize,
+    ) -> DbResult<Vec<MediaItem>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::pending_media_items_after(&conn, after_id, limit).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn count_pending_media_items(&self) -> DbResult<u64> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::count_pending_media_items(&conn).map_err(DatabaseError::Sqlite)
+    }
+
     pub fn update_availability(&self, id: i64, state: AvailabilityState) -> DbResult<()> {
         let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
         Repository::update_availability(&conn, id, state).map_err(DatabaseError::Sqlite)

@@ -20,12 +20,12 @@ use muvrix_player::shader::{
     ToneMappingAlgorithm, VideoAdjustmentSettings,
 };
 use muvrix_player::{
-    AssOverrideMode, HttpRangeStream, PlaybackState, ReadAheadStream, SeekMode, SubtitleStyling,
-    TrackInfo, TrackType,
+    AssOverrideMode, PlaybackState, SeekMode, SubtitleStyling, TrackInfo, TrackType,
 };
 
 use crate::app::{format_timestamp, format_track_label, MuvrixApp};
 use crate::icons::{self, Icon};
+use crate::remote_playback::{build_remote_stream, connection_username, smb_share};
 
 /// Top-level application view modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -370,6 +370,29 @@ impl MuvrixApp {
             }
 
             ui.add_space(4.0);
+
+            // Active metadata/thumbnail enrichment banner
+            if let Some(ref progress) = self.enrichment_progress {
+                if !progress.finished && progress.error.is_none() {
+                    ui.group(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Preparing library: {}/{} metadata and thumbnails",
+                                progress.processed, progress.total
+                            ))
+                            .size(12.0)
+                            .color(Color32::from_rgb(125, 211, 252)),
+                        );
+                        if let Some(ref file) = progress.current_file {
+                            ui.label(
+                                RichText::new(file)
+                                    .size(11.0)
+                                    .color(Color32::from_gray(150)),
+                            );
+                        }
+                    });
+                }
+            }
 
             // Active Scan Progress Banner
             let mut cancel_scan = false;
@@ -3413,7 +3436,7 @@ impl MuvrixApp {
                         if connections.is_empty() {
                             ui.label(RichText::new("No network connections configured.").italics().color(Color32::from_gray(140)));
                         } else {
-                            let mut stream_target: Option<String> = None;
+                            let mut stream_target: Option<(NetworkConnection, String)> = None;
                             let mut browse_toggle: Option<(i64, String)> = None;
 
                             for conn in &connections {
@@ -3447,8 +3470,7 @@ impl MuvrixApp {
                                                 delete_conn_id = Some(conn.id);
                                             }
                                             if ui.button("▶ Stream").on_hover_text("Open network stream directly in Muvrix player").clicked() {
-                                                let target = format!("{}://{}:{}{}", conn.protocol, conn.host, conn.port, conn.remote_path);
-                                                stream_target = Some(target);
+                                                stream_target = Some((conn.clone(), conn.remote_path.clone()));
                                             }
                                             let is_browsing = self.browsing_conn_id == Some(conn.id);
                                             let b_label = if is_browsing { "Close Browser ✖" } else { "Browse 📂" };
@@ -3506,8 +3528,7 @@ impl MuvrixApp {
 
                                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                                 if ui.button("▶ Play").clicked() {
-                                                                    let target = format!("{}://{}:{}{}", conn.protocol, conn.host, conn.port, entry.remote_path);
-                                                                    stream_target = Some(target);
+                                                                    stream_target = Some((conn.clone(), entry.remote_path.clone()));
                                                                 }
                                                             });
                                                         }
@@ -3525,23 +3546,36 @@ impl MuvrixApp {
                                     self.browsing_conn_id = None;
                                 } else {
                                     self.browsing_conn_id = Some(id);
-                                    self.browsing_path = if path.is_empty() { "/".to_string() } else { path };
                                     if let Some(conn) = connections.iter().find(|c| c.id == id) {
+                                        self.browsing_path = if conn.protocol.eq_ignore_ascii_case("smb")
+                                        {
+                                            // The share is carried in conn.remote_path;
+                                            // browsing starts at the share root.
+                                            "/".to_string()
+                                        } else if path.is_empty() {
+                                            "/".to_string()
+                                        } else {
+                                            path
+                                        };
                                         self.refresh_remote_directory(conn);
                                     }
                                 }
                             }
 
-                            if let Some(target) = stream_target {
-                                // Direct stream bridge playback
-                                if let Ok(stream) = HttpRangeStream::from_url(&target, None) {
-                                    let buffered = ReadAheadStream::new(stream);
-                                    let uri = self.stream_bridge.register(buffered);
-                                    self.load_file(&uri);
-                                } else {
-                                    self.load_file(&target);
+                            if let Some((conn, target)) = stream_target {
+                                match build_remote_stream(&conn, &target, &self.db, &self.network_vault) {
+                                    Ok(stream) => {
+                                        let uri = self.stream_bridge.register(stream);
+                                        self.browsing_error = None;
+                                        self.load_file(&uri);
+                                        self.current_view = AppView::Player;
+                                    }
+                                    Err(e) => {
+                                        let message = format!("Remote playback failed: {e}");
+                                        self.browsing_error = Some(message.clone());
+                                        self.status_message = message;
+                                    }
                                 }
-                                self.current_view = AppView::Player;
                             }
                         }
 
@@ -3737,6 +3771,15 @@ impl MuvrixApp {
                                         && !self.network_host_input.trim().is_empty()
                                     {
                                         let proto = self.network_protocol_input.clone();
+                                        // Persist the HTTPS checkbox for WebDAV so a
+                                        // non-standard port does not get treated as HTTP.
+                                        let connection_protocol = if proto == "webdav"
+                                            && self.network_https_input
+                                        {
+                                            "https".to_string()
+                                        } else {
+                                            proto.clone()
+                                        };
                                         let cred_ref = if !self.network_pass_input.is_empty() {
                                             let key = muvrix_core::network::generate_credential_ref(
                                                 &proto,
@@ -3761,7 +3804,7 @@ impl MuvrixApp {
                                             } else {
                                                 self.network_name_input.trim().to_string()
                                             },
-                                            protocol: proto,
+                                            protocol: connection_protocol,
                                             host: self.network_host_input.trim().to_string(),
                                             port: self.network_port_input,
                                             remote_path: if self.network_path_input.trim().is_empty() {
@@ -4252,17 +4295,15 @@ impl MuvrixApp {
 
         match conn.protocol.to_lowercase().as_str() {
             "webdav" | "http" | "https" => {
-                let is_https = conn.protocol.to_lowercase() == "https" || conn.port == 443;
+                let is_https = conn.protocol.to_lowercase() == "https"
+                    || conn.port == 443
+                    || conn.port == 8443;
                 let provider = WebDavProvider::new(
                     &conn.host,
                     conn.port,
                     &path,
                     is_https,
-                    if conn.is_anonymous {
-                        None
-                    } else {
-                        Some("user".to_string())
-                    },
+                    connection_username(conn),
                     conn.credential_ref.clone(),
                     self.network_vault.clone(),
                 );
@@ -4281,7 +4322,7 @@ impl MuvrixApp {
                     &conn.host,
                     conn.port,
                     &path,
-                    "ssh_user",
+                    &connection_username(conn).unwrap_or_default(),
                     conn.credential_ref.clone(),
                     None,
                     if self.network_host_key_input.is_empty() {
@@ -4302,16 +4343,17 @@ impl MuvrixApp {
                 }
             }
             "smb" => {
+                let Some(share) = smb_share(&conn.remote_path) else {
+                    self.browsing_error =
+                        Some("SMB connection has no share in its remote path".to_string());
+                    return;
+                };
                 let provider = SmbProvider::new(
                     &conn.host,
                     conn.port,
-                    "Media",
+                    &share,
                     &path,
-                    if conn.is_anonymous {
-                        None
-                    } else {
-                        Some("user".to_string())
-                    },
+                    connection_username(conn),
                     None,
                     conn.credential_ref.clone(),
                     conn.is_anonymous,

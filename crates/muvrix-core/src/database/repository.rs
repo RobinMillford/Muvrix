@@ -207,6 +207,69 @@ impl Repository {
         Ok(items)
     }
 
+    /// Returns the next batch of available items needing enrichment: either
+    /// metadata is pending, or metadata is already extracted but no artwork row
+    /// exists yet. `Failed` items are deliberately excluded so a corrupt file
+    /// is not retried on every enrichment pass.
+    pub fn pending_media_items(conn: &Connection, limit: usize) -> Result<Vec<MediaItem>> {
+        Self::pending_media_items_after(conn, 0, limit)
+    }
+
+    /// Cursor variant used by the enrichment worker. `after_id` prevents a
+    /// failed thumbnail (which remains artwork-less by design) from starving
+    /// later items in the same pass.
+    pub fn pending_media_items_after(
+        conn: &Connection,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<MediaItem>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, root_id, relative_path, canonical_path, file_name, file_extension, media_type, file_size, modified_time, added_time, last_scanned_at, availability_state, metadata_status
+             FROM media_items
+             WHERE availability_state = 'available'
+               AND id > ?1
+               AND (
+                    metadata_status = 'pending'
+                    OR (
+                        metadata_status = 'extracted'
+                        AND NOT EXISTS (
+                            SELECT 1 FROM artwork_cache
+                            WHERE artwork_cache.media_id = media_items.id
+                        )
+                    )
+               )
+             ORDER BY id ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![after_id, limit as i64], Self::map_media_item)?;
+        let mut items = Vec::new();
+        for item in rows {
+            items.push(item?);
+        }
+        Ok(items)
+    }
+
+    /// Number of items currently awaiting metadata or missing artwork.
+    pub fn count_pending_media_items(conn: &Connection) -> Result<u64> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM media_items
+             WHERE availability_state = 'available'
+               AND (
+                    metadata_status = 'pending'
+                    OR (
+                        metadata_status = 'extracted'
+                        AND NOT EXISTS (
+                            SELECT 1 FROM artwork_cache
+                            WHERE artwork_cache.media_id = media_items.id
+                        )
+                    )
+               )",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
+    }
+
     pub fn update_availability(conn: &Connection, id: i64, state: AvailabilityState) -> Result<()> {
         conn.execute(
             "UPDATE media_items SET availability_state = ?1 WHERE id = ?2",

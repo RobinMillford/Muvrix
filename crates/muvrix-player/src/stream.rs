@@ -6,8 +6,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::net::TcpStream;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::raw::{c_char, c_int, c_void};
 use std::panic::catch_unwind;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -30,11 +29,44 @@ pub trait SeekableStream: Send + Sync {
     /// Returns the new absolute position.
     fn seek(&mut self, position: u64) -> std::io::Result<u64>;
 
+    /// Seeks using standard `Start`, `Current`, or `End` semantics.
+    ///
+    /// Streams that cannot resolve relative positions retain the default
+    /// absolute-only behavior; HTTP, SMB and SFTP override this.
+    fn seek_from(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        match position {
+            SeekFrom::Start(position) => self.seek(position),
+            SeekFrom::Current(_) | SeekFrom::End(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "stream does not support relative seek",
+            )),
+        }
+    }
+
     /// Returns total stream size in bytes if known.
     fn total_size(&self) -> Option<u64>;
 
     /// Signals cancellation of blocking I/O if supported.
     fn cancel(&mut self) {}
+}
+
+/// Allows boxed trait objects to pass through `MpvStreamBridge::register`.
+impl<T: SeekableStream + ?Sized> SeekableStream for Box<T> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        (**self).read(buf)
+    }
+
+    fn seek(&mut self, position: u64) -> std::io::Result<u64> {
+        (**self).seek(position)
+    }
+
+    fn total_size(&self) -> Option<u64> {
+        (**self).total_size()
+    }
+
+    fn cancel(&mut self) {
+        (**self).cancel();
+    }
 }
 
 /// In-memory stream implementation backed by `Vec<u8>` or static slices.
@@ -109,6 +141,7 @@ impl<T: Read + Seek + Send + Sync> SeekableStream for IoSeekableStream<T> {
 
 /// Seekable binary stream backed by an HTTP/1.1 or WebDAV endpoint supporting `Range: bytes=start-end`.
 pub struct HttpRangeStream {
+    scheme: String,
     host: String,
     port: u16,
     path: String,
@@ -116,6 +149,7 @@ pub struct HttpRangeStream {
     position: u64,
     total_size: Option<u64>,
     cancelled: AtomicBool,
+    agent: ureq::Agent,
 }
 
 impl HttpRangeStream {
@@ -129,7 +163,18 @@ impl HttpRangeStream {
         path: &str,
         auth_header: Option<String>,
     ) -> std::io::Result<Self> {
+        Self::new_with_scheme("http", host, port, path, auth_header)
+    }
+
+    fn new_with_scheme(
+        scheme: &str,
+        host: &str,
+        port: u16,
+        path: &str,
+        auth_header: Option<String>,
+    ) -> std::io::Result<Self> {
         let mut stream = Self {
+            scheme: scheme.to_string(),
             host: host.to_string(),
             port,
             path: if path.starts_with('/') {
@@ -141,6 +186,10 @@ impl HttpRangeStream {
             position: 0,
             total_size: None,
             cancelled: AtomicBool::new(false),
+            agent: ureq::AgentBuilder::new()
+                .timeout_connect(Duration::from_secs(5))
+                .timeout_read(Duration::from_secs(20))
+                .build(),
         };
 
         stream.probe_size()?;
@@ -148,11 +197,20 @@ impl HttpRangeStream {
     }
 
     /// Creates an `HttpRangeStream` parsed from a full HTTP/HTTPS URL.
+    ///
+    /// HTTPS is handled by `ureq`'s TLS stack; the URL is never downgraded to a
+    /// plaintext socket request.
     pub fn from_url(url: &str, auth_header: Option<String>) -> std::io::Result<Self> {
-        let rest = url
-            .strip_prefix("http://")
-            .or_else(|| url.strip_prefix("https://"))
-            .unwrap_or(url);
+        let (scheme, rest) = if let Some(rest) = url.strip_prefix("https://") {
+            ("https", rest)
+        } else if let Some(rest) = url.strip_prefix("http://") {
+            ("http", rest)
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unsupported HTTP stream scheme: {url}"),
+            ));
+        };
 
         let (host_port, path) = match rest.find('/') {
             Some(idx) => (&rest[..idx], &rest[idx..]),
@@ -171,105 +229,82 @@ impl HttpRangeStream {
                 (h, p)
             }
             None => {
-                let p = if url.starts_with("https://") { 443 } else { 80 };
+                let p = if scheme == "https" { 443 } else { 80 };
                 (host_port, p)
             }
         };
 
-        Self::new(host, port, path, auth_header)
+        Self::new_with_scheme(scheme, host, port, path, auth_header)
     }
 
-    fn connect(&self) -> std::io::Result<TcpStream> {
-        let addr = format!("{}:{}", self.host, self.port);
-        let stream = TcpStream::connect_timeout(
-            &addr
-                .parse()
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?,
-            Duration::from_secs(4),
-        )?;
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-        Ok(stream)
+    /// Transport scheme selected for this stream.
+    pub fn scheme(&self) -> &str {
+        &self.scheme
+    }
+
+    fn url(&self) -> String {
+        format!("{}://{}:{}{}", self.scheme, self.host, self.port, self.path)
+    }
+
+    fn auth_value(&self) -> Option<&str> {
+        self.auth_header.as_deref().map(|value| {
+            value
+                .strip_prefix("Authorization:")
+                .map(str::trim)
+                .unwrap_or(value)
+        })
+    }
+
+    fn request(&self) -> ureq::Request {
+        let request = self.agent.get(&self.url());
+        match self.auth_value() {
+            Some(value) => request.set("Authorization", value),
+            None => request,
+        }
+    }
+
+    fn map_error(error: ureq::Error) -> std::io::Error {
+        std::io::Error::other(format!("HTTP range transport: {error}"))
+    }
+
+    fn parse_total(response: &ureq::Response) -> Option<u64> {
+        if let Some(range) = response.header("Content-Range") {
+            if let Some((_, total)) = range.rsplit_once('/') {
+                if let Ok(size) = total.trim().parse::<u64>() {
+                    return Some(size);
+                }
+            }
+        }
+        response
+            .header("Content-Length")
+            .and_then(|value| value.trim().parse::<u64>().ok())
     }
 
     fn probe_size(&mut self) -> std::io::Result<()> {
-        let mut tcp = self.connect()?;
-        let mut req = format!(
-            "HEAD {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n",
-            self.path, self.host, self.port
-        );
-        if let Some(ref auth) = self.auth_header {
-            req.push_str(auth);
-            req.push_str("\r\n");
+        let url = self.url();
+        let mut head = self.agent.head(&url);
+        if let Some(value) = self.auth_value() {
+            head = head.set("Authorization", value);
         }
-        req.push_str("\r\n");
-        tcp.write_all(req.as_bytes())?;
-
-        let mut reader = BufReader::new(tcp);
-        let mut status_line = String::new();
-        reader.read_line(&mut status_line)?;
-
-        if status_line.contains(" 200 ") || status_line.contains(" 206 ") {
-            let mut line = String::new();
-            while reader.read_line(&mut line)? > 0 {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    break;
-                }
-                if let Some((k, v)) = trimmed.split_once(':') {
-                    if k.trim().eq_ignore_ascii_case("content-length") {
-                        if let Ok(sz) = v.trim().parse::<u64>() {
-                            self.total_size = Some(sz);
-                        }
-                    } else if k.trim().eq_ignore_ascii_case("content-range") {
-                        if let Some((_, total_str)) = v.trim().rsplit_once('/') {
-                            if let Ok(sz) = total_str.trim().parse::<u64>() {
-                                self.total_size = Some(sz);
-                            }
-                        }
-                    }
-                }
-                line.clear();
+        if let Ok(response) = head.call() {
+            self.total_size = Self::parse_total(&response);
+            if self.total_size.is_some() {
+                return Ok(());
             }
         }
 
-        // If HEAD didn't yield total_size, probe with 1-byte GET
+        // Some servers reject HEAD. A one-byte range GET discovers the total.
+        let response = self
+            .request()
+            .set("Range", "bytes=0-0")
+            .call()
+            .map_err(Self::map_error)?;
+        self.total_size = Self::parse_total(&response);
         if self.total_size.is_none() {
-            let mut tcp = self.connect()?;
-            let mut req = format!(
-                "GET {} HTTP/1.1\r\nHost: {}:{}\r\nRange: bytes=0-0\r\nConnection: close\r\n",
-                self.path, self.host, self.port
-            );
-            if let Some(ref auth) = self.auth_header {
-                req.push_str(auth);
-                req.push_str("\r\n");
-            }
-            req.push_str("\r\n");
-            tcp.write_all(req.as_bytes())?;
-
-            let mut reader = BufReader::new(tcp);
-            let mut status_line = String::new();
-            reader.read_line(&mut status_line)?;
-
-            let mut line = String::new();
-            while reader.read_line(&mut line)? > 0 {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    break;
-                }
-                if let Some((k, v)) = trimmed.split_once(':') {
-                    if k.trim().eq_ignore_ascii_case("content-range") {
-                        if let Some((_, total_str)) = v.trim().rsplit_once('/') {
-                            if let Ok(sz) = total_str.trim().parse::<u64>() {
-                                self.total_size = Some(sz);
-                            }
-                        }
-                    }
-                }
-                line.clear();
-            }
+            return Err(std::io::Error::other(
+                "HTTP server did not expose Content-Length or Content-Range",
+            ));
         }
-
         Ok(())
     }
 }
@@ -282,69 +317,50 @@ impl SeekableStream for HttpRangeStream {
                 "Stream cancelled",
             ));
         }
-
+        if buf.is_empty() {
+            return Ok(0);
+        }
         if let Some(total) = self.total_size {
             if self.position >= total {
-                return Ok(0); // EOF
+                return Ok(0);
             }
         }
 
         let start = self.position;
-        let mut end = start + buf.len() as u64 - 1;
+        let mut end = start.saturating_add(buf.len() as u64 - 1);
         if let Some(total) = self.total_size {
-            if end >= total {
-                end = total - 1;
-            }
+            end = end.min(total - 1);
         }
-
         if start > end {
             return Ok(0);
         }
 
-        let mut tcp = self.connect()?;
-        let mut req = format!(
-            "GET {} HTTP/1.1\r\nHost: {}:{}\r\nRange: bytes={}-{}\r\nConnection: close\r\n",
-            self.path, self.host, self.port, start, end
-        );
-        if let Some(ref auth) = self.auth_header {
-            req.push_str(auth);
-            req.push_str("\r\n");
-        }
-        req.push_str("\r\n");
-        tcp.write_all(req.as_bytes())?;
-
-        let mut reader = BufReader::new(tcp);
-        let mut status_line = String::new();
-        reader.read_line(&mut status_line)?;
-
-        if !status_line.contains(" 206 ") && !status_line.contains(" 200 ") {
+        let response = self
+            .request()
+            .set("Range", &format!("bytes={start}-{end}"))
+            .call()
+            .map_err(Self::map_error)?;
+        let status = response.status();
+        if status != 206 && !(status == 200 && start == 0) {
             return Err(std::io::Error::other(format!(
-                "HTTP Range request failed: {}",
-                status_line.trim()
+                "HTTP Range request failed with status {status}"
             )));
         }
-
-        // Consume headers until blank line
-        let mut line = String::new();
-        while reader.read_line(&mut line)? > 0 {
-            if line.trim().is_empty() {
-                break;
-            }
-            line.clear();
+        if let Some(total) = Self::parse_total(&response) {
+            self.total_size = Some(total);
         }
 
-        // Read body payload
+        let mut reader = response.into_reader();
         let max_to_read = (end - start + 1) as usize;
         let mut total_read = 0;
         while total_read < max_to_read {
             let n = reader.read(&mut buf[total_read..max_to_read])?;
             if n == 0 {
-                break; // EOF
+                break;
             }
             total_read += n;
         }
-
-        self.position += total_read as u64;
+        self.position = self.position.saturating_add(total_read as u64);
         Ok(total_read)
     }
 
@@ -359,6 +375,29 @@ impl SeekableStream for HttpRangeStream {
         }
         self.position = position;
         Ok(position)
+    }
+
+    fn seek_from(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        let target = match position {
+            SeekFrom::Start(position) => position,
+            SeekFrom::Current(delta) => {
+                self.position.checked_add_signed(delta).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek overflow")
+                })?
+            }
+            SeekFrom::End(delta) => {
+                let total = self.total_size.ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "cannot seek from end without a known size",
+                    )
+                })?;
+                total.checked_add_signed(delta).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek overflow")
+                })?
+            }
+        };
+        self.seek(target)
     }
 
     fn total_size(&self) -> Option<u64> {
@@ -846,6 +885,12 @@ impl SeekableStream for SftpSeekableStream {
         Ok(pos)
     }
 
+    fn seek_from(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        let pos = self.file.seek(position)?;
+        self.position = pos;
+        Ok(pos)
+    }
+
     fn total_size(&self) -> Option<u64> {
         self.size
     }
@@ -878,6 +923,24 @@ pub struct SmbSeekableStream {
 }
 
 impl SmbSeekableStream {
+    /// Opens a seekable stream through `SmbProvider::open_reader_async`.
+    ///
+    /// The provider remains the single place that validates configuration and
+    /// resolves credentials from the credential vault.
+    pub fn connect_via_provider(
+        provider: &muvrix_core::network::SmbProvider,
+        file_path: &str,
+    ) -> std::io::Result<Self> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| std::io::Error::other(format!("SMB runtime: {e}")))?;
+        let reader = runtime
+            .block_on(provider.open_reader_async(file_path))
+            .map_err(|e| std::io::Error::other(format!("SMB provider open: {e}")))?;
+        Ok(Self::new(reader))
+    }
+
     /// Connects to a remote SMB share and opens a seekable file stream on a dedicated worker thread.
     pub fn connect(
         host: &str,
@@ -1093,6 +1156,21 @@ impl SeekableStream for SmbSeekableStream {
         }
         self.position = position;
         Ok(position)
+    }
+
+    fn seek_from(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        let target = match position {
+            SeekFrom::Start(position) => position,
+            SeekFrom::Current(delta) => {
+                self.position.checked_add_signed(delta).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek overflow")
+                })?
+            }
+            SeekFrom::End(delta) => self.size.checked_add_signed(delta).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek overflow")
+            })?,
+        };
+        self.seek(target)
     }
 
     fn total_size(&self) -> Option<u64> {

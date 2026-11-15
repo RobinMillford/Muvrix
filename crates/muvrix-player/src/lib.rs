@@ -50,7 +50,8 @@ pub use shader::{
 };
 pub use stream::{
     HttpRangeStream, IoSeekableStream, MemoryStream, MpvStreamBridge, ReadAheadStream,
-    SeekableStream, SftpSeekableStream, SmbSeekableStream, StreamRegistry,
+    RecoverableStream, RecoveryState, SeekableStream, SftpSeekableStream, SmbSeekableStream,
+    StreamErrorKind, StreamRegistry, StreamRetryPolicy,
 };
 pub use thumbnail::MpvThumbnailExtractor;
 pub use track::{AssOverrideMode, ChapterInfo, SubtitleStyling, TrackInfo, TrackType};

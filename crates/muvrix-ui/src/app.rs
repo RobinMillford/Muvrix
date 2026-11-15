@@ -27,6 +27,7 @@ use muvrix_player::{
 
 use crate::gl_loader;
 use crate::icons::{self, Icon};
+use crate::library_enrichment::{enrich_pending, EnrichmentProgress};
 use crate::render_engine::RenderEngine;
 use crate::views::{AppView, SettingsTab};
 use crate::wake::{WakeBridge, WakeHandle};
@@ -114,6 +115,10 @@ pub struct MuvrixApp {
     pub(crate) active_scan_cancel: Option<Arc<AtomicBool>>,
     pub(crate) active_scan_rx: Option<mpsc::Receiver<ScanProgress>>,
     pub(crate) scan_progress: Option<ScanProgress>,
+    pub(crate) active_enrichment_cancel: Option<Arc<AtomicBool>>,
+    pub(crate) active_enrichment_rx: Option<mpsc::Receiver<EnrichmentProgress>>,
+    pub(crate) enrichment_progress: Option<EnrichmentProgress>,
+    pub(crate) enrichment_pending: bool,
     pub(crate) video_settings: VideoAdjustmentSettings,
     pub(crate) anime4k_preset: Anime4KPreset,
     pub(crate) anime4k_quality: ShaderQuality,
@@ -206,6 +211,7 @@ impl MuvrixApp {
         output: crate::output::OutputCaps,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         log::info!("Initializing MuvrixApp OpenGL 3.3+ Desktop Shell");
+        let startup_ctx = egui_ctx.clone();
 
         // 1. Inspect OpenGL context and GPU diagnostics
         let (gpu_vendor, gpu_renderer, gl_version) = unsafe {
@@ -511,6 +517,10 @@ impl MuvrixApp {
             active_scan_cancel: None,
             active_scan_rx: None,
             scan_progress: None,
+            active_enrichment_cancel: None,
+            active_enrichment_rx: None,
+            enrichment_progress: None,
+            enrichment_pending: false,
             video_settings: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("enhancement")
             {
                 VideoAdjustmentSettings {
@@ -613,6 +623,9 @@ impl MuvrixApp {
         };
 
         app.refresh_library();
+        if app.db.count_pending_media_items().unwrap_or(0) > 0 {
+            app.start_library_enrichment(&startup_ctx);
+        }
         app.refresh_audio_devices();
         app.apply_video_enhancements();
         app.apply_equalizer_settings();
@@ -1512,6 +1525,7 @@ impl MuvrixApp {
         if self.active_scan_cancel.is_some() {
             return;
         }
+        self.cancel_library_enrichment();
         let root = match self.db.get_root_by_id(root_id) {
             Ok(Some(r)) => r,
             _ => return,
@@ -1533,6 +1547,84 @@ impl MuvrixApp {
     pub fn cancel_library_scan(&mut self) {
         if let Some(ref token) = self.active_scan_cancel {
             token.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Starts a background metadata/thumbnail pass for all pending library rows.
+    ///
+    /// One worker owns one reusable metadata engine; it writes through the
+    /// cloned database handle and reports progress to the UI thread.
+    pub fn start_library_enrichment(&mut self, ctx: &egui::Context) {
+        if self.active_enrichment_cancel.is_some() {
+            self.enrichment_pending = true;
+            return;
+        }
+        self.enrichment_pending = false;
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        self.active_enrichment_cancel = Some(cancel.clone());
+        self.active_enrichment_rx = Some(rx);
+        self.enrichment_progress = Some(EnrichmentProgress::default());
+
+        let db = self.db.clone();
+        let cache = self.thumbnail_cache.clone();
+        let repaint = ctx.clone();
+        let result = std::thread::Builder::new()
+            .name("muvrix-library-enrichment".to_string())
+            .spawn(move || {
+                let summary = enrich_pending(db, cache, cancel, tx, Some(repaint));
+                log::info!(
+                    "library enrichment: processed={} metadata={} thumbnails={} failed={} cancelled={} error={:?}",
+                    summary.processed,
+                    summary.metadata_extracted,
+                    summary.thumbnails,
+                    summary.failed,
+                    summary.cancelled,
+                    summary.error
+                );
+            });
+        if let Err(e) = result {
+            log::error!("failed to spawn library enrichment worker: {e}");
+            self.active_enrichment_cancel = None;
+            self.active_enrichment_rx = None;
+            self.enrichment_progress = Some(EnrichmentProgress {
+                finished: true,
+                error: Some(format!("enrichment worker: {e}")),
+                ..Default::default()
+            });
+        }
+    }
+
+    pub fn cancel_library_enrichment(&mut self) {
+        if let Some(ref token) = self.active_enrichment_cancel {
+            token.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn poll_library_enrichment(&mut self, ctx: &egui::Context) {
+        let mut latest = None;
+        let mut finished = false;
+        if let Some(rx) = self.active_enrichment_rx.as_ref() {
+            while let Ok(progress) = rx.try_recv() {
+                finished |= progress.finished;
+                latest = Some(progress);
+            }
+        }
+        if let Some(progress) = latest {
+            let refresh = progress.finished || progress.processed.is_multiple_of(8);
+            self.enrichment_progress = Some(progress);
+            if refresh {
+                self.refresh_library();
+            }
+        }
+        if finished {
+            self.active_enrichment_rx = None;
+            self.active_enrichment_cancel = None;
+            self.refresh_library();
+            if std::mem::take(&mut self.enrichment_pending) {
+                self.start_library_enrichment(ctx);
+            }
         }
     }
 
@@ -1733,7 +1825,9 @@ impl MuvrixApp {
         if scan_finished {
             self.active_scan_cancel = None;
             self.refresh_library();
+            self.start_library_enrichment(ctx);
         }
+        self.poll_library_enrichment(ctx);
 
         self.sync_playback_state();
         self.check_decoder_path();
@@ -3267,6 +3361,8 @@ impl MuvrixApp {
     /// Releases GL and engine resources. Must run with the context current.
     pub fn shutdown(&mut self, gl: Option<&glow::Context>) {
         log::info!("Initiating safe teardown of MuvrixApp");
+        self.cancel_library_scan();
+        self.cancel_library_enrichment();
 
         // Persist final playback position in history store
         if let Some(path) = self.controller.current_file() {
