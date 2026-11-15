@@ -13,6 +13,7 @@ pub mod output;
 #[cfg(target_os = "linux")]
 pub mod platform;
 pub mod presentation;
+pub mod presentation_ack;
 pub mod quad;
 pub mod render_engine;
 #[cfg(target_os = "linux")]

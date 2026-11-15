@@ -164,6 +164,11 @@ pub struct RenderEngine {
     pacing: PacingMode,
     swap_report: SwapReportMode,
     pending_swap: bool,
+    /// Native Wayland runner owns `report_swap()` timing through wp_presentation.
+    external_swap_ack: bool,
+    /// Token for the most recent frame that actually rendered. The runner
+    /// consumes this after `paint()` and maps it to wp_presentation feedback.
+    last_rendered_token: Option<u64>,
     egui_ctx: Option<egui::Context>,
     /// `(Instant::now(), mpv clock)` pair used to convert between the monotonic
     /// clock and the engine's microsecond time base without touching the mpv
@@ -242,6 +247,8 @@ impl RenderEngine {
             pacing: PacingMode::from_env(),
             swap_report: SwapReportMode::from_env(),
             pending_swap: false,
+            external_swap_ack: false,
+            last_rendered_token: None,
             egui_ctx: None,
             clock_base: None,
             frame_signal: None,
@@ -267,6 +274,49 @@ impl RenderEngine {
     pub fn working_target_is_float(&self) -> bool {
         self.fbo.internal_format() == glow::RGBA16F as i32
             || self.fbo.internal_format() == glow::RGBA32F as i32
+    }
+
+    /// Enables external acknowledgement ownership (native Wayland runner).
+    ///
+    /// In this mode `paint()` records a token but does not set the single
+    /// `pending_swap` flag; the runner enqueues the token only after a successful
+    /// swap and calls [`Self::report_swap_tokens`] when wp_presentation reports
+    /// actual presentation.
+    pub fn set_external_swap_ack(&mut self, enabled: bool) {
+        self.external_swap_ack = enabled;
+        if enabled {
+            self.pending_swap = false;
+        }
+    }
+
+    pub fn external_swap_ack(&self) -> bool {
+        self.external_swap_ack
+    }
+
+    /// Takes the token for the most recent newly rendered frame, if any.
+    ///
+    /// A paint that only recomposited an existing frame returns `None`, so the
+    /// runner never requests presentation feedback for a non-frame commit.
+    pub fn take_rendered_token(&mut self) -> Option<u64> {
+        self.last_rendered_token.take()
+    }
+
+    /// Acknowledges one or more frames that a compositor presentation feedback
+    /// confirmed. Each token maps to exactly one `report_swap()` call.
+    pub fn report_swap_tokens(&mut self, tokens: &[u64]) {
+        for &token in tokens {
+            self.mpv_render_ctx.report_swap();
+            self.telemetry.swap_reports += 1;
+            crate::trace::record(crate::trace::Ev::ReportSwap, "presentation_feedback", 0, 0);
+            crate::causal_trace::record(
+                crate::causal_trace::Kind::ReportSwap,
+                token,
+                1,
+                0,
+                0,
+                "after_presentation",
+            );
+        }
     }
 
     /// Acknowledges the frame that was presented by the shell's swap.
@@ -565,22 +615,33 @@ impl RenderEngine {
             self.telemetry.render_block_hist[bucket] += 1;
             self.telemetry.mpv_renders += 1;
             self.frame_count += 1;
+            self.last_rendered_token = Some(self.frame_count);
 
             match self.swap_report {
-                SwapReportMode::Immediate => {
+                SwapReportMode::Immediate if !self.external_swap_ack => {
                     self.mpv_render_ctx.report_swap();
                     self.telemetry.swap_reports += 1;
                     crate::trace::record(crate::trace::Ev::ReportSwap, "immediate", 0, 0);
                     crate::causal_trace::record(
                         crate::causal_trace::Kind::ReportSwap,
-                        crate::causal_trace::last_draw(),
+                        self.frame_count,
                         1,
                         0,
                         0,
                         "immediate",
                     );
                 }
-                SwapReportMode::Deferred => self.pending_swap = true,
+                SwapReportMode::Immediate => {
+                    // The native runner owns acknowledgement timing. An
+                    // environment diagnostic must not reintroduce a premature
+                    // post-swap report while wp_presentation is active.
+                }
+                SwapReportMode::Deferred if !self.external_swap_ack => self.pending_swap = true,
+                SwapReportMode::Deferred => {
+                    // The native runner owns the acknowledgement. Do not create a
+                    // single pending flag; it cannot represent multiple frames in
+                    // flight or present/discard ordering.
+                }
                 SwapReportMode::None => {}
             }
 

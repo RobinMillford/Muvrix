@@ -60,6 +60,7 @@ pub enum Kind {
     PresentationDiscarded = 35,
     FrameCallbackRequest = 36,
     GpuTime = 37,
+    FrameDeadline = 38,
 }
 
 impl Kind {
@@ -102,6 +103,7 @@ impl Kind {
             Self::PresentationDiscarded => "presentation_discarded",
             Self::FrameCallbackRequest => "frame_callback_request",
             Self::GpuTime => "gpu_time",
+            Self::FrameDeadline => "frame_deadline",
         }
     }
 }
@@ -139,6 +141,8 @@ struct TraceSink {
 static SINK: OnceLock<Arc<TraceSink>> = OnceLock::new();
 static LAST_CALLBACK: AtomicU64 = AtomicU64::new(0);
 static LAST_DRAW: AtomicU64 = AtomicU64::new(0);
+static LAST_DROP_TOTAL: AtomicI64 = AtomicI64::new(-1);
+static LAST_DROP_DECODER: AtomicI64 = AtomicI64::new(-1);
 static DROP_STOP: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 static DROP_THREAD: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
 
@@ -423,6 +427,17 @@ pub fn last_draw() -> u64 {
     LAST_DRAW.load(Ordering::Relaxed)
 }
 
+/// Latest logical `frame-drop-count` / decoder drop count observed by the
+/// asynchronous drop watcher. The runner uses this lock-free snapshot when it
+/// records a frame deadline; it never performs a synchronous mpv property read
+/// from the GL thread for per-frame telemetry.
+pub fn drop_snapshot() -> (i64, i64) {
+    (
+        LAST_DROP_TOTAL.load(Ordering::Relaxed),
+        LAST_DROP_DECODER.load(Ordering::Relaxed),
+    )
+}
+
 /// Raw `CLOCK_MONOTONIC` nanoseconds, used to correlate the compositor's
 /// `wp_presentation` timestamp with the EGL swap timestamp. The clock id is
 /// recorded separately; no conversion is assumed.
@@ -473,6 +488,8 @@ pub fn install_drop_watcher(handle: Arc<MpvHandle>) {
                     .get_property::<bool>("display-sync-active")
                     .map(|v| v as i64)
                     .unwrap_or(-1);
+                LAST_DROP_TOTAL.store(drop, Ordering::Relaxed);
+                LAST_DROP_DECODER.store(dec, Ordering::Relaxed);
                 let now = (drop, dec, mist, delayed, dsync);
                 if prev != Some(now) {
                     record5(

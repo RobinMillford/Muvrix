@@ -75,6 +75,9 @@ impl DecodePath {
 pub struct DecodePolicy {
     family: PlatformFamily,
     candidates: Vec<&'static str>,
+    /// A deliberate user/test pin. It is not a transient fallback: a pinned
+    /// mode must survive a new media load unchanged.
+    pinned: Option<&'static str>,
 }
 
 impl DecodePolicy {
@@ -98,7 +101,24 @@ impl DecodePolicy {
             (PlatformFamily::MacOs, _) => vec!["auto-safe", "videotoolbox", "videotoolbox-copy"],
             (PlatformFamily::Other, _) => vec!["auto-safe"],
         };
-        Self { family, candidates }
+        Self {
+            family,
+            candidates,
+            pinned: None,
+        }
+    }
+
+    /// A policy with a deliberate pinned mode.
+    ///
+    /// This is the supported seam for a future user-facing hwdec selector and is
+    /// used by tests to prove that a pinned mode is not confused with the
+    /// transient fallback ladder.
+    pub fn pinned(family: PlatformFamily, mode: &'static str) -> Self {
+        Self {
+            family,
+            candidates: vec![mode],
+            pinned: Some(mode),
+        }
     }
 
     /// Policy for the running platform.
@@ -108,12 +128,19 @@ impl DecodePolicy {
                 "TEST-ONLY decoder override active: MUVRIX_TEST_HWDEC={forced}. \
                  This bypasses the capability ladder and is not a production path."
             );
-            return Self {
-                family: PlatformFamily::current(),
-                candidates: vec![forced],
-            };
+            return Self::pinned(PlatformFamily::current(), forced);
         }
         Self::for_platform(PlatformFamily::current(), has_native_display)
+    }
+
+    /// The deliberate pinned mode, if any.
+    pub fn pinned_mode(&self) -> Option<&'static str> {
+        self.pinned
+    }
+
+    /// True when the mode is a deliberate pin rather than the automatic ladder.
+    pub fn is_pinned(&self) -> bool {
+        self.pinned.is_some()
     }
 
     /// Reads the **test-only** decoder override `MUVRIX_TEST_HWDEC`.
@@ -137,13 +164,24 @@ impl DecodePolicy {
         self.family
     }
 
-    /// Mode to request on the first load.
+    /// Mode to request on the first load or after a new independent media item.
+    ///
+    /// A pinned mode is always returned unchanged. For the automatic policy this
+    /// is the top of the per-media ladder (`auto-safe` on Linux).
     pub fn initial_mode(&self) -> &'static str {
-        self.candidates.first().copied().unwrap_or("auto-safe")
+        self.pinned
+            .or_else(|| self.candidates.first().copied())
+            .unwrap_or("auto-safe")
     }
 
     /// Mode to request after `attempt` observed fallbacks, if any remain.
+    ///
+    /// Pinned policies deliberately have no fallback: a user/test pin is not a
+    /// capability probe.
     pub fn next_mode(&self, attempt: usize) -> Option<&'static str> {
+        if self.pinned.is_some() {
+            return None;
+        }
         self.candidates.get(attempt + 1).copied()
     }
 
@@ -309,5 +347,27 @@ mod tests {
         let obs = DecodeObservation::new("", "yuv420p10");
         assert!(obs.describe().contains("Software"));
         assert_eq!(obs.path, DecodePath::Software);
+    }
+
+    #[test]
+    fn automatic_policy_resets_to_the_ladder_top_not_the_last_fallback() {
+        let p = DecodePolicy::for_platform(PlatformFamily::Linux, true);
+        assert_eq!(p.initial_mode(), "auto-safe");
+        assert_eq!(p.next_mode(0), Some("vaapi"));
+        assert_eq!(p.next_mode(1), Some("vaapi-copy"));
+        // `next_mode` is a query, not a mutation. A new media item always starts
+        // from `initial_mode`, which is what the app writes back to hwdec.
+        assert_eq!(p.initial_mode(), "auto-safe");
+        assert_eq!(p.pinned_mode(), None);
+    }
+
+    #[test]
+    fn pinned_mode_survives_device_reset_and_has_no_fallback() {
+        let p = DecodePolicy::pinned(PlatformFamily::Linux, "vaapi-copy");
+        assert!(p.is_pinned());
+        assert_eq!(p.pinned_mode(), Some("vaapi-copy"));
+        assert_eq!(p.initial_mode(), "vaapi-copy");
+        assert_eq!(p.next_mode(0), None);
+        assert_eq!(p.next_mode(99), None);
     }
 }

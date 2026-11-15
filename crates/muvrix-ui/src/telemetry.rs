@@ -554,6 +554,8 @@ pub struct SharedMetrics {
     no_frame_fallback_deadlines: AtomicU64,
     dropped_frames: AtomicU64,
     decoder_dropped: AtomicI64,
+    presentation_feedback_available: AtomicBool,
+    presentation_feedback_total: AtomicU64,
     snapshot: Mutex<PresentationSnapshot>,
     timing: Mutex<TimingSamples>,
     rows_written: AtomicU64,
@@ -590,6 +592,8 @@ impl SharedMetrics {
             no_frame_fallback_deadlines: AtomicU64::new(0),
             dropped_frames: AtomicU64::new(0),
             decoder_dropped: AtomicI64::new(UNAVAILABLE_INT),
+            presentation_feedback_available: AtomicBool::new(false),
+            presentation_feedback_total: AtomicU64::new(0),
             snapshot: Mutex::new(initial),
             timing: Mutex::new(TimingSamples::default()),
             rows_written: AtomicU64::new(0),
@@ -782,6 +786,25 @@ impl SharedMetrics {
 
     pub fn rows_written(&self) -> u64 {
         self.rows_written.load(Ordering::Relaxed)
+    }
+
+    /// Marks whether this run has a compositor presentation-feedback source.
+    pub fn set_presentation_feedback_available(&self, available: bool) {
+        self.presentation_feedback_available
+            .store(available, Ordering::Release);
+    }
+
+    /// Counts one `wp_presentation_feedback.presented` event.
+    pub fn note_presented_feedback(&self) {
+        self.presentation_feedback_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `Some(count)` only when the compositor feedback protocol is active.
+    pub fn presentation_feedback_total(&self) -> Option<u64> {
+        self.presentation_feedback_available
+            .load(Ordering::Acquire)
+            .then(|| self.presentation_feedback_total.load(Ordering::Relaxed))
     }
 
     pub fn publish_skips(&self) -> u64 {
@@ -1054,7 +1077,7 @@ fn run_worker(metrics: Arc<SharedMetrics>, config: TelemetryConfig) {
             snapshot,
             &timing,
             clock,
-            None, // Wayland presentation feedback is not implemented.
+            metrics.presentation_feedback_total(),
         );
 
         log::info!(

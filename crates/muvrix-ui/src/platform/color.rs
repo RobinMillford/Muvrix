@@ -13,6 +13,7 @@
 //! about the panel: that separation is carried through the runner's HDR state
 //! and its diagnostics.
 
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 
 use wayland_client::globals::{registry_queue_init, GlobalList};
@@ -61,8 +62,23 @@ impl ColorCapabilities {
     }
 }
 
+/// Presentation feedback delivered on the shared foreign queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationEvent {
+    Presented {
+        token: u64,
+        presented_ns: i64,
+        refresh_ns: i64,
+        seq: u64,
+        flags: u32,
+    },
+    Discarded {
+        token: u64,
+    },
+}
+
 /// State object used for the colour-management event queue.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct CmState {
     pub caps: ColorCapabilities,
     /// Identity reported by `ready`/`ready2` for the description we created.
@@ -70,8 +86,13 @@ pub struct CmState {
     /// Failure reported by `failed` for the description we created.
     pub failure: Option<String>,
     pub error: Option<String>,
-    /// Clock id reported by `wp_presentation.clock_id` (diagnostic only).
+    /// Clock id reported by `wp_presentation.clock_id`.
     pub presentation_clock: Option<u32>,
+    /// Feedback events waiting to be consumed by the runner. The objects stay
+    /// in `feedback` until the compositor answers, so dropping the local proxy
+    /// cannot lose a feedback event.
+    presentation_events: VecDeque<PresentationEvent>,
+    feedback: HashMap<u64, WpPresentationFeedback>,
 }
 
 /// Owns the shared connection's colour-management queue and manager object.
@@ -120,23 +141,22 @@ impl ColorManager {
             caps.manager_version = bound.version();
             manager = Some(bound);
         }
-        // Diagnostic only: bind the stable presentation protocol so we can
-        // report whether the compositor advertises it and which clock it uses.
-        // No feedback objects are requested yet; per-commit feedback requires a
-        // safe commit-ordering owner.
-        let presentation = if std::env::var("MUVRIX_PRESENTATION_FEEDBACK").is_ok() {
-            match globals.bind::<WpPresentation, _, _>(&qh, 1..=1, ()) {
-                Ok(bound) => {
-                    log::info!("wp_presentation: v{}", bound.version());
-                    Some(bound)
-                }
-                Err(e) => {
-                    log::warn!("wp_presentation unavailable: {e}");
-                    None
-                }
+        // The runner owns acknowledgement timing on Wayland, so bind the stable
+        // presentation protocol whenever the compositor advertises it. It is
+        // optional: a compositor without it falls back to the old post-swap
+        // acknowledgement.
+        let presentation = match globals.bind::<WpPresentation, _, _>(&qh, 1..=1, ()) {
+            Ok(bound) => {
+                log::info!(
+                    "wp_presentation: v{} (production acknowledgement)",
+                    bound.version()
+                );
+                Some(bound)
             }
-        } else {
-            None
+            Err(e) => {
+                log::warn!("wp_presentation unavailable: {e}");
+                None
+            }
         };
 
         let mut this = Self {
@@ -212,8 +232,18 @@ impl ColorManager {
         self.state.presentation_clock
     }
 
+    /// True when the compositor exposed `wp_presentation` and feedback can be
+    /// requested for a commit.
+    pub fn has_presentation_feedback(&self) -> bool {
+        self.presentation.is_some()
+    }
+
     /// Requests presentation feedback for the next surface commit. Must be
     /// called before the EGL swap that commits the surface.
+    ///
+    /// The feedback proxy is retained in `CmState` until `presented` or
+    /// `discarded`; otherwise the proxy would be destroyed before the event
+    /// arrives on the shared queue.
     pub fn request_presentation_feedback(
         &mut self,
         surface_ptr: *mut c_void,
@@ -232,9 +262,23 @@ impl ColorManager {
         .map_err(|e| format!("cannot adopt wl_surface: {e}"))?;
         let surface = WlSurface::from_id(&self.conn, id)
             .map_err(|e| format!("cannot reference wl_surface: {e}"))?;
-        let _feedback: WpPresentationFeedback =
+        let feedback: WpPresentationFeedback =
             presentation.feedback(&surface, &self.qh, PresentationToken(token));
+        if self.state.feedback.insert(token, feedback).is_some() {
+            log::warn!("duplicate presentation feedback token {token}; replacing old object");
+        }
         Ok(())
+    }
+
+    /// Consumes all feedback events decoded by the last `dispatch_pending`.
+    pub fn drain_presentation_events(&mut self) -> Vec<PresentationEvent> {
+        self.state.presentation_events.drain(..).collect()
+    }
+
+    /// Drops a feedback object that the acknowledgement queue retired without a
+    /// compositor response (timeout, cap eviction, or failed swap).
+    pub fn discard_feedback(&mut self, token: u64) {
+        self.state.feedback.remove(&token);
     }
 
     pub fn supports_pq_bt2020(&self) -> bool {
@@ -467,13 +511,28 @@ impl Dispatch<WpPresentationFeedback, PresentationToken> for CmState {
                     wayland_client::WEnum::Value(v) => u32::from(v),
                     wayland_client::WEnum::Unknown(v) => v,
                 };
+                let secs = ((tv_sec_hi as u64) << 32) | tv_sec_lo as u64;
+                let presented_ns = secs
+                    .saturating_mul(1_000_000_000)
+                    .saturating_add(tv_nsec as u64) as i64;
+                let seq = ((seq_hi as u64) << 32) | seq_lo as u64;
+                state.feedback.remove(&token);
+                state
+                    .presentation_events
+                    .push_back(PresentationEvent::Presented {
+                        token,
+                        presented_ns,
+                        refresh_ns: refresh as i64,
+                        seq,
+                        flags: flags_raw,
+                    });
                 crate::causal_trace::record5(
                     crate::causal_trace::Kind::PresentationPresented,
                     token,
-                    tv_sec_hi as i64,
-                    tv_sec_lo as i64,
-                    tv_nsec as i64,
+                    presented_ns,
                     refresh as i64,
+                    now,
+                    seq as i64,
                     flags_raw as i64,
                     "presented",
                 );
@@ -489,6 +548,10 @@ impl Dispatch<WpPresentationFeedback, PresentationToken> for CmState {
                 );
             }
             feedback_iface::Event::Discarded => {
+                state.feedback.remove(&data.0);
+                state
+                    .presentation_events
+                    .push_back(PresentationEvent::Discarded { token: data.0 });
                 crate::causal_trace::record(
                     crate::causal_trace::Kind::PresentationDiscarded,
                     data.0,

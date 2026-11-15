@@ -735,6 +735,14 @@ impl MuvrixApp {
                 log::info!("Resolved media path -> {path_str}");
                 self.path_input = path_str.clone();
 
+                // A new independent media item always starts its own decoder
+                // attempt. `decode_attempt` is transient per-item state; the
+                // live libmpv `hwdec` property is reset explicitly before the
+                // load so a previous item's `vaapi-copy` fallback cannot leak
+                // into this one. A deliberate pin is preserved by
+                // `DecodePolicy::initial_mode()`.
+                self.reset_decoder_for_new_media();
+
                 // Check for saved resume position before loading
                 let resume_pos = self.history_store.get_resume_position(&path_str);
 
@@ -758,6 +766,9 @@ impl MuvrixApp {
                             }
                         }
                         // New file: re-observe which decoder the engine picks.
+                        // The reset already happened before `load_file()`; this
+                        // keeps the observation state clear if the load is
+                        // asynchronous.
                         self.decode_settled = false;
                         self.decode_attempt = 0;
                         self.decode_observation = None;
@@ -825,6 +836,31 @@ impl MuvrixApp {
                 log::warn!("Preset fixture missing: {e}");
             }
         }
+    }
+
+    /// Resets the decoder request for a new independent media item.
+    ///
+    /// `decode_attempt`/`decode_settled` are transient per-item state, but they
+    /// are not sufficient on their own: the previous item may have left the live
+    /// libmpv `hwdec` property at `vaapi-copy`. Writing `initial_mode()` back
+    /// before the load is what prevents cross-media policy inheritance. A
+    /// deliberate user/test pin is returned unchanged by `initial_mode()`.
+    fn reset_decoder_for_new_media(&mut self) {
+        let mode = self.decode_policy.initial_mode();
+        match self.controller.set_hwdec_mode(mode) {
+            Ok(()) => log::info!(
+                "Decoder policy reset for new media: hwdec='{mode}' pinned={}",
+                self.decode_policy.is_pinned()
+            ),
+            Err(e) => log::warn!(
+                "Failed to reset hwdec to '{mode}' for new media ({e}); \
+                 the decoder may retain the previous item's fallback"
+            ),
+        }
+        self.decode_attempt = 0;
+        self.decode_settled = false;
+        self.decode_observation = None;
+        self.hdr_state = None;
     }
 
     /// Opens the native file picker to select a media file.
@@ -914,7 +950,8 @@ impl MuvrixApp {
 
         self.decode_settled = true;
         log::info!(
-            "Decoder observed: hwdec='{}' pixelformat='{}' path={:?} requested='{}'",
+            "Decoder observed: file='{}' hwdec='{}' pixelformat='{}' path={:?} requested='{}'",
+            self.controller.current_file().unwrap_or("<none>"),
             observation.active,
             observation.pixel_format,
             observation.path,
@@ -1596,6 +1633,18 @@ impl MuvrixApp {
             .map(|e| e.telemetry().clone())
     }
 
+    /// Test-only engine pump for the sequential media harness.
+    ///
+    /// The normal UI path polls the engine and observes the decoder from
+    /// `frame_update`. A compositor that withholds paint callbacks must not make
+    /// a decoder-policy test unable to observe its own loads, so the test-only
+    /// sequence calls this from `about_to_wait`. It does not render or build UI.
+    pub fn poll_engine_only(&mut self) {
+        self.controller.poll_events();
+        self.sync_playback_state();
+        self.check_decoder_path();
+    }
+
     /// Current playback state (used by the WP3 presentation state machine).
     pub fn playback_state(&self) -> PlaybackState {
         self.controller.state().clone()
@@ -1621,6 +1670,28 @@ impl MuvrixApp {
     pub fn report_presented(&self) {
         if let Ok(mut engine) = self.render_engine.lock() {
             engine.report_presented();
+        }
+    }
+
+    /// Native Wayland presentation owns acknowledgement timing.
+    pub fn enable_external_presentation_ack(&self) {
+        if let Ok(mut engine) = self.render_engine.lock() {
+            engine.set_external_swap_ack(true);
+        }
+    }
+
+    /// Token of the most recent newly rendered frame, consumed by the runner.
+    pub fn take_presentation_token(&self) -> Option<u64> {
+        self.render_engine
+            .lock()
+            .ok()
+            .and_then(|mut engine| engine.take_rendered_token())
+    }
+
+    /// Acknowledge tokens when the compositor reports actual presentation.
+    pub fn report_swap_tokens(&self, tokens: &[u64]) {
+        if let Ok(mut engine) = self.render_engine.lock() {
+            engine.report_swap_tokens(tokens);
         }
     }
 

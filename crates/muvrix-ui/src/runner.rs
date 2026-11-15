@@ -34,6 +34,7 @@ use crate::platform::composite::{ColorMode, Composite};
 use crate::platform::precision::{probe_surface_precision, PrecisionReport};
 use crate::platform::presenter::{self, Presenter};
 use crate::presentation::{PresentationStateMachine, StateEvent};
+use crate::presentation_ack::{AckAction, PresentationAckQueue};
 use crate::telemetry::{Counters, SharedMetrics, TelemetryConfig, TelemetryWorker};
 use crate::wake::WakeHandle;
 
@@ -553,11 +554,22 @@ struct Shell {
     last_drawable: (u32, u32),
     /// One-time monitor refresh report for cadence evidence.
     monitor_reported: bool,
+    /// Token-ordered wp_presentation acknowledgement state.
+    presentation_ack: PresentationAckQueue,
+    /// Last logical frame-drop count recorded with a frame deadline.
+    last_frame_drop_total: Option<i64>,
 }
 
 impl Shell {
     /// Test-only sequential media loads for A/B transitions in one process.
     fn poll_test_sequence(&mut self) {
+        if self.test_sequence.is_empty() {
+            return;
+        }
+        // Keep engine observation alive even when the compositor withholds
+        // paints. This is test-only (`MUVRIX_TEST_SEQUENCE`) and never runs in
+        // normal playback.
+        self.app.poll_engine_only();
         if self.next_sequence >= self.test_sequence.len() {
             return;
         }
@@ -598,6 +610,143 @@ impl Shell {
     /// Counts one wake event delivered by the event loop (WP4 `wake_events_*`).
     fn note_wake(&mut self) {
         self.metrics.note_wake_delivered();
+    }
+
+    /// Dispatches already-decoded Wayland feedback and applies the ack queue.
+    ///
+    /// `ColorManager` uses the foreign display's private queue; winit remains
+    /// the only socket reader. This never performs a blocking read and never
+    /// touches the GL thread's file I/O.
+    fn drain_presentation_feedback(&mut self) {
+        let mut events = Vec::new();
+        if let Some(cm) = self.color.as_mut() {
+            cm.dispatch_pending();
+            events = cm.drain_presentation_events();
+        }
+        for event in events {
+            match event {
+                crate::platform::color::PresentationEvent::Presented { token, .. } => {
+                    self.metrics.note_presented_feedback();
+                    let actions = self.presentation_ack.presented(token);
+                    self.apply_ack_actions(actions);
+                }
+                crate::platform::color::PresentationEvent::Discarded { token } => {
+                    let actions = self.presentation_ack.discarded(token);
+                    self.apply_ack_actions(actions);
+                }
+            }
+        }
+        let expired = self.presentation_ack.expire(Instant::now());
+        self.apply_ack_actions(expired);
+    }
+
+    /// Requests feedback for the frame that will be committed by this swap.
+    ///
+    /// Returns true only when a feedback object was created. A false result is
+    /// the compositor-without-wp_presentation fallback: acknowledge after the
+    /// successful swap, exactly as before, rather than leaving libmpv waiting.
+    fn request_presentation_feedback(&mut self, token: Option<u64>) -> bool {
+        let Some(token) = token else {
+            return false;
+        };
+        let Some(cm) = self.color.as_mut() else {
+            return false;
+        };
+        if !cm.has_presentation_feedback() {
+            return false;
+        }
+        match cm.request_presentation_feedback(self.presenter.surface_ptr(), token) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("presentation feedback request failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// Records one rendered frame's deadline correlation.
+    ///
+    /// The record is keyed by the engine frame token. It joins:
+    /// `FrameCallbackRequest`/`RedrawRequested` (via the callback seq),
+    /// `DrawEnter` (via the draw seq), `RenderEnter`/`RenderExit`,
+    /// `SwapExit`, `PresentationPresented`, and `ReportSwap`. The drop delta is
+    /// read from the asynchronous watcher; no mpv property read is added to the
+    /// GL thread.
+    fn record_frame_deadline(
+        &mut self,
+        token: u64,
+        callback_seq: u64,
+        swap_us: i64,
+        swap_ok: bool,
+    ) {
+        let (drop_total, _) = crate::causal_trace::drop_snapshot();
+        let drop_delta = match (self.last_frame_drop_total, drop_total) {
+            (Some(previous), current) if previous >= 0 && current >= previous => current - previous,
+            (_, current) if current >= 0 => 0,
+            _ => -1,
+        };
+        self.last_frame_drop_total = Some(drop_total);
+        let render_us = self
+            .app
+            .render_telemetry()
+            .map(|telemetry| telemetry.last_render_block_us as i64)
+            .unwrap_or(-1);
+        crate::causal_trace::record5(
+            crate::causal_trace::Kind::FrameDeadline,
+            token,
+            callback_seq as i64,
+            crate::causal_trace::last_draw() as i64,
+            render_us,
+            swap_us,
+            drop_delta,
+            if swap_ok { "swap_ok" } else { "swap_fail" },
+        );
+    }
+
+    fn apply_ack_actions(&mut self, actions: Vec<AckAction>) {
+        // Batch the presentation confirmations so one compositor burst costs one
+        // engine lock acquisition. Drop actions retire their feedback proxy
+        // without ever calling report_swap().
+        let tokens: Vec<u64> = actions
+            .iter()
+            .filter_map(|action| match action {
+                AckAction::Report { token } => Some(*token),
+                AckAction::Drop { .. } => None,
+            })
+            .collect();
+        if !tokens.is_empty() {
+            self.app.report_swap_tokens(&tokens);
+        }
+        if let Some(cm) = self.color.as_mut() {
+            for action in actions {
+                // Report actions retire the proxy because the frame has already
+                // been accounted for; older FIFO entries retired by a newer
+                // presentation must not retain their feedback objects. Drop
+                // actions retire without ever reporting.
+                let token = match action {
+                    AckAction::Report { token } | AckAction::Drop { token } => token,
+                };
+                cm.discard_feedback(token);
+            }
+        }
+    }
+
+    /// Arms the acknowledgement watchdog below libmpv's 200 ms VO timeout.
+    ///
+    /// The deadline is merged with the existing wake deadline; it is not a
+    /// spin. Once all tokens are retired the queue has no next deadline.
+    fn arm_presentation_ack_watchdog(&mut self) {
+        let Some(at) = self.presentation_ack.next_deadline() else {
+            return;
+        };
+        let already_armed = self
+            .wake
+            .peek_deadline()
+            .map(|existing| existing <= at)
+            .unwrap_or(false);
+        if !already_armed {
+            self.wake.request_deadline(at);
+        }
     }
 
     /// Declares a known presentation suspension when an outstanding redraw
@@ -821,7 +970,6 @@ impl Shell {
             ..OutputCaps::default()
         };
 
-        let mut color_manager = None;
         let mut description = None;
         let mut color_mode = ColorMode::Sdr;
 
@@ -844,57 +992,61 @@ impl Shell {
             );
         }
 
-        if refusal.is_none() {
-            match unsafe { ColorManager::attach(display_ptr) } {
-                Ok(mut cm) => {
-                    output.color_manager_pq_bt2020 = cm.supports_pq_bt2020();
-                    if output.color_manager_pq_bt2020 {
-                        let peak = requested_peak_nits();
-                        output.target_peak_nits = Some(peak.0);
-                        output.peak_source = peak.1;
-                        match cm.describe_pq_bt2020(surface_ptr, peak.0, UI_WHITE_NITS as u32) {
-                            Ok(desc) => {
-                                let identity = desc.identity();
-                                output.description_accepted = true;
-                                output.description_identity = Some(identity);
-                                color_mode = ColorMode::Pq;
-                                description = Some(desc);
-                                log::info!(
-                                    "HDR output accepted by compositor: identity={identity} peak={} nits ({})",
-                                    peak.0,
-                                    peak.1
-                                );
-                            }
-                            Err(e) => {
-                                refusal = Some(format!("PQ description refused: {e}"));
-                            }
+        // Attach the shared foreign-display manager on every Wayland path, not
+        // only the HDR path: wp_presentation is needed for the production
+        // acknowledgement even when the output is SDR.
+        let mut color_manager = match unsafe { ColorManager::attach(display_ptr) } {
+            Ok(cm) => Some(cm),
+            Err(e) => {
+                if refusal.is_none() {
+                    refusal = Some(format!("wp_color_manager_v1 unavailable: {e}"));
+                }
+                None
+            }
+        };
+        let mut presentation_feedback_available = false;
+        if let Some(cm) = color_manager.as_mut() {
+            presentation_feedback_available = cm.has_presentation_feedback();
+            output.color_manager_pq_bt2020 = cm.supports_pq_bt2020();
+            if refusal.is_none() {
+                if output.color_manager_pq_bt2020 {
+                    let peak = requested_peak_nits();
+                    output.target_peak_nits = Some(peak.0);
+                    output.peak_source = peak.1;
+                    match cm.describe_pq_bt2020(surface_ptr, peak.0, UI_WHITE_NITS as u32) {
+                        Ok(desc) => {
+                            let identity = desc.identity();
+                            output.description_accepted = true;
+                            output.description_identity = Some(identity);
+                            color_mode = ColorMode::Pq;
+                            description = Some(desc);
+                            log::info!(
+                                "HDR output accepted by compositor: identity={identity} peak={} nits ({})",
+                                peak.0,
+                                peak.1
+                            );
                         }
-                    } else {
-                        refusal = Some(format!(
-                            "compositor does not advertise PQ + BT.2020 (manager v{}, tf={:?}, primaries={:?})",
-                            cm.manager_version().unwrap_or(0),
-                            cm.capabilities().transfer_functions,
-                            cm.capabilities().primaries
-                        ));
+                        Err(e) => {
+                            refusal = Some(format!("PQ description refused: {e}"));
+                        }
                     }
-                    color_manager = Some(cm);
+                } else {
+                    refusal = Some(format!(
+                        "compositor does not advertise PQ + BT.2020 (manager v{}, tf={:?}, primaries={:?})",
+                        cm.manager_version().unwrap_or(0),
+                        cm.capabilities().transfer_functions,
+                        cm.capabilities().primaries
+                    ));
                 }
-                Err(e) => refusal = Some(format!("wp_color_manager_v1 unavailable: {e}")),
             }
-        }
 
-        // An SDR surface still gets an explicit sRGB description, so the
-        // compositor's interpretation does not depend on its defaults.
-        if color_mode == ColorMode::Sdr {
-            if let Some(cm) = color_manager.as_mut() {
-                match cm.describe_srgb(surface_ptr) {
-                    Ok(desc) => {
-                        log::info!("sRGB description attached (identity={})", desc.identity());
-                        description = Some(desc);
-                    }
-                    Err(e) => log::warn!("sRGB description refused: {e}"),
-                }
-            }
+            // Do not attach an sRGB image description on the SDR fallback.
+            // Some compositors expose wp_color_manager_v1 but reject the named
+            // sRGB transfer function; a protocol error there would kill the
+            // shared Wayland connection. The presentation-feedback object is
+            // independent of the colour description and remains bound above.
+            // HDR descriptions are still attempted only through the supported
+            // PQ/BT.2020 feature gate.
         }
 
         output.native_hdr_available = color_mode == ColorMode::Pq;
@@ -953,6 +1105,12 @@ impl Shell {
             output.clone(),
         )
         .map_err(|e| format!("MuvrixApp init failed: {e}"))?;
+
+        // The native runner owns report_swap timing through wp_presentation.
+        // The render engine records a token instead of setting its single
+        // pending flag; if feedback is unavailable the runner falls back after a
+        // successful swap.
+        app.enable_external_presentation_ack();
 
         crate::causal_trace::install_drop_watcher(app.controller.handle().clone());
 
@@ -1017,6 +1175,7 @@ impl Shell {
         let started = Instant::now();
         let state_machine = PresentationStateMachine::new(started);
         let metrics = Arc::new(SharedMetrics::new(state_machine.snapshot()));
+        metrics.set_presentation_feedback_available(presentation_feedback_available);
         // The emission thread starts here, not on the first paint: rows must
         // exist even if the very first render stalls.
         // Parsed once so the painter and the worker enforce the same deadline.
@@ -1092,14 +1251,20 @@ impl Shell {
             destroyed: false,
             last_drawable: (0, 0),
             monitor_reported: false,
+            presentation_ack: PresentationAckQueue::default(),
+            last_frame_drop_total: None,
         })
     }
 
     fn draw(&mut self) {
         let now = Instant::now();
+        // Process feedback that arrived since the previous iteration before the
+        // next render decision. This is the only place a token is retired.
+        self.drain_presentation_feedback();
+        let draw_callback_seq = crate::causal_trace::last_callback();
         let draw_seq = crate::causal_trace::record(
             crate::causal_trace::Kind::DrawEnter,
-            crate::causal_trace::last_callback(),
+            draw_callback_seq,
             self.frame_count as i64,
             0,
             0,
@@ -1258,6 +1423,11 @@ impl Shell {
             &full_output.textures_delta,
         );
 
+        // The egui paint callback has now executed the engine's `paint()`. A
+        // token exists only when libmpv actually rendered a new frame, which is
+        // exactly when a presentation feedback object is meaningful.
+        let rendered_token = self.app.take_presentation_token();
+
         // --- Composite pass: video + UI in one go, into the window surface.
         let (video_tex, rect) = self.app.video_output().unwrap_or((None, [0, 0, 0, 0]));
         unsafe {
@@ -1342,6 +1512,10 @@ impl Shell {
 
         // --- Present. Every event carries the instant it actually happened;
         //     sampling later is what makes the ages meaningful.
+        //
+        // The feedback object must be created for the commit before the EGL
+        // swap. It belongs to the newly rendered token, not to every repaint.
+        let feedback_requested = self.request_presentation_feedback(rendered_token);
         self.window.pre_present_notify();
         // Winit's pre_present_notify() is the wl_surface.frame request site on
         // Wayland. Record the request attempt; Winit suppresses duplicates while
@@ -1354,21 +1528,6 @@ impl Shell {
             0,
             "pre_present",
         );
-        if self
-            .color
-            .as_ref()
-            .map(|cm| cm.presentation_version().is_some())
-            .unwrap_or(false)
-        {
-            if let Some(cm) = self.color.as_mut() {
-                if let Err(e) = cm.request_presentation_feedback(
-                    self.presenter.surface_ptr(),
-                    crate::causal_trace::last_draw(),
-                ) {
-                    log::warn!("presentation feedback request failed: {e}");
-                }
-            }
-        }
         crate::trace::record(crate::trace::Ev::SwapEnter, "egl", 0, 0);
         crate::causal_trace::record(
             crate::causal_trace::Kind::SwapEnter,
@@ -1386,22 +1545,26 @@ impl Shell {
         self.state_machine
             .on_event(StateEvent::SwapAttempted, attempt_at);
         let ok = self.presenter.swap();
+        let swap_us = attempt_at.elapsed().as_micros() as i64;
         crate::trace::record(
             crate::trace::Ev::SwapExit,
             if ok { "ok" } else { "fail" },
-            attempt_at.elapsed().as_micros() as i64,
+            swap_us,
             0,
         );
         crate::causal_trace::record5(
             crate::causal_trace::Kind::SwapExit,
             crate::causal_trace::last_draw(),
             ok as i64,
-            attempt_at.elapsed().as_micros() as i64,
+            swap_us,
             0,
             0,
             crate::causal_trace::monotonic_ns(),
             if ok { "ok" } else { "fail" },
         );
+        if let Some(token) = rendered_token {
+            self.record_frame_deadline(token, draw_callback_seq, swap_us, ok);
+        }
         if ok {
             // The swap is the strongest evidence available without a
             // presentation-feedback protocol: the buffer is now the
@@ -1417,20 +1580,36 @@ impl Shell {
             self.last_present_at = Some(presented_at);
             self.metrics
                 .note_present(presented_at, self.presenter.stats().last_swap_us);
-            self.app.report_presented();
+            if let Some(token) = rendered_token {
+                if feedback_requested {
+                    // The compositor will report actual presentation on the
+                    // shared foreign queue. Do not acknowledge the EGL submit.
+                    let actions = self.presentation_ack.enqueue(token, Instant::now());
+                    self.apply_ack_actions(actions);
+                } else {
+                    // No wp_presentation: preserve the old post-swap fallback
+                    // rather than let libmpv wait for an acknowledgement that
+                    // cannot arrive.
+                    self.app.report_swap_tokens(&[token]);
+                }
+            }
             self.presenter.mark_presented();
             self.state_machine
                 .on_event(StateEvent::SwapSucceeded, presented_at);
         } else {
             // The frame was not flipped, so telling libmpv it was would corrupt
-            // its timing. Drop the acknowledgement instead of reporting it late.
+            // its timing. Retire its feedback object and token without reporting.
             self.counters.egl_swap_failures_total =
                 self.counters.egl_swap_failures_total.saturating_add(1);
-            self.app
-                .render_engine
-                .lock()
-                .unwrap()
-                .discard_pending_swap();
+            if let Some(token) = rendered_token {
+                if feedback_requested {
+                    if let Some(cm) = self.color.as_mut() {
+                        cm.discard_feedback(token);
+                    }
+                }
+                let actions = self.presentation_ack.failed(token);
+                self.apply_ack_actions(actions);
+            }
             let device_lost = matches!(
                 self.presenter.state(),
                 crate::platform::presenter::PresentationState::DeviceLost
@@ -1490,14 +1669,6 @@ impl Shell {
                 stats.decoder_dropped
             );
         }
-
-        if self.color.is_some() {
-            // Colour-management events arrive on the shared connection; winit
-            // reads the socket, we only dispatch what it already decoded.
-            if let Some(cm) = self.color.as_mut() {
-                cm.dispatch_pending();
-            }
-        }
     }
 
     fn destroy(&mut self) {
@@ -1505,6 +1676,10 @@ impl Shell {
             return;
         }
         self.destroyed = true;
+        // Unpresented commits must never be reported. Retire their feedback
+        // proxies and tokens; no report_swap() is called for a teardown drop.
+        let pending = self.presentation_ack.clear();
+        self.apply_ack_actions(pending);
         // Final publish before the summary so the worker's last sample and the
         // reconciliation block read the freshest snapshot. The reconciliation
         // delta itself is the work done after the last per-second row, which is
@@ -1892,6 +2067,11 @@ impl ApplicationHandler<RunnerEvent> for Runner {
             return;
         };
 
+        // Presentation feedback arrives on the shared foreign queue after the
+        // compositor presents a committed buffer. Drain it here as well as at
+        // draw entry so the acknowledgement does not wait for a paint.
+        shell.drain_presentation_feedback();
+
         // The update-callback bridge latches at most one wake per loop
         // iteration. Clear it here, not in a paint: a paint is exactly what does
         // not happen while the compositor withholds frame callbacks.
@@ -1910,6 +2090,7 @@ impl ApplicationHandler<RunnerEvent> for Runner {
         // then cleared with it. While withholding, this keeps the loop waking
         // even though the compositor sends no frame callbacks.
         arm_suspension_probe(&shell.wake, shell.frame_callbacks_withheld, now);
+        shell.arm_presentation_ack_watchdog();
 
         match shell.wake.peek_deadline() {
             Some(at) => {
