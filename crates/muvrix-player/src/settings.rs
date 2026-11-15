@@ -3,15 +3,39 @@
 
 use crate::equalizer::{AudioDeviceInfo, EqualizerSettings};
 use crate::shader::{Anime4KPreset, ShaderQuality, VideoAdjustmentSettings};
+use crate::track::SubtitleStyling;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const CURRENT_SETTINGS_VERSION: u32 = 1;
+pub const CURRENT_SETTINGS_VERSION: u32 = 2;
 
 fn default_volume() -> f64 {
     100.0
+}
+
+/// Application appearance mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeMode {
+    #[default]
+    Dark,
+    Light,
+    Amoled,
+}
+
+/// Accent color used by the shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccentColor {
+    #[default]
+    Blue,
+    Purple,
+    Teal,
+    Green,
+    Orange,
+    Red,
 }
 
 /// Top-level persisted multimedia and engine configuration.
@@ -25,6 +49,12 @@ pub struct PersistedMediaSettings {
     pub selected_audio_device: String,
     #[serde(default = "default_volume")]
     pub volume: f64,
+    #[serde(default)]
+    pub subtitle_styling: SubtitleStyling,
+    #[serde(default)]
+    pub theme_mode: ThemeMode,
+    #[serde(default)]
+    pub accent_color: AccentColor,
 }
 
 impl Default for PersistedMediaSettings {
@@ -37,6 +67,9 @@ impl Default for PersistedMediaSettings {
             equalizer: EqualizerSettings::default(),
             selected_audio_device: "auto".to_string(),
             volume: 100.0,
+            subtitle_styling: SubtitleStyling::default(),
+            theme_mode: ThemeMode::Dark,
+            accent_color: AccentColor::Blue,
         }
     }
 }

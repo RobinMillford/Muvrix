@@ -217,7 +217,29 @@ pub struct ArtworkRecord {
     pub generated_at: u64,
 }
 
-/// User-created collection or playlist.
+/// Persisted user playlist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Playlist {
+    pub id: i64,
+    pub name: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub item_count: u32,
+}
+
+/// Ordered entry in a persisted playlist. Paths may be local files or HTTP(S) URLs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistEntry {
+    pub id: i64,
+    pub playlist_id: i64,
+    pub position: i32,
+    pub path: String,
+    pub title: Option<String>,
+    pub duration_ms: u64,
+    pub added_at: u64,
+}
+
+/// User-created collection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Collection {
     pub id: i64,

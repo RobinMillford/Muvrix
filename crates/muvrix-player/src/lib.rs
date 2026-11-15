@@ -26,7 +26,9 @@ pub use capability::{
 };
 
 pub use command::{LoadFileMode, SeekMode};
-pub use controller::{PlaybackController, PlaybackState};
+pub use controller::{
+    parse_mpvex_command, AbLoopState, MpvexCommand, PlaybackController, PlaybackState, RepeatMode,
+};
 pub use decode::{DecodeObservation, DecodePath, DecodePolicy, PlatformFamily};
 pub use equalizer::{
     AudioDeviceInfo, AudioOutputDevice, EqBand, EqualizerManager, EqualizerPreset,
@@ -43,7 +45,7 @@ pub use metadata::MpvMetadataExtractor;
 pub use playlist::PlaylistItem;
 pub use property::{GetProperty, PropertyFormat, SetProperty};
 pub use render::{MpvRenderContext, NativeDisplay};
-pub use settings::{PersistedMediaSettings, CURRENT_SETTINGS_VERSION};
+pub use settings::{AccentColor, PersistedMediaSettings, ThemeMode, CURRENT_SETTINGS_VERSION};
 pub use shader::{
     Anime4KPreset, GamutMappingMode, ShaderManager, ShaderProfile, ShaderQuality, TargetPrimaries,
     TargetTrc, ToneMappingAlgorithm, VideoAdjustmentSettings,
@@ -54,5 +56,7 @@ pub use stream::{
     StreamErrorKind, StreamRegistry, StreamRetryPolicy,
 };
 pub use thumbnail::MpvThumbnailExtractor;
-pub use track::{AssOverrideMode, ChapterInfo, SubtitleStyling, TrackInfo, TrackType};
+pub use track::{
+    AssOverrideMode, ChapterInfo, SubtitleJustify, SubtitleStyling, TrackInfo, TrackType,
+};
 pub use version::ApiVersion;

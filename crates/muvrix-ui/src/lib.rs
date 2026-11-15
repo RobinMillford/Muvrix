@@ -3,6 +3,7 @@
 pub mod app;
 pub mod causal_trace;
 pub mod clock;
+pub mod config_editor;
 pub mod fbo;
 pub mod gl_loader;
 pub mod gpu_timing;

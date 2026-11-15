@@ -74,6 +74,9 @@ fn test_full_restart_persistence_lifecycle() {
         selected_audio_device: "pipewire/alsa_output.pci-0000_00_1f.3.HiFi__Headphones__sink"
             .to_string(),
         volume: 115.0,
+        subtitle_styling: Default::default(),
+        theme_mode: Default::default(),
+        accent_color: Default::default(),
     };
 
     // 2. Persist to disk
@@ -271,6 +274,9 @@ fn test_real_application_settings_persistence_and_libmpv_restoration_lifecycle()
         equalizer: eq,
         selected_audio_device: target_device.clone(),
         volume: 115.0,
+        subtitle_styling: Default::default(),
+        theme_mode: Default::default(),
+        accent_color: Default::default(),
     };
 
     // 2. Persist to disk

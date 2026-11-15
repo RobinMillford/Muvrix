@@ -960,11 +960,11 @@ fn test_database_migration_from_phase_1_1_preserves_bookmarks_and_adds_ssh_trust
     let db = DatabaseManager::open(&db_path).expect("Open via DatabaseManager");
     assert!(db.check_integrity().expect("Integrity check"));
 
-    // 3. Verify schema upgraded from 2 to 3
+    // 3. Verify schema upgraded to the latest migration.
     let version = db.get_schema_version().expect("Get schema version");
     assert_eq!(
-        version, 3,
-        "Database must successfully upgrade to Schema Version 3"
+        version, LATEST_SCHEMA_VERSION,
+        "Database must successfully upgrade to the latest schema version"
     );
 
     // 4. Verify existing Phase 1.1 bookmarks are preserved intact

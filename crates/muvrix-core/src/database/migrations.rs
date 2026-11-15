@@ -3,7 +3,7 @@
 use rusqlite::{Connection, Result, Transaction};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const LATEST_SCHEMA_VERSION: u32 = 3;
+pub const LATEST_SCHEMA_VERSION: u32 = 4;
 
 /// Apply all pending database migrations within a transaction.
 pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
@@ -43,6 +43,13 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
         let tx = conn.transaction()?;
         migration_003_ssh_host_trust(&tx)?;
         record_migration(&tx, 3, "Persistent SSH host key trust store")?;
+        tx.commit()?;
+    }
+
+    if current_version < 4 {
+        let tx = conn.transaction()?;
+        migration_004_playlists(&tx)?;
+        record_migration(&tx, 4, "Persistent playlists and ordered M3U entries")?;
         tx.commit()?;
     }
 
@@ -261,5 +268,31 @@ fn migration_003_ssh_host_trust(tx: &Transaction) -> Result<()> {
         ",
     )?;
 
+    Ok(())
+}
+
+fn migration_004_playlists(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
+        "
+        CREATE TABLE playlists (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE playlist_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            title TEXT,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            added_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX idx_playlist_items_playlist ON playlist_items(playlist_id, position);
+        ",
+    )?;
     Ok(())
 }

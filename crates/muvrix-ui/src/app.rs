@@ -20,11 +20,13 @@ use muvrix_core::thumbnails::ThumbnailCache;
 use muvrix_player::equalizer::{AudioDeviceInfo, EqualizerManager, EqualizerSettings};
 use muvrix_player::shader::{Anime4KPreset, ShaderManager, ShaderQuality, VideoAdjustmentSettings};
 use muvrix_player::{
-    classify_source, plan_presentation, DecodeObservation, DecodePath, DecodePolicy, Event,
-    MediaCapabilities, MpvHandle, MpvRenderContext, MpvStreamBridge, PlaybackController,
-    PlaybackState, PresentationState, SeekMode, SubtitleStyling, TrackInfo, TrackType,
+    classify_source, plan_presentation, AbLoopState, AccentColor, DecodeObservation, DecodePath,
+    DecodePolicy, Event, MediaCapabilities, MpvHandle, MpvRenderContext, MpvStreamBridge,
+    MpvexCommand, PlaybackController, PlaybackState, PresentationState, RepeatMode, SeekMode,
+    SubtitleStyling, ThemeMode, TrackInfo, TrackType,
 };
 
+use crate::config_editor::{self, ConfigEditorFile};
 use crate::gl_loader;
 use crate::icons::{self, Icon};
 use crate::library_enrichment::{enrich_pending, EnrichmentProgress};
@@ -46,6 +48,33 @@ impl PlaybackStats {
     /// Max absolute A/V difference when both sides are known.
     pub fn avsync_abs(&self) -> Option<f64> {
         self.avsync.map(|v| v.abs())
+    }
+}
+
+/// In-app sleep timer mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SleepTimer {
+    #[default]
+    Off,
+    Minutes(u32),
+    EndOfFile,
+}
+
+impl SleepTimer {
+    pub fn label(self) -> String {
+        match self {
+            Self::Off => "Off".to_string(),
+            Self::Minutes(minutes) => format!("{minutes} min"),
+            Self::EndOfFile => "End of file".to_string(),
+        }
+    }
+}
+
+/// Computes the deadline for a timed sleep mode.
+pub fn sleep_deadline_for(timer: SleepTimer, now: Instant) -> Option<Instant> {
+    match timer {
+        SleepTimer::Minutes(minutes) => Some(now + Duration::from_secs(minutes as u64 * 60)),
+        SleepTimer::Off | SleepTimer::EndOfFile => None,
     }
 }
 
@@ -96,6 +125,20 @@ pub struct MuvrixApp {
     pub(crate) is_pip: bool,
     pub(crate) last_history_save: Instant,
     pub(crate) active_styling: SubtitleStyling,
+    pub(crate) theme_mode: ThemeMode,
+    pub(crate) accent_color: AccentColor,
+    pub(crate) ui_overlay_visible: bool,
+    pub(crate) sleep_timer: SleepTimer,
+    pub(crate) sleep_deadline: Option<Instant>,
+    pub(crate) settings_search: String,
+    pub(crate) config_editor_file: ConfigEditorFile,
+    pub(crate) config_editor_text: String,
+    pub(crate) config_editor_loaded: bool,
+    pub(crate) config_editor_status: String,
+    pub(crate) selected_persistent_playlist: Option<i64>,
+    pub(crate) playlist_name_input: String,
+    pub(crate) playlist_import_input: String,
+    pub(crate) playlist_status: Option<String>,
 
     // Phase 0.8 Media Library & Enhancement state
     pub(crate) db: DatabaseManager,
@@ -500,7 +543,21 @@ impl MuvrixApp {
             pending_resume_prompt: None,
             is_pip: false,
             last_history_save: Instant::now(),
-            active_styling: SubtitleStyling::default(),
+            active_styling: persisted.subtitle_styling.clone(),
+            theme_mode: persisted.theme_mode,
+            accent_color: persisted.accent_color,
+            ui_overlay_visible: true,
+            sleep_timer: SleepTimer::Off,
+            sleep_deadline: None,
+            settings_search: String::new(),
+            config_editor_file: ConfigEditorFile::MpvConf,
+            config_editor_text: String::new(),
+            config_editor_loaded: false,
+            config_editor_status: String::new(),
+            selected_persistent_playlist: None,
+            playlist_name_input: String::new(),
+            playlist_import_input: String::new(),
+            playlist_status: None,
             db,
             thumbnail_cache,
             library_filter: LibraryFilter::default(),
@@ -623,6 +680,9 @@ impl MuvrixApp {
         };
 
         app.refresh_library();
+        let _ = app
+            .controller
+            .set_subtitle_styling(app.active_styling.clone());
         if app.db.count_pending_media_items().unwrap_or(0) > 0 {
             app.start_library_enrichment(&startup_ctx);
         }
@@ -917,6 +977,181 @@ impl MuvrixApp {
     /// Seeks relative to current playback position by `seconds`.
     pub fn seek_relative(&mut self, seconds: f64) {
         let _ = self.controller.seek(seconds, SeekMode::Relative);
+    }
+
+    pub fn frame_step(&mut self) {
+        let _ = self.controller.frame_step();
+    }
+
+    pub fn frame_back_step(&mut self) {
+        let _ = self.controller.frame_back_step();
+    }
+
+    pub fn cycle_ab_loop(&mut self) {
+        match self.controller.cycle_ab_loop() {
+            Ok(()) => {
+                self.status_message = match self.controller.ab_loop_state() {
+                    AbLoopState::None => "A-B loop cleared".to_string(),
+                    AbLoopState::PointA(a) => {
+                        format!("A-B loop: A set at {}", format_timestamp(a))
+                    }
+                    AbLoopState::Loop { a, b } => format!(
+                        "A-B loop: {} → {}",
+                        format_timestamp(a),
+                        format_timestamp(b)
+                    ),
+                };
+            }
+            Err(e) => self.status_message = format!("A-B loop: {e}"),
+        }
+    }
+
+    pub fn cycle_repeat_mode(&mut self) {
+        let next = match self.controller.repeat_mode() {
+            RepeatMode::Off => RepeatMode::One,
+            RepeatMode::One => RepeatMode::All,
+            RepeatMode::All => RepeatMode::Off,
+        };
+        if let Err(e) = self.controller.set_repeat_mode(next) {
+            self.status_message = format!("Repeat mode: {e}");
+        }
+    }
+
+    pub fn set_panscan(&mut self, value: f64) {
+        let _ = self.controller.set_panscan(value);
+    }
+
+    pub fn set_sleep_timer(&mut self, timer: SleepTimer) {
+        self.sleep_timer = timer;
+        self.sleep_deadline = sleep_deadline_for(timer, Instant::now());
+        self.status_message = format!("Sleep timer: {}", timer.label());
+    }
+
+    pub fn sleep_remaining(&self) -> Option<Duration> {
+        self.sleep_deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    }
+
+    fn tick_sleep_timer(&mut self) {
+        match self.sleep_timer {
+            SleepTimer::Off => {}
+            SleepTimer::Minutes(_) => {
+                if self
+                    .sleep_deadline
+                    .is_some_and(|deadline| Instant::now() >= deadline)
+                {
+                    let _ = self.controller.pause();
+                    self.sleep_timer = SleepTimer::Off;
+                    self.sleep_deadline = None;
+                    self.status_message = "Sleep timer expired; playback paused".to_string();
+                }
+            }
+            SleepTimer::EndOfFile => {
+                if *self.controller.state() == PlaybackState::Ended {
+                    let _ = self.controller.pause();
+                    self.sleep_timer = SleepTimer::Off;
+                    self.status_message = "Sleep timer: end of file reached".to_string();
+                }
+            }
+        }
+    }
+
+    fn dispatch_mpvex_commands(&mut self) {
+        for command in self.controller.drain_mpvex_commands() {
+            match command {
+                MpvexCommand::ShowText(text) => self.status_message = text,
+                MpvexCommand::ToggleUi => {
+                    self.ui_overlay_visible = !self.ui_overlay_visible;
+                }
+                MpvexCommand::ShowPanel(name) => {
+                    self.current_view = match name.to_ascii_lowercase().as_str() {
+                        "player" => AppView::Player,
+                        "library" => AppView::Library,
+                        "browser" | "files" => AppView::Browser,
+                        "playlist" | "queue" => AppView::Playlist,
+                        "lyrics" => AppView::Lyrics,
+                        "history" | "recent" => AppView::Recent,
+                        "settings" => AppView::Settings,
+                        _ => self.current_view,
+                    };
+                }
+                MpvexCommand::SeekBy(delta) => {
+                    let _ = self.controller.seek(delta, SeekMode::Relative);
+                }
+                MpvexCommand::SeekTo(target) => {
+                    let _ = self.controller.seek(target, SeekMode::Absolute);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn ensure_config_editor_loaded(&mut self) {
+        if self.config_editor_loaded {
+            return;
+        }
+        match config_editor::load(self.config_editor_file) {
+            Ok(text) => {
+                self.config_editor_text = text;
+                self.config_editor_status = format!("Loaded {}", self.config_editor_file.label());
+            }
+            Err(e) => self.config_editor_status = format!("Load failed: {e}"),
+        }
+        self.config_editor_loaded = true;
+    }
+
+    pub(crate) fn save_config_editor(&mut self) {
+        match config_editor::save(self.config_editor_file, &self.config_editor_text) {
+            Ok(path) => {
+                self.config_editor_status = format!("Saved {}", path.display());
+                if self.config_editor_file == ConfigEditorFile::MpvConf {
+                    let _ = self
+                        .controller
+                        .handle()
+                        .command(&["load-config-file", path.to_string_lossy().as_ref()]);
+                }
+            }
+            Err(e) => self.config_editor_status = format!("Save failed: {e}"),
+        }
+    }
+
+    pub fn add_to_selected_playlist(
+        &mut self,
+        path: String,
+        title: Option<String>,
+        duration_ms: u64,
+    ) {
+        let Some(playlist_id) = self.selected_persistent_playlist else {
+            self.playlist_status = Some("Select or create a saved playlist first".to_string());
+            return;
+        };
+        match self
+            .db
+            .add_playlist_entry(playlist_id, &path, title.as_deref(), duration_ms)
+        {
+            Ok(_) => self.playlist_status = Some(format!("Added to saved playlist: {path}")),
+            Err(e) => self.playlist_status = Some(format!("Playlist add failed: {e}")),
+        }
+    }
+
+    pub fn play_saved_playlist(&mut self, playlist_id: i64) -> Result<(), String> {
+        let entries = self
+            .db
+            .list_playlist_entries(playlist_id)
+            .map_err(|e| e.to_string())?;
+        if entries.is_empty() {
+            return Err("Playlist is empty".to_string());
+        }
+        let _ = self.controller.playlist_clear();
+        for entry in &entries {
+            self.controller
+                .playlist_append(&entry.path)
+                .map_err(|e| e.to_string())?;
+        }
+        self.controller
+            .playlist_play_index(0)
+            .map_err(|e| e.to_string())?;
+        self.current_view = AppView::Player;
+        Ok(())
     }
 
     /// Toggles fullscreen window state.
@@ -1294,6 +1529,19 @@ impl MuvrixApp {
         }
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
             let _ = self.controller.adjust_volume(-5.0);
+        }
+
+        // . / ,: frame-step forward/back
+        if ctx.input(|i| i.key_pressed(egui::Key::Period)) {
+            self.frame_step();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Comma)) {
+            self.frame_back_step();
+        }
+
+        // L: cycle A-B loop
+        if ctx.input(|i| i.key_pressed(egui::Key::L)) {
+            self.cycle_ab_loop();
         }
 
         // M: Mute / Unmute toggle
@@ -1680,6 +1928,9 @@ impl MuvrixApp {
             equalizer: self.equalizer_settings.clone(),
             selected_audio_device: self.selected_audio_device.clone(),
             volume: current_volume,
+            subtitle_styling: self.active_styling.clone(),
+            theme_mode: self.theme_mode,
+            accent_color: self.accent_color,
         };
         let _ = settings.save(None);
     }
@@ -1830,6 +2081,11 @@ impl MuvrixApp {
         self.poll_library_enrichment(ctx);
 
         self.sync_playback_state();
+        self.dispatch_mpvex_commands();
+        self.tick_sleep_timer();
+        if matches!(self.sleep_timer, SleepTimer::Minutes(_)) {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
         self.check_decoder_path();
         self.flush_telemetry();
         self.update_frame_timing();
@@ -1905,9 +2161,36 @@ impl MuvrixApp {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
 
-        // Apply sleek dark aesthetic theme
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = Color32::from_rgb(18, 20, 26);
+        // Apply the persisted appearance mode and accent color.
+        let mut visuals = match self.theme_mode {
+            ThemeMode::Dark => egui::Visuals::dark(),
+            ThemeMode::Light => egui::Visuals::light(),
+            ThemeMode::Amoled => {
+                let mut visuals = egui::Visuals::dark();
+                let black = Color32::BLACK;
+                visuals.panel_fill = black;
+                visuals.window_fill = black;
+                visuals.extreme_bg_color = black;
+                visuals.faint_bg_color = black;
+                visuals.code_bg_color = black;
+                visuals
+            }
+        };
+        if self.theme_mode == ThemeMode::Dark {
+            visuals.panel_fill = Color32::from_rgb(18, 20, 26);
+        }
+        let accent = match self.accent_color {
+            AccentColor::Blue => Color32::from_rgb(60, 150, 245),
+            AccentColor::Purple => Color32::from_rgb(168, 85, 247),
+            AccentColor::Teal => Color32::from_rgb(20, 184, 166),
+            AccentColor::Green => Color32::from_rgb(74, 222, 128),
+            AccentColor::Orange => Color32::from_rgb(249, 115, 22),
+            AccentColor::Red => Color32::from_rgb(239, 68, 68),
+        };
+        visuals.selection.bg_fill = accent;
+        visuals.selection.stroke = Stroke::new(1.0_f32, accent);
+        visuals.hyperlink_color = accent;
+        visuals.widgets.active.bg_fill = accent;
         ctx.set_visuals(visuals);
 
         // ---------------------------------------------------------------------
@@ -1916,6 +2199,9 @@ impl MuvrixApp {
         egui::TopBottomPanel::top("player_top_bar")
             .resizable(false)
             .show(ctx, |ui| {
+                if !self.ui_overlay_visible {
+                    return;
+                }
                 ui.add_space(3.0);
                 let available_w = ui.available_width();
 
@@ -2334,6 +2620,9 @@ impl MuvrixApp {
             egui::TopBottomPanel::bottom("player_controls")
                 .resizable(false)
                 .show(ctx, |ui| {
+                    if !self.ui_overlay_visible {
+                        return;
+                    }
                     ui.add_space(4.0);
 
                     let deck_width = ui.available_width();
@@ -2554,6 +2843,44 @@ impl MuvrixApp {
                             self.seek_relative(5.0);
                         }
 
+                        ui.add_space(2.0);
+                        if ui
+                            .button("◀|")
+                            .on_hover_text("Previous frame (,)")
+                            .clicked()
+                        {
+                            self.frame_back_step();
+                        }
+                        if ui.button("|▶").on_hover_text("Next frame (.)").clicked() {
+                            self.frame_step();
+                        }
+
+                        let ab_label = match self.controller.ab_loop_state() {
+                            AbLoopState::None => "A-B",
+                            AbLoopState::PointA(_) => "A-B•",
+                            AbLoopState::Loop { .. } => "A-B↺",
+                        };
+                        if ui
+                            .button(ab_label)
+                            .on_hover_text("Cycle A-B loop (L)")
+                            .clicked()
+                        {
+                            self.cycle_ab_loop();
+                        }
+
+                        let repeat_label = match self.controller.repeat_mode() {
+                            RepeatMode::Off => "Repeat: Off",
+                            RepeatMode::One => "Repeat: One",
+                            RepeatMode::All => "Repeat: All",
+                        };
+                        if ui
+                            .button(repeat_label)
+                            .on_hover_text("Cycle production repeat mode")
+                            .clicked()
+                        {
+                            self.cycle_repeat_mode();
+                        }
+
                         // Chapter navigation if present
                         let chapters = self.controller.chapters().to_vec();
                         if !chapters.is_empty() {
@@ -2662,7 +2989,8 @@ impl MuvrixApp {
 
                         let mut vol = self.controller.volume();
                         let vol_label = format!("{:.0}%", vol);
-                        let vol_slider = egui::Slider::new(&mut vol, 0.0..=100.0)
+                        let max_volume = self.controller.volume_boost_max().max(100.0);
+                        let vol_slider = egui::Slider::new(&mut vol, 0.0..=max_volume)
                             .show_value(false)
                             .text(vol_label);
                         let vol_w = if deck_width < 960.0 { 38.0 } else { 65.0 };
@@ -2708,6 +3036,41 @@ impl MuvrixApp {
                                 .clicked()
                         {
                             let _ = self.controller.reset_speed();
+                        }
+
+                        ui.add_space(3.0);
+                        ui.separator();
+                        ui.add_space(3.0);
+                        egui::ComboBox::from_id_salt("sleep_timer_combo")
+                            .selected_text(format!("Sleep: {}", self.sleep_timer.label()))
+                            .show_ui(ui, |ui| {
+                                for option in [
+                                    SleepTimer::Off,
+                                    SleepTimer::Minutes(15),
+                                    SleepTimer::Minutes(30),
+                                    SleepTimer::Minutes(45),
+                                    SleepTimer::Minutes(60),
+                                    SleepTimer::EndOfFile,
+                                ] {
+                                    if ui
+                                        .selectable_label(
+                                            self.sleep_timer == option,
+                                            option.label(),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.set_sleep_timer(option);
+                                    }
+                                }
+                            });
+                        if let Some(remaining) = self.sleep_remaining() {
+                            let seconds = remaining.as_secs();
+                            ui.label(
+                                RichText::new(format!("{}:{:02}", seconds / 60, seconds % 60))
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(Color32::from_rgb(125, 211, 252)),
+                            );
                         }
 
                         // Group 4: Right-aligned Controls (Fullscreen, Subs, Audio)
@@ -3303,6 +3666,14 @@ impl MuvrixApp {
 
                             ui.label(RichText::new("Up / Down").strong().monospace());
                             ui.label("Volume +5% / -5%");
+                            ui.end_row();
+
+                            ui.label(RichText::new(". / ,").strong().monospace());
+                            ui.label("Next / Previous Frame");
+                            ui.end_row();
+
+                            ui.label(RichText::new("L").strong().monospace());
+                            ui.label("Cycle A-B Loop");
                             ui.end_row();
 
                             ui.label(RichText::new("M").strong().monospace());

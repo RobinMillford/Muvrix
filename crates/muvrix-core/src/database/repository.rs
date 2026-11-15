@@ -629,6 +629,181 @@ impl Repository {
     }
 
     // -------------------------------------------------------------------------
+    // Persistent Playlists
+    // -------------------------------------------------------------------------
+
+    pub fn create_playlist(conn: &Connection, name: &str) -> Result<i64> {
+        let now = current_timestamp() as i64;
+        conn.execute(
+            "INSERT INTO playlists (name, created_at, updated_at) VALUES (?1, ?2, ?3)",
+            params![name.trim(), now, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn rename_playlist(conn: &Connection, id: i64, name: &str) -> Result<()> {
+        conn.execute(
+            "UPDATE playlists SET name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![name.trim(), current_timestamp() as i64, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_playlist(conn: &Connection, id: i64) -> Result<()> {
+        conn.execute("DELETE FROM playlists WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn list_playlists(conn: &Connection) -> Result<Vec<Playlist>> {
+        let mut stmt = conn.prepare(
+            "SELECT p.id, p.name, p.created_at, p.updated_at, COUNT(i.id)
+             FROM playlists p
+             LEFT JOIN playlist_items i ON i.playlist_id = p.id
+             GROUP BY p.id
+             ORDER BY p.name COLLATE NOCASE ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Playlist {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created_at: row.get::<_, i64>(2)? as u64,
+                updated_at: row.get::<_, i64>(3)? as u64,
+                item_count: row.get::<_, i64>(4)?.max(0) as u32,
+            })
+        })?;
+        let mut playlists = Vec::new();
+        for playlist in rows {
+            playlists.push(playlist?);
+        }
+        Ok(playlists)
+    }
+
+    pub fn add_playlist_entry(
+        conn: &Connection,
+        playlist_id: i64,
+        path: &str,
+        title: Option<&str>,
+        duration_ms: u64,
+    ) -> Result<i64> {
+        let next_position: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_items WHERE playlist_id = ?1",
+            params![playlist_id],
+            |row| row.get(0),
+        )?;
+        conn.execute(
+            "INSERT INTO playlist_items (playlist_id, position, path, title, duration_ms, added_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                playlist_id,
+                next_position,
+                path,
+                title,
+                duration_ms as i64,
+                current_timestamp() as i64
+            ],
+        )?;
+        conn.execute(
+            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+            params![current_timestamp() as i64, playlist_id],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn list_playlist_entries(
+        conn: &Connection,
+        playlist_id: i64,
+    ) -> Result<Vec<PlaylistEntry>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, playlist_id, position, path, title, duration_ms, added_at
+             FROM playlist_items WHERE playlist_id = ?1 ORDER BY position ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![playlist_id], |row| {
+            Ok(PlaylistEntry {
+                id: row.get(0)?,
+                playlist_id: row.get(1)?,
+                position: row.get(2)?,
+                path: row.get(3)?,
+                title: row.get(4)?,
+                duration_ms: row.get::<_, i64>(5)? as u64,
+                added_at: row.get::<_, i64>(6)? as u64,
+            })
+        })?;
+        let mut entries = Vec::new();
+        for entry in rows {
+            entries.push(entry?);
+        }
+        Ok(entries)
+    }
+
+    pub fn remove_playlist_entry(conn: &Connection, playlist_id: i64, entry_id: i64) -> Result<()> {
+        conn.execute(
+            "DELETE FROM playlist_items WHERE playlist_id = ?1 AND id = ?2",
+            params![playlist_id, entry_id],
+        )?;
+        Self::renumber_playlist(conn, playlist_id)?;
+        Ok(())
+    }
+
+    pub fn reorder_playlist_entry(
+        conn: &Connection,
+        playlist_id: i64,
+        entry_id: i64,
+        new_position: usize,
+    ) -> Result<()> {
+        let mut ids: Vec<i64> = Self::list_playlist_entries(conn, playlist_id)?
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        let Some(index) = ids.iter().position(|id| *id == entry_id) else {
+            return Ok(());
+        };
+        let id = ids.remove(index);
+        let target = new_position.min(ids.len());
+        ids.insert(target, id);
+        for (position, id) in ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE playlist_items SET position = ?1 WHERE playlist_id = ?2 AND id = ?3",
+                params![position as i64, playlist_id, id],
+            )?;
+        }
+        conn.execute(
+            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+            params![current_timestamp() as i64, playlist_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_playlist(conn: &Connection, playlist_id: i64) -> Result<()> {
+        conn.execute(
+            "DELETE FROM playlist_items WHERE playlist_id = ?1",
+            params![playlist_id],
+        )?;
+        conn.execute(
+            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+            params![current_timestamp() as i64, playlist_id],
+        )?;
+        Ok(())
+    }
+
+    fn renumber_playlist(conn: &Connection, playlist_id: i64) -> Result<()> {
+        let ids: Vec<i64> = Self::list_playlist_entries(conn, playlist_id)?
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        for (position, id) in ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE playlist_items SET position = ?1 WHERE playlist_id = ?2 AND id = ?3",
+                params![position as i64, playlist_id, id],
+            )?;
+        }
+        conn.execute(
+            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+            params![current_timestamp() as i64, playlist_id],
+        )?;
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
     // Tags
     // -------------------------------------------------------------------------
 

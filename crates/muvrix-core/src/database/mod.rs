@@ -295,6 +295,65 @@ impl DatabaseManager {
         Repository::get_collection_media_ids(&conn, collection_id).map_err(DatabaseError::Sqlite)
     }
 
+    pub fn create_playlist(&self, name: &str) -> DbResult<i64> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::create_playlist(&conn, name).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn rename_playlist(&self, id: i64, name: &str) -> DbResult<()> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::rename_playlist(&conn, id, name).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn delete_playlist(&self, id: i64) -> DbResult<()> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::delete_playlist(&conn, id).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn list_playlists(&self) -> DbResult<Vec<Playlist>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::list_playlists(&conn).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn add_playlist_entry(
+        &self,
+        playlist_id: i64,
+        path: &str,
+        title: Option<&str>,
+        duration_ms: u64,
+    ) -> DbResult<i64> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::add_playlist_entry(&conn, playlist_id, path, title, duration_ms)
+            .map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn list_playlist_entries(&self, playlist_id: i64) -> DbResult<Vec<PlaylistEntry>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::list_playlist_entries(&conn, playlist_id).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn remove_playlist_entry(&self, playlist_id: i64, entry_id: i64) -> DbResult<()> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::remove_playlist_entry(&conn, playlist_id, entry_id)
+            .map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn reorder_playlist_entry(
+        &self,
+        playlist_id: i64,
+        entry_id: i64,
+        new_position: usize,
+    ) -> DbResult<()> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::reorder_playlist_entry(&conn, playlist_id, entry_id, new_position)
+            .map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn clear_playlist(&self, playlist_id: i64) -> DbResult<()> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::clear_playlist(&conn, playlist_id).map_err(DatabaseError::Sqlite)
+    }
+
     pub fn add_tag_to_media(&self, media_id: i64, tag_name: &str) -> DbResult<()> {
         let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
         Repository::add_tag_to_media(&conn, media_id, tag_name).map_err(DatabaseError::Sqlite)

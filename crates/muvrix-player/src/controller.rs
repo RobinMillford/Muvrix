@@ -32,6 +32,76 @@ pub const PROP_PLAYLIST: u64 = 16;
 pub const PROP_PLAYLIST_POS: u64 = 17;
 pub const PROP_PLAYLIST_COUNT: u64 = 18;
 pub const PROP_SECONDARY_SID: u64 = 19;
+pub const PROP_MPVEX_SHOW_TEXT: u64 = 20;
+pub const PROP_MPVEX_TOGGLE_UI: u64 = 21;
+pub const PROP_MPVEX_SHOW_PANEL: u64 = 22;
+pub const PROP_MPVEX_SEEK_BY: u64 = 23;
+pub const PROP_MPVEX_SEEK_TO: u64 = 24;
+
+/// A-B loop state for the current media item.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum AbLoopState {
+    #[default]
+    None,
+    PointA(f64),
+    Loop {
+        a: f64,
+        b: f64,
+    },
+}
+
+/// Production repeat behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RepeatMode {
+    #[default]
+    Off,
+    One,
+    All,
+}
+
+/// Command emitted by a Lua `user-data/mpvex/*` property update.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MpvexCommand {
+    ShowText(String),
+    ToggleUi,
+    ShowPanel(String),
+    SeekBy(f64),
+    SeekTo(f64),
+}
+
+/// Parses a Lua IPC property update. Returns `None` for empty values and
+/// invalid or out-of-range seek payloads.
+pub fn parse_mpvex_command(name: &str, value: &str, duration: f64) -> Option<MpvexCommand> {
+    let key = name.strip_prefix("user-data/mpvex/")?;
+    let trimmed = value.trim();
+    let value = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    match key {
+        "show_text" => (!value.is_empty()).then(|| MpvexCommand::ShowText(value.to_string())),
+        "toggle_ui" => Some(MpvexCommand::ToggleUi),
+        "show_panel" => (!value.is_empty()).then(|| MpvexCommand::ShowPanel(value.to_string())),
+        "seek_by" => {
+            let delta = value.parse::<f64>().ok()?;
+            if !delta.is_finite() || delta.abs() > 86_400.0 {
+                return None;
+            }
+            Some(MpvexCommand::SeekBy(delta))
+        }
+        "seek_to" => {
+            let target = value.parse::<f64>().ok()?;
+            if !target.is_finite() || target < 0.0 || target > 86_400.0 {
+                return None;
+            }
+            if duration > 0.0 && target > duration {
+                return None;
+            }
+            Some(MpvexCommand::SeekTo(target))
+        }
+        _ => None,
+    }
+}
 
 /// Lifecycle state of the media player.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +151,10 @@ pub struct PlaybackController {
     playlist_pos: Option<usize>,
     secondary_sub_track_id: Option<i64>,
     subtitle_styling: SubtitleStyling,
+    ab_loop_state: AbLoopState,
+    repeat_mode: RepeatMode,
+    panscan: f64,
+    mpvex_commands: Vec<MpvexCommand>,
     stream_bridge: MpvStreamBridge,
     next_async_id: u64,
     pending_resume_pos: Option<f64>,
@@ -118,6 +192,31 @@ impl PlaybackController {
         handle.observe_property(PROP_PLAYLIST_POS, "playlist-pos", PropertyFormat::None)?;
         handle.observe_property(PROP_PLAYLIST_COUNT, "playlist-count", PropertyFormat::None)?;
         handle.observe_property(PROP_SECONDARY_SID, "secondary-sid", PropertyFormat::None)?;
+        let _ = handle.observe_property(
+            PROP_MPVEX_SHOW_TEXT,
+            "user-data/mpvex/show_text",
+            PropertyFormat::None,
+        );
+        let _ = handle.observe_property(
+            PROP_MPVEX_TOGGLE_UI,
+            "user-data/mpvex/toggle_ui",
+            PropertyFormat::None,
+        );
+        let _ = handle.observe_property(
+            PROP_MPVEX_SHOW_PANEL,
+            "user-data/mpvex/show_panel",
+            PropertyFormat::None,
+        );
+        let _ = handle.observe_property(
+            PROP_MPVEX_SEEK_BY,
+            "user-data/mpvex/seek_by",
+            PropertyFormat::None,
+        );
+        let _ = handle.observe_property(
+            PROP_MPVEX_SEEK_TO,
+            "user-data/mpvex/seek_to",
+            PropertyFormat::None,
+        );
 
         let mut controller = Self {
             handle,
@@ -147,6 +246,10 @@ impl PlaybackController {
             playlist_pos: None,
             secondary_sub_track_id: None,
             subtitle_styling: SubtitleStyling::default(),
+            ab_loop_state: AbLoopState::None,
+            repeat_mode: RepeatMode::Off,
+            panscan: 0.0,
+            mpvex_commands: Vec::new(),
             stream_bridge,
             next_async_id: 1000,
             pending_resume_pos: None,
@@ -502,6 +605,136 @@ impl PlaybackController {
         self.handle.playlist_shuffle()?;
         self.refresh_playlist();
         Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // Frame stepping, A-B loop, repeat, panscan, Lua IPC
+    // -------------------------------------------------------------------------
+
+    /// Advances exactly one decoded frame and pauses.
+    pub fn frame_step(&mut self) -> Result<(), MpvError> {
+        self.handle.command(&["frame-step"])
+    }
+
+    /// Steps back one decoded frame and pauses.
+    pub fn frame_back_step(&mut self) -> Result<(), MpvError> {
+        self.handle.command(&["frame-back-step"])
+    }
+
+    pub fn ab_loop_state(&self) -> AbLoopState {
+        self.ab_loop_state
+    }
+
+    /// Cycles `None -> PointA -> Loop -> None`.
+    pub fn cycle_ab_loop(&mut self) -> Result<(), MpvError> {
+        let position = self
+            .handle
+            .get_property::<f64>("time-pos")
+            .unwrap_or(self.time_pos)
+            .max(0.0);
+        match self.ab_loop_state {
+            AbLoopState::None => {
+                self.handle
+                    .set_property_string("ab-loop-a", &position.to_string())?;
+                let _ = self.handle.set_property_string("ab-loop-b", "no");
+                self.ab_loop_state = AbLoopState::PointA(position);
+            }
+            AbLoopState::PointA(a) => {
+                if position <= a + 0.05 {
+                    return Err(MpvError::InvalidParameter);
+                }
+                self.handle
+                    .set_property_string("ab-loop-b", &position.to_string())?;
+                self.ab_loop_state = AbLoopState::Loop { a, b: position };
+            }
+            AbLoopState::Loop { .. } => {
+                self.clear_ab_loop()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Sets both A and B loop points in seconds.
+    pub fn set_ab_loop(&mut self, a: f64, b: f64) -> Result<(), MpvError> {
+        if !a.is_finite() || !b.is_finite() || a < 0.0 || b <= a {
+            return Err(MpvError::InvalidParameter);
+        }
+        self.handle
+            .set_property_string("ab-loop-a", &a.to_string())?;
+        self.handle
+            .set_property_string("ab-loop-b", &b.to_string())?;
+        self.ab_loop_state = AbLoopState::Loop { a, b };
+        Ok(())
+    }
+
+    pub fn clear_ab_loop(&mut self) -> Result<(), MpvError> {
+        self.handle.set_property_string("ab-loop-a", "no")?;
+        self.handle.set_property_string("ab-loop-b", "no")?;
+        self.ab_loop_state = AbLoopState::None;
+        Ok(())
+    }
+
+    pub fn repeat_mode(&self) -> RepeatMode {
+        self.repeat_mode
+    }
+
+    /// Applies production repeat behavior without touching the test-only loop hook.
+    pub fn set_repeat_mode(&mut self, mode: RepeatMode) -> Result<(), MpvError> {
+        match mode {
+            RepeatMode::Off => {
+                self.handle.set_property_string("loop-file", "no")?;
+                self.handle.set_property_string("loop-playlist", "no")?;
+            }
+            RepeatMode::One => {
+                self.handle.set_property_string("loop-file", "inf")?;
+                self.handle.set_property_string("loop-playlist", "no")?;
+            }
+            RepeatMode::All => {
+                self.handle.set_property_string("loop-file", "no")?;
+                self.handle.set_property_string("loop-playlist", "inf")?;
+            }
+        }
+        self.repeat_mode = mode;
+        Ok(())
+    }
+
+    pub fn panscan(&self) -> f64 {
+        self.panscan
+    }
+
+    /// Sets panscan (0.0 = fit, 1.0 = fill/crop).
+    pub fn set_panscan(&mut self, value: f64) -> Result<(), MpvError> {
+        if !value.is_finite() {
+            return Err(MpvError::InvalidParameter);
+        }
+        let clamped = value.clamp(0.0, 1.0);
+        self.handle.set_property("panscan", clamped)?;
+        self.panscan = clamped;
+        Ok(())
+    }
+
+    pub fn set_panscan_fit(&mut self) -> Result<(), MpvError> {
+        self.set_panscan(0.0)
+    }
+
+    pub fn set_panscan_crop(&mut self) -> Result<(), MpvError> {
+        self.set_panscan(1.0)
+    }
+
+    /// Drains commands queued by `user-data/mpvex/*` property updates.
+    pub fn drain_mpvex_commands(&mut self) -> Vec<MpvexCommand> {
+        std::mem::take(&mut self.mpvex_commands)
+    }
+
+    fn update_mpvex_property(&mut self, name: &str) {
+        let Ok(value) = self.handle.get_property_string(name) else {
+            return;
+        };
+        if let Some(command) = parse_mpvex_command(name, &value, self.duration) {
+            self.mpvex_commands.push(command);
+        }
+        // Clear after dispatch so a Lua script can repeat the same payload.
+        let _ = self.handle.set_property_string(name, "");
     }
 
     /// Returns the currently active secondary subtitle track ID, if any.
@@ -924,6 +1157,9 @@ impl PlaybackController {
         match event {
             Event::StartFile { .. } => {
                 self.state = PlaybackState::Loading;
+                self.ab_loop_state = AbLoopState::None;
+                let _ = self.handle.set_property_string("ab-loop-a", "no");
+                let _ = self.handle.set_property_string("ab-loop-b", "no");
             }
             Event::FileLoaded => {
                 self.refresh_metadata();
@@ -1127,6 +1363,11 @@ impl PlaybackController {
             PROP_SECONDARY_SID => {
                 self.secondary_sub_track_id = self.handle.get_secondary_sub_track();
             }
+            PROP_MPVEX_SHOW_TEXT => self.update_mpvex_property("user-data/mpvex/show_text"),
+            PROP_MPVEX_TOGGLE_UI => self.update_mpvex_property("user-data/mpvex/toggle_ui"),
+            PROP_MPVEX_SHOW_PANEL => self.update_mpvex_property("user-data/mpvex/show_panel"),
+            PROP_MPVEX_SEEK_BY => self.update_mpvex_property("user-data/mpvex/seek_by"),
+            PROP_MPVEX_SEEK_TO => self.update_mpvex_property("user-data/mpvex/seek_to"),
             _ => {
                 // Fallback by name if matched outside userdata
                 if name == "time-pos" {

@@ -2,6 +2,7 @@
 
 use crate::error::MpvError;
 use crate::handle::MpvHandle;
+use serde::{Deserialize, Serialize};
 
 /// Media track category.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -235,6 +236,15 @@ impl MpvHandle {
         // Secondary subtitle distinct positioning and styling
         let _ = self.set_property("secondary-sub-pos", styling.secondary_pos);
         let _ = self.set_property_string("secondary-sub-ass-override", override_val);
+
+        let _ = self.set_property("sub-speed", styling.sub_speed.clamp(0.5, 2.0));
+        let _ = self.set_property(
+            "sub-shadow-offset",
+            styling.sub_shadow_offset.clamp(0.0, 10.0),
+        );
+        let _ = self.set_property_string("sub-back-color", &styling.sub_back_color);
+        let _ = self.set_property_string("sub-justify", styling.sub_justify.as_mpv_str());
+        let _ = self.set_property_string("sub-fonts-dir", &styling.sub_fonts_dir);
         Ok(())
     }
 
@@ -245,7 +255,8 @@ impl MpvHandle {
 }
 
 /// ASS/SSA script styling override policy.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AssOverrideMode {
     /// Strictly preserves all author styling, positioning, signs, and karaoke animations.
     #[default]
@@ -269,8 +280,31 @@ impl AssOverrideMode {
     }
 }
 
+/// Horizontal subtitle justification.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubtitleJustify {
+    #[default]
+    Auto,
+    Left,
+    Center,
+    Right,
+}
+
+impl SubtitleJustify {
+    pub fn as_mpv_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Left => "left",
+            Self::Center => "center",
+            Self::Right => "right",
+        }
+    }
+}
+
 /// User-configurable subtitle appearance settings.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SubtitleStyling {
     /// Subtitle font family name.
     pub font: String,
@@ -292,6 +326,16 @@ pub struct SubtitleStyling {
     pub ass_override_mode: AssOverrideMode,
     /// Secondary subtitle vertical position (default 10 = top).
     pub secondary_pos: i64,
+    /// Subtitle rendering speed multiplier (0.5..=2.0).
+    pub sub_speed: f64,
+    /// Subtitle shadow offset in points (0.0..=10.0).
+    pub sub_shadow_offset: f64,
+    /// Subtitle background color (`#RRGGBB` or `#AARRGGBB`).
+    pub sub_back_color: String,
+    /// Horizontal justification mode.
+    pub sub_justify: SubtitleJustify,
+    /// Optional custom fonts directory.
+    pub sub_fonts_dir: String,
 }
 
 impl Default for SubtitleStyling {
@@ -307,6 +351,11 @@ impl Default for SubtitleStyling {
             ass_override: false,
             ass_override_mode: AssOverrideMode::Preserve,
             secondary_pos: 10,
+            sub_speed: 1.0,
+            sub_shadow_offset: 0.0,
+            sub_back_color: "#00000000".to_string(),
+            sub_justify: SubtitleJustify::Auto,
+            sub_fonts_dir: String::new(),
         }
     }
 }

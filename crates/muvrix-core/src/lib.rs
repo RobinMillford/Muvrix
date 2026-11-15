@@ -9,6 +9,7 @@ pub mod metadata;
 pub mod network;
 pub mod path;
 pub mod platform;
+pub mod playlist;
 pub mod scanner;
 pub mod thumbnails;
 

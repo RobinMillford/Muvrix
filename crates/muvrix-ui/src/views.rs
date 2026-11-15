@@ -20,10 +20,12 @@ use muvrix_player::shader::{
     ToneMappingAlgorithm, VideoAdjustmentSettings,
 };
 use muvrix_player::{
-    AssOverrideMode, PlaybackState, SeekMode, SubtitleStyling, TrackInfo, TrackType,
+    AccentColor, AssOverrideMode, PlaybackState, SeekMode, SubtitleJustify, SubtitleStyling,
+    ThemeMode, TrackInfo, TrackType,
 };
 
-use crate::app::{format_timestamp, format_track_label, MuvrixApp};
+use crate::app::{format_timestamp, format_track_label, MuvrixApp, SleepTimer};
+use crate::config_editor::ConfigEditorFile;
 use crate::icons::{self, Icon};
 use crate::remote_playback::{build_remote_stream, connection_username, smb_share};
 
@@ -74,6 +76,8 @@ pub enum SettingsTab {
     VideoEnhancement,
     EqualizerAudio,
     NetworkMedia,
+    Appearance,
+    ConfigEditor,
     Preferences,
 }
 
@@ -84,8 +88,27 @@ impl SettingsTab {
             Self::VideoEnhancement => "Video & Shaders",
             Self::EqualizerAudio => "Audio & Equalizer",
             Self::NetworkMedia => "Network Sources",
+            Self::Appearance => "Appearance",
+            Self::ConfigEditor => "Config Editor",
             Self::Preferences => "Window & History",
         }
+    }
+
+    pub fn matches_search(&self, query: &str) -> bool {
+        let query = query.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return true;
+        }
+        let keywords = match self {
+            Self::Subtitles => "subtitle font shadow color justify speed fonts ass",
+            Self::VideoEnhancement => "video shader zoom pan panscan crop hdr brightness",
+            Self::EqualizerAudio => "audio equalizer volume boost device delay",
+            Self::NetworkMedia => "network webdav smb sftp remote stream",
+            Self::Appearance => "theme appearance accent light dark amoled color",
+            Self::ConfigEditor => "config mpv.conf input.conf editor file apply",
+            Self::Preferences => "window history sleep timer privacy",
+        };
+        self.label().to_ascii_lowercase().contains(&query) || keywords.contains(&query)
     }
 }
 
@@ -979,6 +1002,7 @@ impl MuvrixApp {
         let mut close_drawer = false;
         let mut play_path: Option<String> = None;
         let mut enqueue_path: Option<String> = None;
+        let mut persistent_save: Option<(String, Option<String>, u64)> = None;
         let mut delete_bm_id: Option<i64> = None;
         let mut save_bm: Option<(i64, String, Option<String>)> = None;
 
@@ -1020,6 +1044,20 @@ impl MuvrixApp {
                         }
                         if ui.button("➕ Enqueue").clicked() {
                             enqueue_path = Some(item_view.item.canonical_path.clone());
+                        }
+                        if ui.button("💾 Save to Playlist").clicked() {
+                            persistent_save = Some((
+                                item_view.item.canonical_path.clone(),
+                                item_view
+                                    .metadata
+                                    .as_ref()
+                                    .and_then(|meta| meta.title.clone()),
+                                item_view
+                                    .metadata
+                                    .as_ref()
+                                    .map(|meta| meta.duration_ms)
+                                    .unwrap_or(0),
+                            ));
                         }
                     });
 
@@ -1286,6 +1324,9 @@ impl MuvrixApp {
         if let Some(path) = enqueue_path {
             let _ = self.controller.playlist_append(&path);
             self.status_message = "Added item to playlist".to_string();
+        }
+        if let Some((path, title, duration_ms)) = persistent_save {
+            self.add_to_selected_playlist(path, title, duration_ms);
         }
     }
 
@@ -1851,9 +1892,202 @@ impl MuvrixApp {
     // Playlist & Queue View
     // -------------------------------------------------------------------------
 
+    fn render_saved_playlists(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.label(
+                RichText::new("Saved Playlists")
+                    .strong()
+                    .size(14.0)
+                    .color(Color32::from_rgb(95, 185, 255)),
+            );
+            let playlists = self.db.list_playlists().unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.playlist_name_input)
+                        .hint_text("New playlist name")
+                        .desired_width(180.0),
+                );
+                if ui.button("Create").clicked() && !self.playlist_name_input.trim().is_empty() {
+                    match self.db.create_playlist(self.playlist_name_input.trim()) {
+                        Ok(id) => {
+                            self.selected_persistent_playlist = Some(id);
+                            self.playlist_name_input.clear();
+                            self.playlist_status = Some("Playlist created".to_string());
+                        }
+                        Err(e) => self.playlist_status = Some(format!("Create failed: {e}")),
+                    }
+                }
+                ui.separator();
+                if ui.button("Import .m3u/.m3u8...").clicked() {
+                    if let Some(file) = rfd::FileDialog::new()
+                        .add_filter("M3U Playlist", &["m3u", "m3u8"])
+                        .pick_file()
+                    {
+                        self.import_m3u(&file.to_string_lossy());
+                    }
+                }
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.playlist_import_input)
+                        .hint_text("M3U URL")
+                        .desired_width(200.0),
+                );
+                if ui.button("Import URL").clicked()
+                    && !self.playlist_import_input.trim().is_empty()
+                {
+                    let source = self.playlist_import_input.trim().to_string();
+                    self.import_m3u(&source);
+                }
+            });
+
+            if playlists.is_empty() {
+                ui.label(
+                    RichText::new("No saved playlists yet.")
+                        .italics()
+                        .size(11.5)
+                        .color(Color32::from_gray(140)),
+                );
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    for playlist in &playlists {
+                        let selected = self.selected_persistent_playlist == Some(playlist.id);
+                        if ui
+                            .selectable_label(
+                                selected,
+                                format!("{} ({})", playlist.name, playlist.item_count),
+                            )
+                            .clicked()
+                        {
+                            self.selected_persistent_playlist = Some(playlist.id);
+                        }
+                    }
+                });
+            }
+
+            if let Some(id) = self.selected_persistent_playlist {
+                ui.horizontal(|ui| {
+                    if ui.button("▶ Play All").clicked() {
+                        match self.play_saved_playlist(id) {
+                            Ok(()) => {
+                                self.playlist_status = Some("Playing saved playlist".to_string())
+                            }
+                            Err(e) => self.playlist_status = Some(e),
+                        }
+                    }
+                    if let Some(item) = self.selected_library_item.clone() {
+                        if ui.button("Add Selected Library Item").clicked() {
+                            self.add_to_selected_playlist(
+                                item.item.canonical_path.clone(),
+                                item.metadata.as_ref().and_then(|m| m.title.clone()),
+                                item.metadata.as_ref().map(|m| m.duration_ms).unwrap_or(0),
+                            );
+                        }
+                    }
+                    if ui.button("Clear").clicked() {
+                        let _ = self.db.clear_playlist(id);
+                    }
+                    if ui.button("Delete Playlist").clicked() {
+                        let _ = self.db.delete_playlist(id);
+                        self.selected_persistent_playlist = None;
+                    }
+                });
+
+                let entries = self.db.list_playlist_entries(id).unwrap_or_default();
+                let mut remove = None;
+                let mut move_up = None;
+                let mut move_down = None;
+                for entry in &entries {
+                    ui.horizontal(|ui| {
+                        let label = entry.title.as_deref().unwrap_or(entry.path.as_str());
+                        ui.label(RichText::new(label).size(12.0));
+                        ui.label(
+                            RichText::new(&entry.path)
+                                .monospace()
+                                .size(10.0)
+                                .color(Color32::from_gray(140)),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("✖").clicked() {
+                                remove = Some(entry.id);
+                            }
+                            if ui.button("▼").clicked() {
+                                move_down = Some(entry.id);
+                            }
+                            if ui.button("▲").clicked() {
+                                move_up = Some(entry.id);
+                            }
+                        });
+                    });
+                }
+                if let Some(entry_id) = remove {
+                    let _ = self.db.remove_playlist_entry(id, entry_id);
+                }
+                if let Some(entry_id) = move_up {
+                    if let Some(pos) = entries.iter().position(|entry| entry.id == entry_id) {
+                        let _ = self
+                            .db
+                            .reorder_playlist_entry(id, entry_id, pos.saturating_sub(1));
+                    }
+                }
+                if let Some(entry_id) = move_down {
+                    if let Some(pos) = entries.iter().position(|entry| entry.id == entry_id) {
+                        let _ = self.db.reorder_playlist_entry(id, entry_id, pos + 1);
+                    }
+                }
+            }
+
+            if let Some(status) = &self.playlist_status {
+                ui.label(
+                    RichText::new(status)
+                        .size(11.0)
+                        .color(Color32::from_rgb(125, 211, 252)),
+                );
+            }
+        });
+        ui.add_space(6.0);
+    }
+
+    fn import_m3u(&mut self, source: &str) {
+        let playlist_id = match self.selected_persistent_playlist {
+            Some(id) => id,
+            None => {
+                let name = std::path::Path::new(source)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .filter(|stem| !stem.is_empty())
+                    .unwrap_or("Imported Playlist")
+                    .to_string();
+                match self.db.create_playlist(&name) {
+                    Ok(id) => {
+                        self.selected_persistent_playlist = Some(id);
+                        id
+                    }
+                    Err(e) => {
+                        self.playlist_status = Some(format!("Create failed: {e}"));
+                        return;
+                    }
+                }
+            }
+        };
+        match muvrix_core::playlist::load_m3u(source) {
+            Ok(entries) => {
+                for entry in entries {
+                    let _ = self.db.add_playlist_entry(
+                        playlist_id,
+                        &entry.path,
+                        entry.title.as_deref(),
+                        entry.duration_ms,
+                    );
+                }
+                self.playlist_status = Some(format!("Imported playlist from {source}"));
+            }
+            Err(e) => self.playlist_status = Some(format!("Import failed: {e}")),
+        }
+    }
+
     pub fn render_playlist_view(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(4.0);
+            self.render_saved_playlists(ui);
 
             let playlist_count = self.controller.playlist_count();
             let current_pos = self.controller.playlist_pos();
@@ -2476,14 +2710,38 @@ impl MuvrixApp {
 
             ui.add_space(4.0);
             ui.horizontal(|ui| {
+                ui.label("🔎 Search settings:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_search)
+                        .hint_text("theme, subtitle, audio, playlist, config...")
+                        .desired_width(260.0),
+                );
+                if !self.settings_search.is_empty() && ui.button("Clear").clicked() {
+                    self.settings_search.clear();
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
                 let tabs = [
                     SettingsTab::Subtitles,
                     SettingsTab::VideoEnhancement,
                     SettingsTab::EqualizerAudio,
                     SettingsTab::NetworkMedia,
+                    SettingsTab::Appearance,
+                    SettingsTab::ConfigEditor,
                     SettingsTab::Preferences,
                 ];
-                for tab in tabs {
+                let visible: Vec<SettingsTab> = tabs
+                    .into_iter()
+                    .filter(|tab| tab.matches_search(&self.settings_search))
+                    .collect();
+                if !self.settings_tab.matches_search(&self.settings_search) {
+                    if let Some(first) = visible.first() {
+                        self.settings_tab = *first;
+                    }
+                }
+                for tab in visible {
                     let is_selected = self.settings_tab == tab;
                     if ui.selectable_label(is_selected, tab.label()).clicked() {
                         self.settings_tab = tab;
@@ -2764,6 +3022,85 @@ impl MuvrixApp {
                             );
                         });
 
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.label(RichText::new("Advanced subtitle timing & rendering").strong());
+                        ui.horizontal(|ui| {
+                            ui.label("Subtitle Speed:");
+                            ui.add(
+                                egui::Slider::new(&mut self.active_styling.sub_speed, 0.5..=2.0)
+                                    .text("x"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Shadow Offset:");
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut self.active_styling.sub_shadow_offset,
+                                    0.0..=10.0,
+                                )
+                                .text("pt"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Background Color:");
+                            ui.add(
+                                egui::TextEdit::singleline(
+                                    &mut self.active_styling.sub_back_color,
+                                )
+                                .desired_width(100.0),
+                            );
+                            ui.label("Justify:");
+                            egui::ComboBox::from_id_salt("sub_justify_combo")
+                                .selected_text(match self.active_styling.sub_justify {
+                                    SubtitleJustify::Auto => "Auto",
+                                    SubtitleJustify::Left => "Left",
+                                    SubtitleJustify::Center => "Center",
+                                    SubtitleJustify::Right => "Right",
+                                })
+                                .show_ui(ui, |ui| {
+                                    for justify in [
+                                        SubtitleJustify::Auto,
+                                        SubtitleJustify::Left,
+                                        SubtitleJustify::Center,
+                                        SubtitleJustify::Right,
+                                    ] {
+                                        let label = match justify {
+                                            SubtitleJustify::Auto => "Auto",
+                                            SubtitleJustify::Left => "Left",
+                                            SubtitleJustify::Center => "Center",
+                                            SubtitleJustify::Right => "Right",
+                                        };
+                                        if ui
+                                            .selectable_label(
+                                                self.active_styling.sub_justify == justify,
+                                                label,
+                                            )
+                                            .clicked()
+                                        {
+                                            self.active_styling.sub_justify = justify;
+                                        }
+                                    }
+                                });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Custom Fonts Folder:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.active_styling.sub_fonts_dir)
+                                    .desired_width(240.0)
+                                    .hint_text("Directory containing .ttf/.otf fonts"),
+                            );
+                            if ui.button("Choose...").clicked() {
+                                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                    self.active_styling.sub_fonts_dir =
+                                        folder.to_string_lossy().to_string();
+                                }
+                            }
+                            if ui.button("Clear").clicked() {
+                                self.active_styling.sub_fonts_dir.clear();
+                            }
+                        });
+
                         ui.add_space(2.0);
                         ui.label(
                             RichText::new("Note: Secondary subtitle positioning (pos=10) and ASS override policy are supported natively. Independent font/color customization for secondary subtitles is unsupported by libmpv.")
@@ -2788,12 +3125,14 @@ impl MuvrixApp {
                             {
                                 let styling = self.active_styling.clone();
                                 let _ = self.controller.set_subtitle_styling(styling);
+                                self.save_media_settings();
                                 self.status_message = "Subtitle styling applied".to_string();
                             }
 
                             if ui.button("Reset to Engine Defaults").clicked() {
                                 let _ = self.controller.reset_subtitle_styling();
                                 self.active_styling = SubtitleStyling::default();
+                                self.save_media_settings();
                                 self.status_message = "Subtitle styling reset to defaults".to_string();
                             }
                         });
@@ -2988,6 +3327,24 @@ impl MuvrixApp {
                             if ui.add(egui::Slider::new(&mut self.video_settings.zoom, -1.0..=2.0).step_by(0.05)).changed() {
                                 adj_changed = true;
                             }
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.label("Pan-Scan / Crop:");
+                            let mut panscan = self.controller.panscan();
+                            if ui
+                                .add(egui::Slider::new(&mut panscan, 0.0..=1.0).step_by(0.01))
+                                .changed()
+                            {
+                                self.set_panscan(panscan);
+                            }
+                            if ui.button("Fit (0.0)").clicked() {
+                                let _ = self.controller.set_panscan_fit();
+                            }
+                            if ui.button("Crop (1.0)").clicked() {
+                                let _ = self.controller.set_panscan_crop();
+                            }
+                            ui.label(format!("{:.0}%", self.controller.panscan() * 100.0));
                         });
 
                         ui.horizontal(|ui| {
@@ -3187,6 +3544,31 @@ impl MuvrixApp {
                             .size(12.0)
                             .color(Color32::from_gray(160)),
                         );
+
+                        ui.add_space(6.0);
+
+                        ui.group(|ui| {
+                            ui.label(RichText::new("Volume Boost Ceiling").strong());
+                            ui.horizontal(|ui| {
+                                let mut boost = self.equalizer_settings.volume_boost.clamp(100.0, 130.0);
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut boost, 100.0..=130.0)
+                                            .text("% (software gain)"),
+                                    )
+                                    .changed()
+                                {
+                                    self.equalizer_settings.volume_boost = boost;
+                                    let _ = self.controller.set_volume_boost(boost);
+                                    let _ = self.controller.set_volume(self.controller.volume());
+                                    self.save_media_settings();
+                                }
+                                ui.label(format!(
+                                    "Current ceiling: {:.0}%",
+                                    self.controller.volume_boost_max()
+                                ));
+                            });
+                        });
 
                         ui.add_space(6.0);
 
@@ -3938,7 +4320,174 @@ impl MuvrixApp {
                         }
                     });
                 }
+                SettingsTab::Appearance => {
+                    ui.group(|ui| {
+                        ui.label(
+                            RichText::new("Theme & Accent")
+                                .strong()
+                                .size(14.0)
+                                .color(Color32::from_rgb(95, 185, 255)),
+                        );
+                        ui.label(
+                            RichText::new("Persisted in settings.json and applied immediately.")
+                                .size(11.5)
+                                .color(Color32::from_gray(150)),
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Theme:");
+                            egui::ComboBox::from_id_salt("theme_mode_combo")
+                                .selected_text(match self.theme_mode {
+                                    ThemeMode::Dark => "Dark",
+                                    ThemeMode::Light => "Light",
+                                    ThemeMode::Amoled => "AMOLED (pure black)",
+                                })
+                                .show_ui(ui, |ui| {
+                                    for mode in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::Amoled] {
+                                        let label = match mode {
+                                            ThemeMode::Dark => "Dark",
+                                            ThemeMode::Light => "Light",
+                                            ThemeMode::Amoled => "AMOLED (pure black)",
+                                        };
+                                        if ui.selectable_label(self.theme_mode == mode, label).clicked() {
+                                            self.theme_mode = mode;
+                                            self.save_media_settings();
+                                        }
+                                    }
+                                });
+                        });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Accent:");
+                            egui::ComboBox::from_id_salt("accent_color_combo")
+                                .selected_text(format!("{:?}", self.accent_color))
+                                .show_ui(ui, |ui| {
+                                    for color in [
+                                        AccentColor::Blue,
+                                        AccentColor::Purple,
+                                        AccentColor::Teal,
+                                        AccentColor::Green,
+                                        AccentColor::Orange,
+                                        AccentColor::Red,
+                                    ] {
+                                        if ui
+                                            .selectable_label(
+                                                self.accent_color == color,
+                                                format!("{color:?}"),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.accent_color = color;
+                                            self.save_media_settings();
+                                        }
+                                    }
+                                });
+                        });
+                    });
+                }
+                SettingsTab::ConfigEditor => {
+                    self.ensure_config_editor_loaded();
+                    ui.group(|ui| {
+                        ui.label(
+                            RichText::new("Sandboxed libmpv Configuration")
+                                .strong()
+                                .size(14.0)
+                                .color(Color32::from_rgb(95, 185, 255)),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Edit mpv.conf or input.conf in Muvrix's config directory. Applying mpv.conf issues load-config-file.",
+                            )
+                            .size(11.5)
+                            .color(Color32::from_gray(150)),
+                        );
+                        ui.horizontal(|ui| {
+                            for file in [ConfigEditorFile::MpvConf, ConfigEditorFile::InputConf] {
+                                if ui
+                                    .selectable_label(
+                                        self.config_editor_file == file,
+                                        file.label(),
+                                    )
+                                    .clicked()
+                                {
+                                    self.config_editor_file = file;
+                                    self.config_editor_loaded = false;
+                                    self.config_editor_text.clear();
+                                }
+                            }
+                            if ui.button("Reload").clicked() {
+                                self.config_editor_loaded = false;
+                                self.ensure_config_editor_loaded();
+                            }
+                        });
+                        ui.add_space(4.0);
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.config_editor_text)
+                                .code_editor()
+                                .desired_rows(18)
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button(RichText::new("Save & Apply").strong()).clicked() {
+                                self.save_config_editor();
+                            }
+                            if !self.config_editor_status.is_empty() {
+                                ui.label(
+                                    RichText::new(&self.config_editor_status)
+                                        .size(11.0)
+                                        .color(Color32::from_gray(170)),
+                                );
+                            }
+                        });
+                    });
+                }
                 SettingsTab::Preferences => {
+                    ui.group(|ui| {
+                        ui.label(
+                            RichText::new("Sleep Timer")
+                                .strong()
+                                .size(14.0)
+                                .color(Color32::from_rgb(95, 185, 255)),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label("Stop after:");
+                            egui::ComboBox::from_id_salt("settings_sleep_timer_combo")
+                                .selected_text(self.sleep_timer.label())
+                                .show_ui(ui, |ui| {
+                                    for option in [
+                                        SleepTimer::Off,
+                                        SleepTimer::Minutes(15),
+                                        SleepTimer::Minutes(30),
+                                        SleepTimer::Minutes(45),
+                                        SleepTimer::Minutes(60),
+                                        SleepTimer::EndOfFile,
+                                    ] {
+                                        if ui
+                                            .selectable_label(
+                                                self.sleep_timer == option,
+                                                option.label(),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.set_sleep_timer(option);
+                                        }
+                                    }
+                                });
+                            if let Some(remaining) = self.sleep_remaining() {
+                                let seconds = remaining.as_secs();
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Remaining {}:{:02}",
+                                        seconds / 60,
+                                        seconds % 60
+                                    ))
+                                    .monospace()
+                                    .color(Color32::from_rgb(125, 211, 252)),
+                                );
+                            }
+                        });
+                    });
+
                     // Section 6: Compact Mini-Player Mode & Window Display
                     ui.group(|ui| {
                         ui.label(
@@ -4030,6 +4579,9 @@ impl MuvrixApp {
         egui::TopBottomPanel::bottom("mini_player_deck")
             .resizable(false)
             .show(ctx, |ui| {
+                if !self.ui_overlay_visible {
+                    return;
+                }
                 ui.add_space(4.0);
 
                 let time_pos = self.controller.time_pos();
@@ -4121,7 +4673,8 @@ impl MuvrixApp {
                         // Mini volume slider
                         let mut vol = self.controller.volume();
                         let vol_label = format!("{:.0}%", vol);
-                        let vol_slider = egui::Slider::new(&mut vol, 0.0..=100.0)
+                        let max_volume = self.controller.volume_boost_max().max(100.0);
+                        let vol_slider = egui::Slider::new(&mut vol, 0.0..=max_volume)
                             .show_value(false)
                             .text(vol_label);
                         if ui.add_sized([50.0, 16.0], vol_slider).changed() {
