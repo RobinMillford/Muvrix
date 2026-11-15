@@ -23,6 +23,12 @@ pub struct FrameInfo {
     pub target_time: i64,
 }
 
+impl FrameInfo {
+    pub fn block_vsync(&self) -> bool {
+        (self.flags & MPV_RENDER_FRAME_INFO_BLOCK_VSYNC) != 0
+    }
+}
+
 /// Only a successful get-info with PRESENT and a positive target time may drive
 /// target-time scheduling. A zero target is a valid API result, not a deadline.
 fn usable_target_time(info: &FrameInfo) -> Option<i64> {
@@ -242,7 +248,7 @@ impl MpvRenderContext {
 
     /// Checks if a new frame is ready to be drawn (`MPV_RENDER_UPDATE_FRAME`).
     pub fn has_frame(&self) -> bool {
-        (self.update() & (mpv_render_update_flag::MPV_RENDER_UPDATE_FRAME as u64)) != 0
+        Self::update_has_frame(self.update())
     }
 
     /// Renders the video frame into an OpenGL framebuffer.
@@ -258,6 +264,35 @@ impl MpvRenderContext {
     ) -> Result<(), MpvError> {
         self.render_gl_ex(fbo, flip_y, block_for_target_time, false)
             .map(|_| ())
+    }
+
+    /// Safe FBO render entry point for presentation layers.
+    ///
+    /// All raw `mpv_opengl_fbo` / `mpv_render_param` construction stays inside
+    /// this crate so `muvrix-ui` can render without depending on `libmpv-sys`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_gl_to_fbo(
+        &self,
+        fbo_id: i32,
+        width: i32,
+        height: i32,
+        internal_format: i32,
+        flip_y: bool,
+        block_for_target_time: bool,
+        query_frame_info: bool,
+    ) -> Result<FrameInfo, MpvError> {
+        let fbo = mpv_opengl_fbo {
+            fbo: fbo_id,
+            w: width,
+            h: height,
+            internal_format,
+        };
+        self.render_gl_ex_info(fbo, flip_y, block_for_target_time, query_frame_info)
+    }
+
+    /// Whether an update-flags word contains `MPV_RENDER_UPDATE_FRAME`.
+    pub fn update_has_frame(flags: u64) -> bool {
+        (flags & (mpv_render_update_flag::MPV_RENDER_UPDATE_FRAME as u64)) != 0
     }
 
     /// Advances the engine's render/timing path without drawing anything.

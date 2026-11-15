@@ -287,15 +287,16 @@ fn test_embedded_fbo_rendering_with_anime4k_shaders_changes_pixels() {
             let _ = handle.wait_event(0.02);
         }
 
-        let fbo_params = libmpv_sys::mpv_opengl_fbo {
-            fbo: fbo.fbo().0.get() as std::os::raw::c_int,
-            w: 320,
-            h: 240,
-            internal_format: glow::RGBA8 as std::os::raw::c_int,
-        };
-
         // Render directly into the OffscreenFbo using Muvrix's embedded render path
-        let _ = render_ctx.render_gl(fbo_params, false, false);
+        let _ = render_ctx.render_gl_to_fbo(
+            fbo.fbo().0.get() as i32,
+            320,
+            240,
+            glow::RGBA8 as i32,
+            false,
+            false,
+            false,
+        );
         render_ctx.report_swap();
 
         unsafe { fbo.read_pixel_sample(&gl) }
@@ -396,14 +397,15 @@ fn test_embedded_fbo_hdr_tone_mapping_and_sdr_regression() {
                 "Embedded MpvRenderContext must use vo=libmpv (the OpenGL render API backend)"
             );
 
-            let fbo_params = libmpv_sys::mpv_opengl_fbo {
-                fbo: fbo.fbo().0.get() as std::os::raw::c_int,
-                w: 320,
-                h: 240,
-                internal_format: glow::RGBA8 as std::os::raw::c_int,
-            };
-
-            let _ = render_ctx.render_gl(fbo_params, false, false);
+            let _ = render_ctx.render_gl_to_fbo(
+                fbo.fbo().0.get() as i32,
+                320,
+                240,
+                glow::RGBA8 as i32,
+                false,
+                false,
+                false,
+            );
             render_ctx.report_swap();
 
             let pixel = unsafe { fbo.read_pixel_sample(&gl) };

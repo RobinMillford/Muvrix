@@ -40,6 +40,7 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    muvrix_ui::crash::install_panic_hook();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     log::info!("Starting Muvrix Desktop Player");
 

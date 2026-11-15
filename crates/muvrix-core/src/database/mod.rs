@@ -203,6 +203,16 @@ impl DatabaseManager {
         Repository::count_pending_media_items(&conn).map_err(DatabaseError::Sqlite)
     }
 
+    pub fn set_watched(&self, media_id: i64, watched: bool) -> DbResult<()> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::set_watched(&conn, media_id, watched).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn is_watched(&self, media_id: i64) -> DbResult<bool> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::is_watched(&conn, media_id).map_err(DatabaseError::Sqlite)
+    }
+
     pub fn update_availability(&self, id: i64, state: AvailabilityState) -> DbResult<()> {
         let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
         Repository::update_availability(&conn, id, state).map_err(DatabaseError::Sqlite)

@@ -1,4 +1,4 @@
-use muvrix_ui::app::{sleep_deadline_for, SleepTimer};
+use muvrix_ui::app::{mini_player_window_state, sleep_deadline_for, LibrarySelection, SleepTimer};
 use muvrix_ui::config_editor::{load_path, save_path};
 use muvrix_ui::views::SettingsTab;
 
@@ -48,4 +48,36 @@ fn config_editor_file_roundtrip() {
         "input-default-bindings=yes\n"
     );
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn library_multi_selection_supports_toggle_select_all_and_clear() {
+    let mut selection = LibrarySelection::default();
+    selection.toggle(4);
+    selection.toggle(7);
+    assert_eq!(selection.len(), 2);
+    assert!(selection.contains(4));
+    selection.toggle(4);
+    assert!(!selection.contains(4));
+    let mut ids = selection.ids();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![7]);
+    selection.select_all([1, 2, 3]);
+    let mut ids = selection.ids();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 2, 3]);
+    selection.clear();
+    assert!(selection.is_empty());
+}
+
+#[test]
+fn mini_player_requests_borderless_always_on_top_and_restores_normal() {
+    assert_eq!(
+        mini_player_window_state(true),
+        (false, eframe::egui::WindowLevel::AlwaysOnTop)
+    );
+    assert_eq!(
+        mini_player_window_state(false),
+        (true, eframe::egui::WindowLevel::Normal)
+    );
 }

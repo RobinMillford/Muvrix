@@ -9,7 +9,6 @@ description = "Desktop presentation layer for Muvrix"
 [dependencies]
 muvrix-core = { path = "../muvrix-core" }
 muvrix-player = { path = "../muvrix-player" }
-libmpv-sys = { path = "../libmpv-sys" }
 egui = { workspace = true }
 eframe = { workspace = true }
 egui_glow = { workspace = true }
@@ -20,6 +19,7 @@ bytemuck = "1.25"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = { workspace = true }
 log = { workspace = true }
+zbus = "5.19"
 env_logger = { workspace = true }
 winit = { version = "0.30.13", default-features = false, features = [
     "wayland",

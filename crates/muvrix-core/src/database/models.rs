@@ -302,6 +302,7 @@ pub struct LibraryItemView {
     pub metadata: Option<MediaMetadata>,
     pub thumbnail_path: Option<String>,
     pub is_favourite: bool,
+    pub is_watched: bool,
     pub tags: Vec<String>,
 }
 

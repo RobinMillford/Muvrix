@@ -30,6 +30,9 @@ use crate::config_editor::{self, ConfigEditorFile};
 use crate::gl_loader;
 use crate::icons::{self, Icon};
 use crate::library_enrichment::{enrich_pending, EnrichmentProgress};
+use crate::os_integration::{
+    should_inhibit, MediaAction, MediaSession, MediaSnapshot, SleepInhibitor,
+};
 use crate::render_engine::RenderEngine;
 use crate::views::{AppView, SettingsTab};
 use crate::wake::{WakeBridge, WakeHandle};
@@ -75,6 +78,54 @@ pub fn sleep_deadline_for(timer: SleepTimer, now: Instant) -> Option<Instant> {
     match timer {
         SleepTimer::Minutes(minutes) => Some(now + Duration::from_secs(minutes as u64 * 60)),
         SleepTimer::Off | SleepTimer::EndOfFile => None,
+    }
+}
+
+/// Multi-select state for batch library actions.
+#[derive(Debug, Clone, Default)]
+pub struct LibrarySelection {
+    ids: std::collections::HashSet<i64>,
+}
+
+impl LibrarySelection {
+    pub fn toggle(&mut self, id: i64) {
+        if !self.ids.remove(&id) {
+            self.ids.insert(id);
+        }
+    }
+
+    pub fn select_all<I: IntoIterator<Item = i64>>(&mut self, ids: I) {
+        self.ids.clear();
+        self.ids.extend(ids);
+    }
+
+    pub fn clear(&mut self) {
+        self.ids.clear();
+    }
+
+    pub fn contains(&self, id: i64) -> bool {
+        self.ids.contains(&id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    pub fn ids(&self) -> Vec<i64> {
+        self.ids.iter().copied().collect()
+    }
+}
+
+/// Window decorations and level requested for mini-player mode.
+pub fn mini_player_window_state(enabled: bool) -> (bool, egui::WindowLevel) {
+    if enabled {
+        (false, egui::WindowLevel::AlwaysOnTop)
+    } else {
+        (true, egui::WindowLevel::Normal)
     }
 }
 
@@ -139,6 +190,13 @@ pub struct MuvrixApp {
     pub(crate) playlist_name_input: String,
     pub(crate) playlist_import_input: String,
     pub(crate) playlist_status: Option<String>,
+    pub(crate) media_session: Option<MediaSession>,
+    pub(crate) sleep_inhibitor: SleepInhibitor,
+    pub(crate) sleep_inhibited: bool,
+    pub(crate) crash_notice: Option<std::path::PathBuf>,
+    pub(crate) library_selection: LibrarySelection,
+    pub(crate) library_multi_select: bool,
+    pub(crate) library_batch_confirm_delete: bool,
 
     // Phase 0.8 Media Library & Enhancement state
     pub(crate) db: DatabaseManager,
@@ -558,6 +616,13 @@ impl MuvrixApp {
             playlist_name_input: String::new(),
             playlist_import_input: String::new(),
             playlist_status: None,
+            media_session: MediaSession::start(),
+            sleep_inhibitor: SleepInhibitor::new(),
+            sleep_inhibited: false,
+            crash_notice: crate::crash::pending_report(),
+            library_selection: LibrarySelection::default(),
+            library_multi_select: false,
+            library_batch_confirm_delete: false,
             db,
             thumbnail_cache,
             library_filter: LibraryFilter::default(),
@@ -1056,6 +1121,94 @@ impl MuvrixApp {
         }
     }
 
+    fn apply_media_action(&mut self, action: MediaAction) {
+        match action {
+            MediaAction::Play => {
+                let _ = self.controller.play();
+            }
+            MediaAction::Pause => {
+                let _ = self.controller.pause();
+            }
+            MediaAction::PlayPause => {
+                let _ = self.controller.toggle_pause();
+            }
+            MediaAction::Stop => {
+                let _ = self.controller.stop();
+            }
+            MediaAction::Next => {
+                let _ = self.controller.playlist_next();
+            }
+            MediaAction::Previous => {
+                let _ = self.controller.playlist_prev();
+            }
+            MediaAction::SeekBy(offset_us) => {
+                let _ = self
+                    .controller
+                    .seek_relative(offset_us as f64 / 1_000_000.0);
+            }
+            MediaAction::SeekTo(position_us) => {
+                let mut seconds = (position_us.max(0) as f64) / 1_000_000.0;
+                let duration = self.controller.duration();
+                if duration > 0.0 {
+                    seconds = seconds.min(duration);
+                }
+                let _ = self.controller.seek(seconds, SeekMode::Absolute);
+            }
+        }
+    }
+
+    fn sync_desktop_integration(&mut self) {
+        let actions = self
+            .media_session
+            .as_ref()
+            .map(MediaSession::take_actions)
+            .unwrap_or_default();
+        for action in actions {
+            self.apply_media_action(action);
+        }
+
+        if let Some(session) = &self.media_session {
+            let title = self
+                .controller
+                .current_file()
+                .and_then(|path| std::path::Path::new(path).file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("No media")
+                .to_string();
+            let status = match self.controller.state() {
+                PlaybackState::Playing | PlaybackState::Buffering => "Playing",
+                PlaybackState::Paused => "Paused",
+                _ => "Stopped",
+            };
+            let playlist_pos = self.controller.playlist_pos();
+            let playlist_count = self.controller.playlist_count();
+            session.update(MediaSnapshot {
+                title,
+                artist: String::new(),
+                playback_status: status.to_string(),
+                duration_us: (self.controller.duration() * 1_000_000.0) as i64,
+                position_us: (self.controller.time_pos() * 1_000_000.0) as i64,
+                can_next: playlist_pos
+                    .map(|pos| pos + 1 < playlist_count)
+                    .unwrap_or(false),
+                can_previous: playlist_pos.map(|pos| pos > 0).unwrap_or(false),
+            });
+        }
+
+        let should_inhibit_now = should_inhibit(
+            matches!(
+                self.controller.state(),
+                PlaybackState::Playing | PlaybackState::Buffering
+            ),
+            self.controller.is_paused(),
+            self.controller.current_file().is_some(),
+        );
+        if should_inhibit_now != self.sleep_inhibited {
+            self.sleep_inhibitor.set_inhibited(should_inhibit_now);
+            self.sleep_inhibited = should_inhibit_now;
+        }
+    }
+
     fn dispatch_mpvex_commands(&mut self) {
         for command in self.controller.drain_mpvex_commands() {
             match command {
@@ -1455,19 +1608,16 @@ impl MuvrixApp {
     /// Toggles compact mini-player floating mode (resizes main window to 480x270 and requests AlwaysOnTop).
     pub fn toggle_pip(&mut self, ctx: &egui::Context) {
         self.is_pip = !self.is_pip;
+        let (decorations, level) = mini_player_window_state(self.is_pip);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(decorations));
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
         if self.is_pip {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(480.0, 270.0)));
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
-                egui::WindowLevel::AlwaysOnTop,
-            ));
             self.status_message =
                 "Compact Mini-Player mode enabled (Always on Top is best-effort on Wayland)"
                     .to_string();
         } else {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(1280.0, 720.0)));
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
-                egui::WindowLevel::Normal,
-            ));
             self.status_message = "Exited Compact Mini-Player mode".to_string();
         }
     }
@@ -2082,6 +2232,7 @@ impl MuvrixApp {
 
         self.sync_playback_state();
         self.dispatch_mpvex_commands();
+        self.sync_desktop_integration();
         self.tick_sleep_timer();
         if matches!(self.sleep_timer, SleepTimer::Minutes(_)) {
             ctx.request_repaint_after(Duration::from_secs(1));
@@ -2192,6 +2343,37 @@ impl MuvrixApp {
         visuals.hyperlink_color = accent;
         visuals.widgets.active.bg_fill = accent;
         ctx.set_visuals(visuals);
+
+        if let Some(path) = self.crash_notice.clone() {
+            let mut dismiss = false;
+            egui::TopBottomPanel::top("crash_notice_banner").show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("Muvrix recovered from an earlier crash. Report:")
+                            .strong()
+                            .color(Color32::from_rgb(251, 146, 60)),
+                    );
+                    ui.label(
+                        RichText::new(path.display().to_string())
+                            .monospace()
+                            .size(11.0)
+                            .color(Color32::from_gray(200)),
+                    );
+                    if ui.button("Dismiss").clicked() {
+                        dismiss = true;
+                    }
+                });
+            });
+            if dismiss {
+                if let Err(error) = crate::crash::acknowledge(&path) {
+                    log::warn!(
+                        "failed to acknowledge crash report {}: {error}",
+                        path.display()
+                    );
+                }
+                self.crash_notice = None;
+            }
+        }
 
         // ---------------------------------------------------------------------
         // 1. Top Identity, Navigation & Player Header Panel
@@ -3734,6 +3916,8 @@ impl MuvrixApp {
         log::info!("Initiating safe teardown of MuvrixApp");
         self.cancel_library_scan();
         self.cancel_library_enrichment();
+        self.sleep_inhibitor.set_inhibited(false);
+        self.sleep_inhibited = false;
 
         // Persist final playback position in history store
         if let Some(path) = self.controller.current_file() {

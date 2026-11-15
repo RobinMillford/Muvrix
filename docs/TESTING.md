@@ -13,16 +13,16 @@ Muvrix enforces four mandatory quality gates before any code is committed:
 | **Code Formatting** | `cargo fmt --check` | 0 formatting violations |
 | **Workspace Compilation** | `cargo check --workspace --all-targets` | 0 compilation errors |
 | **Clippy Linting** | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 0 warnings |
-| **Automated Test Suite** | `cargo test --workspace --all-targets -- --test-threads=1` | 59 passed, 0 failed |
+| **Automated Test Suite** | `cargo test --workspace` | 389+ passed, 0 failed |
 
 ---
 
 ## 2. Test Suite Architecture
 
-The workspace contains 81 automated tests organized into deterministic CI tests and optional extended tests:
+The workspace contains 400+ tests organized into deterministic CI tests and optional extended tests. The current verified baseline is **389+ passed, 0 failed, 24 ignored**:
 
 ```text
-Suite Summary: 59 passed, 0 failed, 22 ignored
+Suite Summary: 389+ passed, 0 failed, 24 ignored
 ├── libmpv-sys (3 tests)
 │   ├── client_api_version (Unit)
 │   ├── create_destroy_handle (Unit)
@@ -90,3 +90,18 @@ cargo test -p muvrix-player --test format_validation_test -- test_format_eac3_7_
 Configuration variables for extended tests:
 - `MUVRIX_TEST_MEDIA_DIR`: Directory containing extended media corpus.
 - `MUVRIX_SAMPLE_7_1_MKV`: Explicit path to multi-channel audio sample.
+
+
+---
+
+## 5. Ignored Tests and Current Truth (2026-11-15)
+
+The 24 ignored tests are deliberate hardware/CI gates, not failures:
+
+- Graphical Wayland native-runner and embedded-render tests require a real compositor, EGL, and GPU.
+- Direct VAAPI, HDR fixture, and sequential SDR/HDR tests require Intel VAAPI plus the local media corpus.
+- Extended codec/performance/GUI preset tests require `tests/MuvrixTestMedia/` or the named external media variables.
+- Live SMB/SFTP/WebDAV real-server tests require external services.
+- Long-duration C1/C3 qualification remains a manual hardware run.
+
+The automated suite is now **389+ passed, 0 failed, 24 ignored** on the verified Linux development host. Tests must not be reported as runtime platform qualification merely because they compile or pass headlessly.

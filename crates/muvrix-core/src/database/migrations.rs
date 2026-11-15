@@ -3,7 +3,7 @@
 use rusqlite::{Connection, Result, Transaction};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const LATEST_SCHEMA_VERSION: u32 = 4;
+pub const LATEST_SCHEMA_VERSION: u32 = 5;
 
 /// Apply all pending database migrations within a transaction.
 pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
@@ -50,6 +50,13 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
         let tx = conn.transaction()?;
         migration_004_playlists(&tx)?;
         record_migration(&tx, 4, "Persistent playlists and ordered M3U entries")?;
+        tx.commit()?;
+    }
+
+    if current_version < 5 {
+        let tx = conn.transaction()?;
+        migration_005_watch_state(&tx)?;
+        record_migration(&tx, 5, "Library watched state for batch actions")?;
         tx.commit()?;
     }
 
@@ -292,6 +299,19 @@ fn migration_004_playlists(tx: &Transaction) -> Result<()> {
         );
 
         CREATE INDEX idx_playlist_items_playlist ON playlist_items(playlist_id, position);
+        ",
+    )?;
+    Ok(())
+}
+
+fn migration_005_watch_state(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
+        "
+        CREATE TABLE media_watch_state (
+            media_id INTEGER PRIMARY KEY REFERENCES media_items(id) ON DELETE CASCADE,
+            is_watched INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL
+        );
         ",
     )?;
     Ok(())

@@ -141,5 +141,11 @@ Categories=AudioVideo;Player;Video;
 MimeType=video/mp4;video/mkv;video/webm;video/quicktime;audio/flac;audio/mp3;audio/ogg;audio/wav;
 EOF
 
+# 8. Use the tracked, lint-checked desktop entry and launcher assets.
+cp "$REPO_ROOT/packaging/muvrix.desktop" "$DIST_DIR/share/applications/muvrix.desktop"
+cp "$REPO_ROOT/packaging/muvrix" "$DIST_DIR/bin/muvrix"
+chmod +x "$DIST_DIR/bin/muvrix"
+"$REPO_ROOT/scripts/packaging/validate-linux-desktop.sh"
+
 echo "Packaging complete: $DIST_DIR"
 echo "To create tarball: tar -czvf target/dist/muvrix-linux-x86_64.tar.gz -C target/dist muvrix-linux-x86_64"

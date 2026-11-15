@@ -479,9 +479,7 @@ impl RenderEngine {
             "paint",
         );
         let update_flags = self.mpv_render_ctx.update();
-        let engine_has_frame = (update_flags
-            & (libmpv_sys::mpv_render_update_flag::MPV_RENDER_UPDATE_FRAME as u64))
-            != 0;
+        let engine_has_frame = MpvRenderContext::update_has_frame(update_flags);
         crate::trace::record(
             crate::trace::Ev::RenderUpdate,
             "paint",
@@ -532,31 +530,27 @@ impl RenderEngine {
         self.fbo.ensure_size(gl, width as u32, height as u32);
 
         if should_render {
-            let fbo_params = libmpv_sys::mpv_opengl_fbo {
-                fbo: self.fbo.fbo().0.get() as std::os::raw::c_int,
-                w: width,
-                h: height,
-                internal_format: self.fbo.internal_format(),
-            };
-
             let started = Instant::now();
             crate::trace::record(
                 crate::trace::Ev::RenderEnter,
                 "mpv",
-                fbo_params.w as i64,
-                fbo_params.h as i64,
+                width as i64,
+                height as i64,
             );
             crate::causal_trace::record(
                 crate::causal_trace::Kind::RenderEnter,
                 draw_corr,
-                fbo_params.w as i64,
-                fbo_params.h as i64,
+                width as i64,
+                height as i64,
                 0,
                 "mpv",
             );
             let gpu_query = self.gpu.begin(gl);
-            let frame = self.mpv_render_ctx.render_gl_ex_info(
-                fbo_params,
+            let frame = self.mpv_render_ctx.render_gl_to_fbo(
+                self.fbo.fbo().0.get() as i32,
+                width,
+                height,
+                self.fbo.internal_format(),
                 false,
                 self.pacing.blocks(),
                 true,
@@ -585,7 +579,7 @@ impl RenderEngine {
                     info.flags as i64,
                     info.target_time,
                     info.valid as i64,
-                    ((info.flags & libmpv_sys::MPV_RENDER_FRAME_INFO_BLOCK_VSYNC) != 0) as i64,
+                    info.block_vsync() as i64,
                     info.api_result as i64,
                     "every_query",
                 );

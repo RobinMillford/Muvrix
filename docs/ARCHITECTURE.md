@@ -61,3 +61,33 @@ Supporting crate:
 
 5. **Portable Vector Iconography**:
    All UI icons are rendered procedurally using `egui::Painter` geometry ([`crates/muvrix-ui/src/icons.rs`](../crates/muvrix-ui/src/icons.rs)). This eliminates dependencies on external raster assets or inconsistent platform emoji fonts.
+
+
+---
+
+## Current Workspace & FFI Boundary (2026-11-15)
+
+The workspace is exactly four crates:
+
+| Crate | Responsibility |
+| :--- | :--- |
+| `libmpv-sys` | Raw C FFI declarations and dynamic-linker probing only. |
+| `muvrix-core` | Paths, scanner, SQLite library/playlists, metadata, network providers, history models, and shared errors. |
+| `muvrix-player` | Safe `MpvHandle`/`PlaybackController`/`MpvRenderContext`, stream bridge, subtitle styling, settings, and all `libmpv-sys` access. |
+| `muvrix-ui` | eframe/egui shell, native winit runner, rendering coordination, views, MPRIS/sleep/crash integration. It depends on `muvrix-player` and `muvrix-core`, **not** `libmpv-sys`. |
+
+The render boundary is also safe: `muvrix-ui` passes only FBO ids/dimensions to `MpvRenderContext::render_gl_to_fbo`; raw `mpv_opengl_fbo`, `mpv_render_param`, update flags, and frame-info constants remain inside `muvrix-player`.
+
+The libmpv lifecycle order is:
+
+```text
+mpv_create()
+  -> set initial options
+  -> mpv_initialize()
+  -> mpv_render_context_create()
+  -> observe properties / load media / render
+  -> mpv_render_context_free()
+  -> mpv_terminate_destroy()
+```
+
+`mpv_render_context_create()` is never called before `mpv_initialize()`.

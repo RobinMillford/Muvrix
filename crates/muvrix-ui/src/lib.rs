@@ -4,6 +4,7 @@ pub mod app;
 pub mod causal_trace;
 pub mod clock;
 pub mod config_editor;
+pub mod crash;
 pub mod fbo;
 pub mod gl_loader;
 pub mod gpu_timing;
@@ -11,6 +12,7 @@ pub mod icons;
 pub mod library_enrichment;
 pub mod mpv_state;
 pub mod native_display;
+pub mod os_integration;
 pub mod output;
 #[cfg(target_os = "linux")]
 pub mod platform;

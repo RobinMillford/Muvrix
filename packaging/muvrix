@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Muvrix launcher: resolve the bundled libmpv/libplacebo runtime without
+# modifying the host's global library path.
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_ROOT="$(cd "$SELF_DIR/.." && pwd)"
+
+if [ -d "$APP_ROOT/lib64" ]; then
+    export LD_LIBRARY_PATH="$APP_ROOT/lib64:${LD_LIBRARY_PATH:-}"
+fi
+if [ -z "${MUVRIX_ASSETS_DIR:-}" ] && [ -d "$APP_ROOT/share/muvrix/assets" ]; then
+    export MUVRIX_ASSETS_DIR="$APP_ROOT/share/muvrix/assets"
+fi
+
+exec "$APP_ROOT/bin/muvrix-bin" "$@"

@@ -158,6 +158,110 @@ impl MuvrixApp {
     // Media Library View (Indexed Catalog, Filtering, Sorting, Cards & Details)
     // -------------------------------------------------------------------------
 
+    fn render_library_batch_bar(&mut self, ui: &mut egui::Ui) {
+        let ids = self.library_selection.ids();
+        let playlists = self.db.list_playlists().unwrap_or_default();
+        ui.group(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!("Batch actions · {} selected", ids.len()))
+                        .strong()
+                        .color(Color32::from_rgb(125, 211, 252)),
+                );
+                if ui.button("Select All Page").clicked() {
+                    let all = self.library_items.iter().map(|item| item.item.id);
+                    self.library_selection.select_all(all);
+                }
+                if ui.button("Clear Selection").clicked() {
+                    self.library_selection.clear();
+                }
+                ui.separator();
+                if playlists.is_empty() {
+                    ui.label(RichText::new("No saved playlists").italics().small());
+                } else {
+                    egui::ComboBox::from_id_salt("batch_playlist_combo")
+                        .selected_text(
+                            self.selected_persistent_playlist
+                                .and_then(|id| playlists.iter().find(|p| p.id == id))
+                                .map(|p| p.name.clone())
+                                .unwrap_or_else(|| "Choose playlist".to_string()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for playlist in &playlists {
+                                if ui
+                                    .selectable_label(
+                                        self.selected_persistent_playlist == Some(playlist.id),
+                                        format!("{} ({})", playlist.name, playlist.item_count),
+                                    )
+                                    .clicked()
+                                {
+                                    self.selected_persistent_playlist = Some(playlist.id);
+                                }
+                            }
+                        });
+                    if ui.button("Add Selected to Playlist").clicked() && !ids.is_empty() {
+                        let target = self
+                            .selected_persistent_playlist
+                            .or_else(|| playlists.first().map(|playlist| playlist.id));
+                        if let Some(target) = target {
+                            for id in &ids {
+                                if let Ok(Some(item)) = self.db.get_media_item_by_id(*id) {
+                                    let metadata = self.db.get_metadata(*id).ok().flatten();
+                                    let _ = self.db.add_playlist_entry(
+                                        target,
+                                        &item.canonical_path,
+                                        metadata.as_ref().and_then(|m| m.title.as_deref()),
+                                        metadata.as_ref().map(|m| m.duration_ms).unwrap_or(0),
+                                    );
+                                }
+                            }
+                            self.playlist_status = Some(format!(
+                                "Added {} selected item(s) to saved playlist",
+                                ids.len()
+                            ));
+                        }
+                    }
+                }
+                ui.separator();
+                if ui.button("Mark Watched").clicked() && !ids.is_empty() {
+                    for id in &ids {
+                        let _ = self.db.set_watched(*id, true);
+                    }
+                    self.library_selection.clear();
+                    self.refresh_library();
+                }
+                if ui.button("Mark Unwatched").clicked() && !ids.is_empty() {
+                    for id in &ids {
+                        let _ = self.db.set_watched(*id, false);
+                    }
+                    self.library_selection.clear();
+                    self.refresh_library();
+                }
+                ui.separator();
+                if self.library_batch_confirm_delete {
+                    ui.label(
+                        RichText::new(format!("Remove {} selected item(s)?", ids.len()))
+                            .color(Color32::from_rgb(251, 146, 60)),
+                    );
+                    if ui.button("Confirm Remove").clicked() && !ids.is_empty() {
+                        for id in &ids {
+                            let _ = self.db.delete_media_item(*id);
+                        }
+                        self.library_selection.clear();
+                        self.library_batch_confirm_delete = false;
+                        self.refresh_library();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.library_batch_confirm_delete = false;
+                    }
+                } else if ui.button("Remove Selected").clicked() && !ids.is_empty() {
+                    self.library_batch_confirm_delete = true;
+                }
+            });
+        });
+        ui.add_space(4.0);
+    }
+
     pub fn render_library_view(&mut self, ctx: &egui::Context) {
         // 1. Right-side details drawer if an item is selected
         if self.selected_library_item.is_some() {
@@ -198,6 +302,7 @@ impl MuvrixApp {
             let mut select_item: Option<LibraryItemView> = None;
             let mut toggle_fav: Option<(i64, bool)> = None;
             let mut trigger_scan_root: Option<i64> = None;
+            let mut selection_toggle: Option<i64> = None;
 
             // Header Toolbar
             ui.horizontal(|ui| {
@@ -215,6 +320,18 @@ impl MuvrixApp {
                 );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .selectable_label(self.library_multi_select, "Select")
+                        .on_hover_text("Toggle multi-select batch actions")
+                        .clicked()
+                    {
+                        self.library_multi_select = !self.library_multi_select;
+                        self.library_batch_confirm_delete = false;
+                        if !self.library_multi_select {
+                            self.library_selection.clear();
+                        }
+                    }
+
                     // View Mode Toggle (Grid / List)
                     ui.group(|ui| {
                         if ui.selectable_label(self.library_is_grid, "Grid").clicked() {
@@ -390,6 +507,10 @@ impl MuvrixApp {
             if filter_changed {
                 self.library_page = 0;
                 self.refresh_library();
+            }
+
+            if self.library_multi_select {
+                self.render_library_batch_bar(ui);
             }
 
             ui.add_space(4.0);
@@ -699,6 +820,17 @@ impl MuvrixApp {
 
                                             ui.add_space(6.0);
 
+                                            if self.library_multi_select {
+                                                let mut selected =
+                                                    self.library_selection.contains(item_view.item.id);
+                                                if ui
+                                                    .checkbox(&mut selected, "Selected")
+                                                    .changed()
+                                                {
+                                                    selection_toggle = Some(item_view.item.id);
+                                                }
+                                            }
+
                                             // 2. Title strictly below thumbnail
                                             let title = item_view
                                                 .metadata
@@ -827,6 +959,9 @@ impl MuvrixApp {
                             .spacing([12.0, 6.0])
                             .show(ui, |ui| {
                                 // Header row
+                                if self.library_multi_select {
+                                    ui.label(RichText::new("Select").strong());
+                                }
                                 ui.label(RichText::new("Fav").strong());
                                 ui.label(RichText::new("Title / File Name").strong());
                                 ui.label(RichText::new("Type").strong());
@@ -837,6 +972,13 @@ impl MuvrixApp {
                                 ui.end_row();
 
                                 for item_view in &self.library_items {
+                                    if self.library_multi_select {
+                                        let mut selected =
+                                            self.library_selection.contains(item_view.item.id);
+                                        if ui.checkbox(&mut selected, "").changed() {
+                                            selection_toggle = Some(item_view.item.id);
+                                        }
+                                    }
                                     let star = if item_view.is_favourite { "★" } else { "☆" };
                                     let star_color = if item_view.is_favourite {
                                         Color32::from_rgb(255, 200, 50)
@@ -919,6 +1061,10 @@ impl MuvrixApp {
                                 }
                             });
                     });
+            }
+
+            if let Some(id) = selection_toggle {
+                self.library_selection.toggle(id);
             }
 
             ui.add_space(4.0);

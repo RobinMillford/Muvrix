@@ -2249,7 +2249,6 @@ dependencies = [
  "glow",
  "image",
  "libc",
- "libmpv-sys",
  "log",
  "muvrix-core",
  "muvrix-player",
@@ -2259,6 +2258,7 @@ dependencies = [
  "wayland-protocols",
  "wayland-sys",
  "winit",
+ "zbus",
 ]
 
 [[package]]

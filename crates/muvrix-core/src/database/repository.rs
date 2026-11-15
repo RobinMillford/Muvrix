@@ -270,6 +270,30 @@ impl Repository {
         Ok(count.max(0) as u64)
     }
 
+    pub fn set_watched(conn: &Connection, media_id: i64, watched: bool) -> Result<()> {
+        conn.execute(
+            "INSERT INTO media_watch_state (media_id, is_watched, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(media_id) DO UPDATE SET
+                is_watched = excluded.is_watched,
+                updated_at = excluded.updated_at",
+            params![media_id, watched as i32, current_timestamp() as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn is_watched(conn: &Connection, media_id: i64) -> Result<bool> {
+        let value: Option<i64> = conn
+            .query_row(
+                "SELECT is_watched FROM media_watch_state WHERE media_id = ?1",
+                params![media_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.unwrap_or(0) != 0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn update_availability(conn: &Connection, id: i64, state: AvailabilityState) -> Result<()> {
         conn.execute(
             "UPDATE media_items SET availability_state = ?1 WHERE id = ?2",
@@ -1053,10 +1077,12 @@ impl Repository {
                 mi.id, mi.root_id, mi.relative_path, mi.canonical_path, mi.file_name, mi.file_extension, mi.media_type, mi.file_size, mi.modified_time, mi.added_time, mi.last_scanned_at, mi.availability_state, mi.metadata_status,
                 mm.title, mm.original_title, mm.description, mm.genre, mm.release_year, mm.duration_ms, mm.overall_bitrate, mm.container, mm.video_codec, mm.audio_codec, mm.width, mm.height, mm.fps, mm.hdr_type, mm.audio_channels, mm.sample_rate, mm.bit_depth, mm.artist, mm.album, mm.album_artist, mm.track_number, mm.disc_number,
                 ac.file_path,
-                CASE WHEN fav.media_id IS NOT NULL THEN 1 ELSE 0 END as is_fav
+                CASE WHEN fav.media_id IS NOT NULL THEN 1 ELSE 0 END as is_fav,
+                COALESCE(ws.is_watched, 0)
              FROM media_items mi
              LEFT JOIN media_metadata mm ON mi.id = mm.media_id
              LEFT JOIN artwork_cache ac ON mi.id = ac.media_id
+             LEFT JOIN media_watch_state ws ON mi.id = ws.media_id
              LEFT JOIN favourites fav ON mi.id = fav.media_id
              LEFT JOIN collection_items ci ON mi.id = ci.media_id
              {}
@@ -1127,12 +1153,14 @@ impl Repository {
 
             let thumbnail_path: Option<String> = row.get(35)?;
             let is_favourite: bool = row.get::<_, i32>(36)? != 0;
+            let is_watched: bool = row.get::<_, i32>(37)? != 0;
 
             Ok(LibraryItemView {
                 item,
                 metadata,
                 thumbnail_path,
                 is_favourite,
+                is_watched,
                 tags: Vec::new(), // Populated if needed
             })
         })?;

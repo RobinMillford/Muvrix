@@ -8,11 +8,11 @@ This document outlines the current operating system compatibility, hardware acce
 
 | Platform | Target Architecture | Display Backend | Audio Driver | Validation Level |
 | :--- | :--- | :--- | :--- | :--- |
-| **Fedora Linux (45 / 41+)** | `x86_64` | Wayland / X11 | PipeWire / PulseAudio | **Physically Verified on Hardware & Container CI** |
-| **Ubuntu Linux (24.04 LTS)** | `x86_64` | Wayland / X11 | PipeWire / PulseAudio | **Verified in Hosted CI** |
-| **macOS 15+ (Apple Silicon)** | `aarch64-apple-darwin` | Cocoa / Metal / GL | CoreAudio | **Verified in Hosted CI (`macos-15`)** |
-| **Windows 10/11 (MSVC)** | `x86_64-pc-windows-msvc` | Win32 / WGL | WASAPI | **Verified in Hosted CI (`windows-latest`)** |
-| **macOS (Intel x86_64)** | `x86_64-apple-darwin` | Cocoa / GL | CoreAudio | Architecturally supported; pending dedicated Intel CI runner |
+| **Fedora Linux (45 / 41+)** | `x86_64` | Wayland native runner (verified); X11 compile/link only | PipeWire / PulseAudio | **Wayland + direct VAAPI physically verified** |
+| **Ubuntu Linux (24.04 LTS)** | `x86_64` | Wayland / X11 | PipeWire / PulseAudio | **Compile/test CI only; no runtime qualification** |
+| **macOS 15+ (Apple Silicon)** | `aarch64-apple-darwin` | Cocoa / OpenGL | CoreAudio | **Compile/link CI only; no runtime qualification** |
+| **Windows 10/11 (MSVC)** | `x86_64-pc-windows-msvc` | Win32 / WGL (OpenGL presentation; libmpv may use D3D11/SW decode) | WASAPI | **Compile/link CI only; no runtime qualification** |
+| **macOS (Intel x86_64)** | `x86_64-apple-darwin` | Cocoa / OpenGL | CoreAudio | Architecturally supported; no Metal backend claim; no runtime qualification |
 
 ---
 
@@ -45,3 +45,14 @@ Cross-platform compilation, linkage, and unit tests are enforced on every push a
 
 > [!NOTE]
 > All Phase 0.5 portability infrastructure and test suites pass in hosted CI. The latest Phase 0.6 desktop UI refinements have been locally validated on Fedora 45 and will be tested on hosted runners upon remote branch push.
+
+
+---
+
+## 4. Current Verification Truth (2026-11-15)
+
+- **Linux Wayland native runner:** physically verified with the winit-owned window/EGL surface and direct VAAPI zero-copy path.
+- **Linux X11:** builds and links in CI; native X11 presentation is not runtime-qualified here.
+- **Windows and macOS:** compile/link in CI; neither platform has runtime playback qualification in this repository.
+- **Render backends:** Muvrix's presentation path is OpenGL (FBO + quad). libmpv may use D3D11 or software decode on Windows. macOS uses Cocoa/OpenGL; there is **no Metal presentation backend**.
+- **MPRIS and screen-saver inhibit:** Linux session-D-Bus only; both are optional and no-op without a session bus.

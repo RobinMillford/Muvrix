@@ -50,3 +50,44 @@ fn playlist_crud_ordering_and_cascade() {
         .expect("cascade entries")
         .is_empty());
 }
+
+#[test]
+fn watched_state_roundtrips_for_batch_actions() {
+    let db = DatabaseManager::open_in_memory().expect("db");
+    let id = db
+        .insert_root(&muvrix_core::database::LibraryRoot {
+            id: 0,
+            display_name: "Watch Test".to_string(),
+            root_path: "/media/watch-test".to_string(),
+            source_type: "local".to_string(),
+            is_recursive: true,
+            is_enabled: true,
+            exclusion_patterns: Vec::new(),
+            last_scanned_at: 0,
+            scan_status: "idle".to_string(),
+        })
+        .expect("root");
+    let media_id = db
+        .upsert_media_item(&muvrix_core::database::MediaItem {
+            id: 0,
+            root_id: id,
+            relative_path: "watched.mp4".to_string(),
+            canonical_path: "/media/watch-test/watched.mp4".to_string(),
+            file_name: "watched.mp4".to_string(),
+            file_extension: "mp4".to_string(),
+            media_type: muvrix_core::database::MediaType::Video,
+            file_size: 1,
+            modified_time: 1,
+            added_time: 1,
+            last_scanned_at: 1,
+            availability_state: muvrix_core::database::AvailabilityState::Available,
+            metadata_status: muvrix_core::database::MetadataStatus::Pending,
+        })
+        .expect("media");
+    db.set_watched(media_id, true).expect("watched");
+    assert!(db.is_watched(media_id).expect("read watched"));
+    db.set_watched(media_id, false).expect("unwatched");
+    assert!(!db.is_watched(media_id).expect("read unwatched"));
+    db.delete_media_item(media_id).expect("delete selected");
+    assert!(db.get_media_item_by_id(media_id).expect("get").is_none());
+}

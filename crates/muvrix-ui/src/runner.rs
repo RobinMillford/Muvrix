@@ -1873,6 +1873,15 @@ fn apply_commands(window: &Window, commands: &[egui::ViewportCommand]) {
                     .request_inner_size(winit::dpi::LogicalSize::new(size.x as f64, size.y as f64));
             }
             ViewportCommand::Visible(visible) => window.set_visible(*visible),
+            ViewportCommand::Decorations(decorations) => window.set_decorations(*decorations),
+            ViewportCommand::WindowLevel(level) => {
+                let level = match level {
+                    egui::WindowLevel::AlwaysOnTop => winit::window::WindowLevel::AlwaysOnTop,
+                    egui::WindowLevel::AlwaysOnBottom => winit::window::WindowLevel::AlwaysOnBottom,
+                    egui::WindowLevel::Normal => winit::window::WindowLevel::Normal,
+                };
+                window.set_window_level(level);
+            }
             _ => {}
         }
     }
