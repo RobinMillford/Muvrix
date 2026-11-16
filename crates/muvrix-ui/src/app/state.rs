@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Pos2};
 use muvrix_core::browser::MediaBrowser;
 use muvrix_core::database::{
-    Bookmark, DatabaseManager, LibraryFilter, LibraryItemView, LibrarySortField, SortDirection,
+    BatchMetadataRequest, Bookmark, CleanupPreview, DatabaseManager, IntegrityScanProgress,
+    LibraryFilter, LibraryItemView, LibrarySortField, RelinkCandidate, RuleCombinationMode,
+    SelectedMetadataSummary, SmartCollection, SmartRule, SortDirection,
 };
 use muvrix_core::history::HistoryStore;
 use muvrix_core::lyrics::LrcFile;
@@ -331,6 +333,55 @@ pub struct MuvrixApp {
     pub(crate) playlist_drag_source_idx: Option<usize>,
     pub(crate) playlist_drag_target_idx: Option<usize>,
     pub(crate) playlist_use_smart_shuffle: bool,
+
+    // Phase E3: Library Intelligence & Smart Collections
+    pub(crate) selected_smart_collection: Option<i64>,
+    pub(crate) smart_collections: Vec<SmartCollection>,
+    pub(crate) smart_collection_dialog_open: bool,
+    pub(crate) editing_smart_collection: Option<SmartCollection>,
+    pub(crate) smart_collection_name_input: String,
+    pub(crate) smart_collection_desc_input: String,
+    pub(crate) smart_collection_icon_input: String,
+    pub(crate) smart_collection_rules: Vec<SmartRule>,
+    pub(crate) smart_collection_combination_mode: RuleCombinationMode,
+    pub(crate) smart_collection_preview_count: Option<u64>,
+    pub(crate) smart_collection_error: Option<String>,
+
+    // Phase E3: Batch Metadata Editor
+    pub(crate) batch_metadata_dialog_open: bool,
+    pub(crate) batch_metadata_summary: Option<SelectedMetadataSummary>,
+    #[allow(dead_code)]
+    pub(crate) batch_metadata_request: BatchMetadataRequest,
+    pub(crate) batch_edit_title_action: u8,
+    pub(crate) batch_title_input: String,
+    pub(crate) batch_edit_artist_action: u8,
+    pub(crate) batch_artist_input: String,
+    pub(crate) batch_edit_album_action: u8,
+    pub(crate) batch_album_input: String,
+    pub(crate) batch_edit_album_artist_action: u8,
+    pub(crate) batch_album_artist_input: String,
+    pub(crate) batch_edit_genre_action: u8,
+    pub(crate) batch_genre_input: String,
+    pub(crate) batch_edit_year_action: u8,
+    pub(crate) batch_year_input: String,
+    pub(crate) batch_edit_track_action: u8,
+    pub(crate) batch_track_input: String,
+    pub(crate) batch_edit_disc_action: u8,
+    pub(crate) batch_disc_input: String,
+    pub(crate) batch_edit_status: Option<String>,
+
+    // Phase E3: Integrity Scanner & Relinking
+    pub(crate) integrity_dialog_open: bool,
+    pub(crate) integrity_scan_progress: Option<IntegrityScanProgress>,
+    #[allow(dead_code)]
+    pub(crate) integrity_scan_cancel: Option<Arc<AtomicBool>>,
+    pub(crate) missing_media_items: Vec<LibraryItemView>,
+    pub(crate) selected_missing_item: Option<LibraryItemView>,
+    pub(crate) relink_candidates: Vec<RelinkCandidate>,
+    pub(crate) relink_search_dir_input: String,
+    pub(crate) cleanup_preview: Option<CleanupPreview>,
+    pub(crate) cleanup_confirm_open: bool,
+    pub(crate) integrity_status_msg: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

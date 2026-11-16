@@ -1,15 +1,18 @@
 //! Navigation views, panels, and secondary UI components for Muvrix.
 
+pub mod batch_editor;
 pub mod browser;
 pub mod drawers;
 pub mod history;
 pub mod home;
+pub mod integrity;
 pub mod library;
 pub mod lyrics;
 pub mod mini_player;
 pub mod player;
 pub mod playlist;
 pub mod settings;
+pub mod smart_collections;
 
 use crate::icons::Icon;
 

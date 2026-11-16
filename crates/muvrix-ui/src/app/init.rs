@@ -616,6 +616,300 @@ impl MuvrixApp {
             export_playlist_status: None,
             export_playlist_target_id: None,
             export_playlist_format: crate::app::PlaylistExportFormat::default(),
+
+            // Phase E3: Library Intelligence & Smart Collections
+            selected_smart_collection: None,
+            smart_collections: Vec::new(),
+            smart_collection_dialog_open: std::env::var("MUVRIX_OPEN_SMART_COLLECTION_BUILDER")
+                .is_ok(),
+            editing_smart_collection: None,
+            smart_collection_name_input: if std::env::var("MUVRIX_OPEN_SMART_COLLECTION_BUILDER")
+                .is_ok()
+            {
+                "4K Sci-Fi Masterpieces".to_string()
+            } else {
+                String::new()
+            },
+            smart_collection_desc_input: if std::env::var("MUVRIX_OPEN_SMART_COLLECTION_BUILDER")
+                .is_ok()
+            {
+                "High bitrate 4K releases matching genre Sci-Fi".to_string()
+            } else {
+                String::new()
+            },
+            smart_collection_icon_input: "🚀".to_string(),
+            smart_collection_rules: if std::env::var("MUVRIX_OPEN_SMART_COLLECTION_BUILDER").is_ok()
+            {
+                vec![
+                    muvrix_core::database::SmartRule::Text {
+                        field: muvrix_core::database::RuleField::Genre,
+                        operator: muvrix_core::database::TextOperator::Contains,
+                        value: "Sci-Fi".to_string(),
+                    },
+                    muvrix_core::database::SmartRule::Numeric {
+                        field: muvrix_core::database::RuleField::ReleaseYear,
+                        operator: muvrix_core::database::NumericOperator::GreaterThan,
+                        value: 2020.0,
+                        value_to: None,
+                    },
+                ]
+            } else {
+                Vec::new()
+            },
+            smart_collection_combination_mode: muvrix_core::database::RuleCombinationMode::And,
+            smart_collection_preview_count: if std::env::var("MUVRIX_OPEN_SMART_COLLECTION_BUILDER")
+                .is_ok()
+            {
+                Some(14)
+            } else {
+                None
+            },
+            smart_collection_error: None,
+
+            // Phase E3: Batch Metadata Editor
+            batch_metadata_dialog_open: std::env::var("MUVRIX_OPEN_BATCH_EDITOR").is_ok(),
+            batch_metadata_summary: if std::env::var("MUVRIX_OPEN_BATCH_EDITOR").is_ok() {
+                Some(muvrix_core::database::SelectedMetadataSummary {
+                    count: 3,
+                    title: muvrix_core::database::FieldMixedState::Mixed,
+                    artist: muvrix_core::database::FieldMixedState::Uniform(Some(
+                        "Christopher Nolan".to_string(),
+                    )),
+                    album: muvrix_core::database::FieldMixedState::Mixed,
+                    album_artist: muvrix_core::database::FieldMixedState::Uniform(Some(
+                        "Syncopy Films".to_string(),
+                    )),
+                    genre: muvrix_core::database::FieldMixedState::Uniform(Some(
+                        "Sci-Fi / Thriller".to_string(),
+                    )),
+                    release_year: muvrix_core::database::FieldMixedState::Mixed,
+                    track_number: muvrix_core::database::FieldMixedState::Mixed,
+                    disc_number: muvrix_core::database::FieldMixedState::Uniform(Some(1)),
+                })
+            } else {
+                None
+            },
+            batch_metadata_request: muvrix_core::database::BatchMetadataRequest::default(),
+            batch_edit_title_action: 0,
+            batch_title_input: String::new(),
+            batch_edit_artist_action: 0,
+            batch_artist_input: "Christopher Nolan".to_string(),
+            batch_edit_album_action: 0,
+            batch_album_input: String::new(),
+            batch_edit_album_artist_action: 0,
+            batch_album_artist_input: "Syncopy Films".to_string(),
+            batch_edit_genre_action: 0,
+            batch_genre_input: "Sci-Fi / Thriller".to_string(),
+            batch_edit_year_action: 0,
+            batch_year_input: String::new(),
+            batch_edit_track_action: 0,
+            batch_track_input: String::new(),
+            batch_edit_disc_action: 0,
+            batch_disc_input: "1".to_string(),
+            batch_edit_status: None,
+
+            // Phase E3: Integrity Scanner & Relinking
+            integrity_dialog_open: std::env::var("MUVRIX_OPEN_INTEGRITY_LOCATOR").is_ok()
+                || std::env::var("MUVRIX_OPEN_CATALOG_CLEANUP").is_ok(),
+            integrity_scan_progress: if std::env::var("MUVRIX_OPEN_INTEGRITY_LOCATOR").is_ok()
+                || std::env::var("MUVRIX_OPEN_CATALOG_CLEANUP").is_ok()
+            {
+                Some(muvrix_core::database::IntegrityScanProgress {
+                    total_examined: 142,
+                    total_items: 142,
+                    available_count: 138,
+                    missing_count: 3,
+                    inaccessible_count: 0,
+                    permission_denied_count: 0,
+                    network_unavailable_count: 1,
+                    is_completed: true,
+                    last_scan_timestamp: 1700000000,
+                })
+            } else {
+                None
+            },
+            integrity_scan_cancel: None,
+            missing_media_items: if std::env::var("MUVRIX_OPEN_INTEGRITY_LOCATOR").is_ok()
+                || std::env::var("MUVRIX_OPEN_CATALOG_CLEANUP").is_ok()
+            {
+                vec![
+                    muvrix_core::database::LibraryItemView {
+                        item: muvrix_core::database::MediaItem {
+                            id: 101,
+                            root_id: 1,
+                            relative_path: "Interstellar.mp4".to_string(),
+                            canonical_path: "/mnt/storage/movies/Interstellar.mp4".to_string(),
+                            file_name: "Interstellar.mp4".to_string(),
+                            file_extension: "mp4".to_string(),
+                            media_type: muvrix_core::database::MediaType::Video,
+                            file_size: 12_450_892_100,
+                            modified_time: 1700000000,
+                            added_time: 1700000000,
+                            last_scanned_at: 1700000000,
+                            availability_state:
+                                muvrix_core::database::AvailabilityState::Unavailable,
+                            metadata_status: muvrix_core::database::MetadataStatus::Extracted,
+                        },
+                        metadata: Some(muvrix_core::database::MediaMetadata {
+                            media_id: 101,
+                            title: Some("Interstellar (2014)".to_string()),
+                            artist: Some("Christopher Nolan".to_string()),
+                            genre: Some("Sci-Fi".to_string()),
+                            release_year: Some(2014),
+                            duration_ms: 169 * 60 * 1000,
+                            overall_bitrate: 15_000_000,
+                            ..Default::default()
+                        }),
+                        is_favourite: true,
+                        is_watched: true,
+                        thumbnail_path: None,
+                        tags: Vec::new(),
+                    },
+                    muvrix_core::database::LibraryItemView {
+                        item: muvrix_core::database::MediaItem {
+                            id: 104,
+                            root_id: 1,
+                            relative_path: "Dune.Part.Two.mkv".to_string(),
+                            canonical_path: "/mnt/storage/movies/Dune.Part.Two.mkv".to_string(),
+                            file_name: "Dune.Part.Two.mkv".to_string(),
+                            file_extension: "mkv".to_string(),
+                            media_type: muvrix_core::database::MediaType::Video,
+                            file_size: 18_120_400_000,
+                            modified_time: 1700000000,
+                            added_time: 1700000000,
+                            last_scanned_at: 1700000000,
+                            availability_state:
+                                muvrix_core::database::AvailabilityState::Unavailable,
+                            metadata_status: muvrix_core::database::MetadataStatus::Extracted,
+                        },
+                        metadata: Some(muvrix_core::database::MediaMetadata {
+                            media_id: 104,
+                            title: Some("Dune: Part Two (2024)".to_string()),
+                            artist: Some("Denis Villeneuve".to_string()),
+                            genre: Some("Sci-Fi / Adventure".to_string()),
+                            release_year: Some(2024),
+                            duration_ms: 166 * 60 * 1000,
+                            overall_bitrate: 22_000_000,
+                            ..Default::default()
+                        }),
+                        is_favourite: false,
+                        is_watched: false,
+                        thumbnail_path: None,
+                        tags: Vec::new(),
+                    },
+                    muvrix_core::database::LibraryItemView {
+                        item: muvrix_core::database::MediaItem {
+                            id: 112,
+                            root_id: 1,
+                            relative_path: "Blade.Runner.2049.mkv".to_string(),
+                            canonical_path: "/mnt/storage/movies/Blade.Runner.2049.mkv".to_string(),
+                            file_name: "Blade.Runner.2049.mkv".to_string(),
+                            file_extension: "mkv".to_string(),
+                            media_type: muvrix_core::database::MediaType::Video,
+                            file_size: 14_800_000_000,
+                            modified_time: 1700000000,
+                            added_time: 1700000000,
+                            last_scanned_at: 1700000000,
+                            availability_state:
+                                muvrix_core::database::AvailabilityState::Unavailable,
+                            metadata_status: muvrix_core::database::MetadataStatus::Extracted,
+                        },
+                        metadata: Some(muvrix_core::database::MediaMetadata {
+                            media_id: 112,
+                            title: Some("Blade Runner 2049".to_string()),
+                            artist: Some("Denis Villeneuve".to_string()),
+                            genre: Some("Cyberpunk / Sci-Fi".to_string()),
+                            release_year: Some(2017),
+                            duration_ms: 164 * 60 * 1000,
+                            overall_bitrate: 18_000_000,
+                            ..Default::default()
+                        }),
+                        is_favourite: true,
+                        is_watched: true,
+                        thumbnail_path: None,
+                        tags: Vec::new(),
+                    },
+                ]
+            } else {
+                Vec::new()
+            },
+            selected_missing_item: if std::env::var("MUVRIX_OPEN_INTEGRITY_LOCATOR").is_ok() {
+                Some(muvrix_core::database::LibraryItemView {
+                    item: muvrix_core::database::MediaItem {
+                        id: 101,
+                        root_id: 1,
+                        relative_path: "Interstellar.mp4".to_string(),
+                        canonical_path: "/mnt/storage/movies/Interstellar.mp4".to_string(),
+                        file_name: "Interstellar.mp4".to_string(),
+                        file_extension: "mp4".to_string(),
+                        media_type: muvrix_core::database::MediaType::Video,
+                        file_size: 12_450_892_100,
+                        modified_time: 1700000000,
+                        added_time: 1700000000,
+                        last_scanned_at: 1700000000,
+                        availability_state: muvrix_core::database::AvailabilityState::Unavailable,
+                        metadata_status: muvrix_core::database::MetadataStatus::Extracted,
+                    },
+                    metadata: Some(muvrix_core::database::MediaMetadata {
+                        media_id: 101,
+                        title: Some("Interstellar (2014)".to_string()),
+                        artist: Some("Christopher Nolan".to_string()),
+                        genre: Some("Sci-Fi".to_string()),
+                        release_year: Some(2014),
+                        duration_ms: 169 * 60 * 1000,
+                        overall_bitrate: 15_000_000,
+                        ..Default::default()
+                    }),
+                    is_favourite: true,
+                    is_watched: true,
+                    thumbnail_path: None,
+                    tags: Vec::new(),
+                })
+            } else {
+                None
+            },
+            relink_candidates: if std::env::var("MUVRIX_OPEN_INTEGRITY_LOCATOR").is_ok() {
+                vec![
+                    muvrix_core::database::RelinkCandidate {
+                        path: std::path::PathBuf::from(
+                            "/mnt/storage/archive/Interstellar (2014) Remaster.mp4",
+                        ),
+                        file_name: "Interstellar (2014) Remaster.mp4".to_string(),
+                        file_size: 12_450_892_100,
+                        confidence: 0.96,
+                        match_reasons: vec![
+                            "Exact file size match (12.45 GB)".to_string(),
+                            "Filename contains title 'Interstellar'".to_string(),
+                            "Matching video container .mp4".to_string(),
+                        ],
+                    },
+                    muvrix_core::database::RelinkCandidate {
+                        path: std::path::PathBuf::from("/mnt/backup/movies/Interstellar.mp4"),
+                        file_name: "Interstellar.mp4".to_string(),
+                        file_size: 12_450_892_100,
+                        confidence: 0.99,
+                        match_reasons: vec![
+                            "Exact filename match".to_string(),
+                            "Exact file size match (12.45 GB)".to_string(),
+                        ],
+                    },
+                ]
+            } else {
+                Vec::new()
+            },
+            relink_search_dir_input: "/mnt/storage/archive".to_string(),
+            cleanup_preview: if std::env::var("MUVRIX_OPEN_CATALOG_CLEANUP").is_ok() {
+                Some(muvrix_core::database::CleanupPreview {
+                    confirmed_missing_ids: vec![101, 104, 112],
+                    duplicate_ids: vec![205, 206],
+                    suspected_duplicates: Vec::new(),
+                    orphaned_metadata_ids: vec![301],
+                })
+            } else {
+                None
+            },
+            cleanup_confirm_open: false,
+            integrity_status_msg: None,
         };
 
         app.refresh_library();
@@ -960,6 +1254,70 @@ impl MuvrixApp {
                 _ => {}
             }
             app.refresh_library();
+        }
+        if std::env::var("MUVRIX_SEED_SMART_COLLECTIONS").is_ok() {
+            let sc1 = muvrix_core::database::SmartCollection {
+                id: 0,
+                name: "4K Sci-Fi".to_string(),
+                description: "4K resolution sci-fi films".to_string(),
+                icon: Some("🚀".to_string()),
+                rules: muvrix_core::database::RuleDefinition {
+                    mode: muvrix_core::database::RuleCombinationMode::And,
+                    rules: vec![muvrix_core::database::SmartRule::Text {
+                        field: muvrix_core::database::RuleField::Genre,
+                        operator: muvrix_core::database::TextOperator::Contains,
+                        value: "Sci-Fi".to_string(),
+                    }],
+                },
+                combination_mode: muvrix_core::database::RuleCombinationMode::And,
+                sort_field: Some("title".to_string()),
+                sort_direction: Some("asc".to_string()),
+                display_order: 1,
+                created_at: 1000,
+                updated_at: 1000,
+            };
+            let sc2 = muvrix_core::database::SmartCollection {
+                id: 0,
+                name: "Lossless Audio".to_string(),
+                description: "FLAC audio tracks".to_string(),
+                icon: Some("🎵".to_string()),
+                rules: muvrix_core::database::RuleDefinition {
+                    mode: muvrix_core::database::RuleCombinationMode::And,
+                    rules: vec![muvrix_core::database::SmartRule::Text {
+                        field: muvrix_core::database::RuleField::Format,
+                        operator: muvrix_core::database::TextOperator::Equals,
+                        value: "flac".to_string(),
+                    }],
+                },
+                combination_mode: muvrix_core::database::RuleCombinationMode::And,
+                sort_field: Some("title".to_string()),
+                sort_direction: Some("asc".to_string()),
+                display_order: 2,
+                created_at: 1000,
+                updated_at: 1000,
+            };
+            let _ = app.db.create_smart_collection(&sc1);
+            let _ = app.db.create_smart_collection(&sc2);
+            app.refresh_library();
+        }
+        if std::env::var("MUVRIX_SELECT_MULTI_BATCH").is_ok()
+            || std::env::var("MUVRIX_OPEN_BATCH_EDITOR").is_ok()
+        {
+            app.library_multi_select = true;
+            let ids: Vec<i64> = app
+                .library_items
+                .iter()
+                .map(|item| item.item.id)
+                .take(3)
+                .collect();
+            app.library_selection.select_all(ids);
+            if std::env::var("MUVRIX_OPEN_BATCH_EDITOR").is_ok() {
+                app.open_batch_metadata_editor();
+                if let Ok(val) = std::env::var("MUVRIX_BATCH_SET_GENRE") {
+                    app.batch_edit_genre_action = 1;
+                    app.batch_genre_input = val;
+                }
+            }
         }
         if let Ok(q) = std::env::var("MUVRIX_GLOBAL_SEARCH") {
             app.settings_search = q.clone();

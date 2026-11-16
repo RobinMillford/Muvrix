@@ -3,7 +3,7 @@
 use rusqlite::{Connection, Result, Transaction};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const LATEST_SCHEMA_VERSION: u32 = 7;
+pub const LATEST_SCHEMA_VERSION: u32 = 8;
 
 /// Apply all pending database migrations within a transaction.
 pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
@@ -71,6 +71,13 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
         let tx = conn.transaction()?;
         migration_007_active_queue(&tx)?;
         record_migration(&tx, 7, "Persistent active playback queue table")?;
+        tx.commit()?;
+    }
+
+    if current_version < 8 {
+        let tx = conn.transaction()?;
+        migration_008_smart_collections(&tx)?;
+        record_migration(&tx, 8, "Smart collections engine and metadata expansion")?;
         tx.commit()?;
     }
 
@@ -438,5 +445,29 @@ fn migration_007_active_queue(tx: &Transaction) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_active_queue_pos ON active_playback_queue(position ASC);
         ",
     )?;
+    Ok(())
+}
+
+fn migration_008_smart_collections(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS smart_collections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT NOT NULL DEFAULT '',
+            icon TEXT,
+            rule_definition TEXT NOT NULL,
+            combination_mode TEXT NOT NULL DEFAULT 'AND',
+            sort_field TEXT,
+            sort_direction TEXT,
+            display_order INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_smart_collections_order ON smart_collections(display_order ASC, name ASC);
+        ",
+    )?;
+
     Ok(())
 }

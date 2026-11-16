@@ -91,6 +91,13 @@ fn main() -> eframe::Result<()> {
         .with_title("Muvrix Media Player (Glow Prototype)")
         .with_inner_size([width, height])
         .with_min_inner_size([640.0, 360.0]);
+    if std::env::var("MUVRIX_WINDOW_DECORATIONS")
+        .map(|v| v == "0" || v == "false")
+        .unwrap_or(false)
+        || std::env::var("MUVRIX_WINDOW_BORDERLESS").is_ok()
+    {
+        viewport = viewport.with_decorations(false);
+    }
     if let Some(icon) = muvrix_ui::branding::egui_icon_data() {
         viewport = viewport.with_icon(icon);
     }

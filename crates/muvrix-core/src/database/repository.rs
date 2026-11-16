@@ -1,6 +1,9 @@
 //! Repository implementation for database entities and complex library queries.
 
+use super::batch_editor::*;
+use super::integrity::*;
 use super::models::*;
+use super::smart_collections::*;
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1433,5 +1436,371 @@ impl Repository {
     pub fn clear_active_queue(conn: &Connection) -> Result<()> {
         conn.execute("DELETE FROM active_playback_queue", [])?;
         Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // Smart Collections (Phase E3.1)
+    // -------------------------------------------------------------------------
+
+    pub fn create_smart_collection(conn: &Connection, sc: &SmartCollection) -> Result<i64> {
+        let rules_json = serde_json::to_string(&sc.rules)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+        let now = current_timestamp() as i64;
+
+        conn.execute(
+            "INSERT INTO smart_collections (name, description, icon, rule_definition, combination_mode, sort_field, sort_direction, display_order, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                sc.name,
+                sc.description,
+                sc.icon,
+                rules_json,
+                sc.combination_mode.as_str(),
+                sc.sort_field,
+                sc.sort_direction,
+                sc.display_order,
+                now,
+                now,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_smart_collection_by_id(
+        conn: &Connection,
+        id: i64,
+    ) -> Result<Option<SmartCollection>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, icon, rule_definition, combination_mode, sort_field, sort_direction, display_order, created_at, updated_at
+             FROM smart_collections WHERE id = ?1",
+        )?;
+        stmt.query_row(params![id], |row| {
+            let rules_raw: String = row.get(4)?;
+            let rules: RuleDefinition = serde_json::from_str(&rules_raw).unwrap_or_default();
+            let mode_str: String = row.get(5)?;
+            Ok(SmartCollection {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                icon: row.get(3)?,
+                rules,
+                combination_mode: RuleCombinationMode::parse(&mode_str),
+                sort_field: row.get(6)?,
+                sort_direction: row.get(7)?,
+                display_order: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })
+        .optional()
+    }
+
+    pub fn get_smart_collection_by_name(
+        conn: &Connection,
+        name: &str,
+    ) -> Result<Option<SmartCollection>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, icon, rule_definition, combination_mode, sort_field, sort_direction, display_order, created_at, updated_at
+             FROM smart_collections WHERE name = ?1",
+        )?;
+        stmt.query_row(params![name], |row| {
+            let rules_raw: String = row.get(4)?;
+            let rules: RuleDefinition = serde_json::from_str(&rules_raw).unwrap_or_default();
+            let mode_str: String = row.get(5)?;
+            Ok(SmartCollection {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                icon: row.get(3)?,
+                rules,
+                combination_mode: RuleCombinationMode::parse(&mode_str),
+                sort_field: row.get(6)?,
+                sort_direction: row.get(7)?,
+                display_order: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })
+        .optional()
+    }
+
+    pub fn update_smart_collection(conn: &Connection, sc: &SmartCollection) -> Result<()> {
+        let rules_json = serde_json::to_string(&sc.rules)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+        let now = current_timestamp() as i64;
+
+        conn.execute(
+            "UPDATE smart_collections SET
+                name = ?1,
+                description = ?2,
+                icon = ?3,
+                rule_definition = ?4,
+                combination_mode = ?5,
+                sort_field = ?6,
+                sort_direction = ?7,
+                display_order = ?8,
+                updated_at = ?9
+             WHERE id = ?10",
+            params![
+                sc.name,
+                sc.description,
+                sc.icon,
+                rules_json,
+                sc.combination_mode.as_str(),
+                sc.sort_field,
+                sc.sort_direction,
+                sc.display_order,
+                now,
+                sc.id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_smart_collection(conn: &Connection, id: i64) -> Result<()> {
+        conn.execute("DELETE FROM smart_collections WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn list_smart_collections(conn: &Connection) -> Result<Vec<SmartCollection>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, icon, rule_definition, combination_mode, sort_field, sort_direction, display_order, created_at, updated_at
+             FROM smart_collections ORDER BY display_order ASC, name ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let rules_raw: String = row.get(4)?;
+            let rules: RuleDefinition = serde_json::from_str(&rules_raw).unwrap_or_default();
+            let mode_str: String = row.get(5)?;
+            Ok(SmartCollection {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                icon: row.get(3)?,
+                rules,
+                combination_mode: RuleCombinationMode::parse(&mode_str),
+                sort_field: row.get(6)?,
+                sort_direction: row.get(7)?,
+                display_order: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    pub fn count_smart_collection_items(conn: &Connection, sc: &SmartCollection) -> Result<u64> {
+        let compiled = compile_smart_rules(&sc.rules)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+
+        let count_sql = format!(
+            "SELECT COUNT(DISTINCT mi.id)
+             FROM media_items mi
+             LEFT JOIN media_metadata mm ON mi.id = mm.media_id
+             LEFT JOIN media_watch_state ws ON mi.id = ws.media_id
+             LEFT JOIN favourites fav ON mi.id = fav.media_id
+             WHERE {}",
+            compiled.where_clause
+        );
+
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            compiled.params.iter().map(|p| p.as_ref()).collect();
+
+        let count: i64 =
+            conn.query_row(&count_sql, rusqlite::params_from_iter(param_refs), |row| {
+                row.get(0)
+            })?;
+        Ok(count as u64)
+    }
+
+    pub fn query_smart_collection_items(
+        conn: &Connection,
+        sc: &SmartCollection,
+        pagination: Pagination,
+    ) -> Result<(Vec<LibraryItemView>, u64)> {
+        let compiled = compile_smart_rules(&sc.rules)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+
+        let count_sql = format!(
+            "SELECT COUNT(DISTINCT mi.id)
+             FROM media_items mi
+             LEFT JOIN media_metadata mm ON mi.id = mm.media_id
+             LEFT JOIN media_watch_state ws ON mi.id = ws.media_id
+             LEFT JOIN favourites fav ON mi.id = fav.media_id
+             WHERE {}",
+            compiled.where_clause
+        );
+
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            compiled.params.iter().map(|p| p.as_ref()).collect();
+
+        let total_count: u64 = conn.query_row(
+            &count_sql,
+            rusqlite::params_from_iter(param_refs.iter().copied()),
+            |row| {
+                let count: i64 = row.get(0)?;
+                Ok(count as u64)
+            },
+        )?;
+
+        let sort_column = sc
+            .sort_field
+            .as_deref()
+            .unwrap_or("COALESCE(mm.title, mi.file_name)");
+        let sort_dir = sc.sort_direction.as_deref().unwrap_or("ASC");
+
+        let select_sql = format!(
+            "SELECT
+                mi.id, mi.root_id, mi.relative_path, mi.canonical_path, mi.file_name, mi.file_extension, mi.media_type, mi.file_size, mi.modified_time, mi.added_time, mi.last_scanned_at, mi.availability_state, mi.metadata_status,
+                mm.title, mm.original_title, mm.description, mm.genre, mm.release_year, mm.duration_ms, mm.overall_bitrate, mm.container, mm.video_codec, mm.audio_codec, mm.width, mm.height, mm.fps, mm.hdr_type, mm.audio_channels, mm.sample_rate, mm.bit_depth, mm.artist, mm.album, mm.album_artist, mm.track_number, mm.disc_number,
+                ac.file_path,
+                CASE WHEN fav.media_id IS NOT NULL THEN 1 ELSE 0 END as is_fav,
+                COALESCE(ws.is_watched, 0)
+             FROM media_items mi
+             LEFT JOIN media_metadata mm ON mi.id = mm.media_id
+             LEFT JOIN artwork_cache ac ON mi.id = ac.media_id
+             LEFT JOIN media_watch_state ws ON mi.id = ws.media_id
+             LEFT JOIN favourites fav ON mi.id = fav.media_id
+             WHERE {}
+             GROUP BY mi.id
+             ORDER BY {} {}
+             LIMIT ? OFFSET ?",
+            compiled.where_clause, sort_column, sort_dir
+        );
+
+        let mut final_params = compiled.params;
+        final_params.push(Box::new(pagination.limit as i64));
+        final_params.push(Box::new(pagination.offset as i64));
+        let final_refs: Vec<&dyn rusqlite::ToSql> =
+            final_params.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = conn.prepare(&select_sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(final_refs), |row| {
+            let media_type_str: String = row.get(6)?;
+            let avail_str: String = row.get(11)?;
+            let meta_status_str: String = row.get(12)?;
+
+            let item = MediaItem {
+                id: row.get(0)?,
+                root_id: row.get(1)?,
+                relative_path: row.get(2)?,
+                canonical_path: row.get(3)?,
+                file_name: row.get(4)?,
+                file_extension: row.get(5)?,
+                media_type: MediaType::parse(&media_type_str),
+                file_size: row.get::<_, i64>(7)? as u64,
+                modified_time: row.get::<_, i64>(8)? as u64,
+                added_time: row.get::<_, i64>(9)? as u64,
+                last_scanned_at: row.get::<_, i64>(10)? as u64,
+                availability_state: AvailabilityState::parse(&avail_str),
+                metadata_status: MetadataStatus::parse(&meta_status_str),
+            };
+
+            let title: Option<String> = row.get(13)?;
+            let metadata = if title.is_some() || row.get::<_, Option<i64>>(18)?.is_some() {
+                Some(MediaMetadata {
+                    media_id: item.id,
+                    title,
+                    original_title: row.get(14)?,
+                    description: row.get(15)?,
+                    genre: row.get(16)?,
+                    release_year: row.get(17)?,
+                    duration_ms: row.get::<_, Option<i64>>(18)?.unwrap_or(0) as u64,
+                    overall_bitrate: row.get::<_, Option<i64>>(19)?.unwrap_or(0) as u64,
+                    container: row.get(20)?,
+                    video_codec: row.get(21)?,
+                    audio_codec: row.get(22)?,
+                    width: row.get::<_, Option<i64>>(23)?.unwrap_or(0) as u32,
+                    height: row.get::<_, Option<i64>>(24)?.unwrap_or(0) as u32,
+                    fps: row.get::<_, Option<f64>>(25)?.unwrap_or(0.0),
+                    hdr_type: row.get(26)?,
+                    audio_channels: row.get::<_, Option<i64>>(27)?.unwrap_or(0) as u32,
+                    sample_rate: row.get::<_, Option<i64>>(28)?.unwrap_or(0) as u32,
+                    bit_depth: row.get::<_, Option<i64>>(29)?.unwrap_or(0) as u32,
+                    artist: row.get(30)?,
+                    album: row.get(31)?,
+                    album_artist: row.get(32)?,
+                    track_number: row.get(33)?,
+                    disc_number: row.get(34)?,
+                })
+            } else {
+                None
+            };
+
+            let thumbnail_path: Option<String> = row.get(35)?;
+            let is_favourite: bool = row.get::<_, i32>(36)? != 0;
+            let is_watched: bool = row.get::<_, i32>(37)? != 0;
+
+            Ok(LibraryItemView {
+                item,
+                metadata,
+                thumbnail_path,
+                is_favourite,
+                is_watched,
+                tags: Vec::new(),
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for r in rows {
+            items.push(r?);
+        }
+        Ok((items, total_count))
+    }
+
+    // -------------------------------------------------------------------------
+    // Batch Metadata Updates (Phase E3.2)
+    // -------------------------------------------------------------------------
+
+    pub fn batch_update_metadata(
+        conn: &mut Connection,
+        media_ids: &[i64],
+        request: &BatchMetadataRequest,
+    ) -> Result<BatchUpdateResult> {
+        let tx = conn.transaction()?;
+        let res = execute_batch_metadata_update(&tx, media_ids, request)?;
+        tx.commit()?;
+        Ok(res)
+    }
+
+    // -------------------------------------------------------------------------
+    // Missing Media Integrity, Relinking & Cleanup (Phase E3.3)
+    // -------------------------------------------------------------------------
+
+    pub fn scan_library_integrity(
+        conn: &Connection,
+        cancel_flag: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<IntegrityScanProgress> {
+        super::integrity::scan_library_integrity(conn, cancel_flag)
+    }
+
+    pub fn relink_media_item(
+        conn: &Connection,
+        media_id: i64,
+        replacement_path: &std::path::Path,
+    ) -> std::result::Result<MediaItem, String> {
+        super::integrity::relink_media_item(conn, media_id, replacement_path)
+    }
+
+    pub fn generate_cleanup_preview(conn: &Connection) -> Result<CleanupPreview> {
+        super::integrity::generate_cleanup_preview(conn)
+    }
+
+    pub fn get_unavailable_media_items(conn: &Connection) -> Result<Vec<LibraryItemView>> {
+        super::integrity::query_missing_media_items(conn)
+    }
+
+    pub fn execute_catalog_cleanup(
+        conn: &mut Connection,
+        preview: &CleanupPreview,
+    ) -> Result<usize> {
+        let tx = conn.transaction()?;
+        let removed = super::integrity::execute_catalog_cleanup(&tx, preview)?;
+        tx.commit()?;
+        Ok(removed)
     }
 }

@@ -14,6 +14,26 @@ impl MuvrixApp {
             offset: self.library_page * 24,
             limit: 24,
         };
+
+        if let Ok(scs) = self.db.list_smart_collections() {
+            self.smart_collections = scs;
+        }
+
+        if let Some(sc_id) = self.selected_smart_collection {
+            if let Some(sc) = self
+                .smart_collections
+                .iter()
+                .find(|s| s.id == sc_id)
+                .cloned()
+            {
+                if let Ok((items, total)) = self.db.query_smart_collection_items(&sc, pagination) {
+                    self.library_items = items;
+                    self.library_total_count = total;
+                    return;
+                }
+            }
+        }
+
         if let Ok((items, total)) = self.db.query_library(
             &self.library_filter,
             self.library_sort_field,

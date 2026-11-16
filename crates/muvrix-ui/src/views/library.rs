@@ -90,6 +90,10 @@ impl MuvrixApp {
                     self.refresh_library();
                 }
                 ui.separator();
+                if ui.button("✏️ Batch Edit Metadata").clicked() && !ids.is_empty() {
+                    self.open_batch_metadata_editor();
+                }
+                ui.separator();
                 if self.library_batch_confirm_delete {
                     ui.label(
                         RichText::new(format!("Remove {} selected item(s)?", ids.len()))
@@ -209,6 +213,21 @@ impl MuvrixApp {
             }
         }
 
+        // 2c. Phase E3: Smart Collections Rule Builder Dialog
+        if self.smart_collection_dialog_open {
+            self.render_smart_collection_dialog(ctx);
+        }
+
+        // 2d. Phase E3: Batch Metadata Editor Dialog
+        if self.batch_metadata_dialog_open {
+            self.render_batch_metadata_dialog(ctx);
+        }
+
+        // 2e. Phase E3: Integrity Scanner & Catalog Cleanup Dialog
+        if self.integrity_dialog_open {
+            self.render_integrity_dialog(ctx);
+        }
+
         // 3. Central Library Workspace Panel
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(4.0);
@@ -259,6 +278,14 @@ impl MuvrixApp {
                             self.library_is_grid = false;
                         }
                     });
+
+                    // Integrity & Cleanup Button
+                    if ui
+                        .button(RichText::new("🔍 Integrity & Cleanup").size(12.0))
+                        .clicked()
+                    {
+                        self.open_integrity_dialog();
+                    }
 
                     // Manage Roots Button
                     if ui.button(RichText::new("Manage Roots").size(12.0)).clicked() {
@@ -421,6 +448,65 @@ impl MuvrixApp {
                     ui.label("Sort by:");
                 });
             });
+
+            ui.add_space(3.0);
+
+            // Smart Collections Navigation Row
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new("✨ Collections:")
+                        .strong()
+                        .size(12.0)
+                        .color(Color32::from_rgb(125, 211, 252)),
+                );
+
+                let is_all_sc = self.selected_smart_collection.is_none();
+                if ui.selectable_label(is_all_sc, "All Media").clicked() {
+                    self.selected_smart_collection = None;
+                    filter_changed = true;
+                }
+
+                let mut delete_sc_id = None;
+                let mut edit_sc = None;
+
+                for sc in &self.smart_collections {
+                    let is_active = self.selected_smart_collection == Some(sc.id);
+                    let label = format!("{} {}", sc.icon.as_deref().unwrap_or("✨"), sc.name);
+                    if ui.selectable_label(is_active, label).clicked() {
+                        if is_active {
+                            self.selected_smart_collection = None;
+                        } else {
+                            self.selected_smart_collection = Some(sc.id);
+                        }
+                        filter_changed = true;
+                    }
+                    if is_active {
+                        if ui.small_button("✏").on_hover_text("Edit Collection Rules").clicked() {
+                            edit_sc = Some(sc.clone());
+                        }
+                        if ui.small_button("🗑").on_hover_text("Delete Collection").clicked() {
+                            delete_sc_id = Some(sc.id);
+                        }
+                    }
+                }
+
+                if ui.button("➕ New").on_hover_text("Create a new dynamic smart collection").clicked() {
+                    self.open_new_smart_collection_dialog();
+                }
+
+                if let Some(sc) = edit_sc {
+                    self.open_edit_smart_collection_dialog(&sc);
+                }
+                if let Some(id) = delete_sc_id {
+                    let _ = self.db.delete_smart_collection(id);
+                    if self.selected_smart_collection == Some(id) {
+                        self.selected_smart_collection = None;
+                    }
+                    filter_changed = true;
+                }
+            });
+
+            ui.add_space(2.0);
 
             if filter_changed {
                 self.library_page = 0;

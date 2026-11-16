@@ -18,7 +18,11 @@ pub mod thumbnails;
 pub use backup::{BackupError, BackupSettings, CURRENT_BACKUP_SCHEMA};
 pub use browser::{EntryKind, MediaBrowser, MediaBrowserEntry, MediaFilter, SortBy};
 pub use database::{
-    models::*, DatabaseError, DatabaseManager, DbResult, Repository, LATEST_SCHEMA_VERSION,
+    models::*, BatchMetadataRequest, BatchUpdateResult, CleanupPreview, DatabaseError,
+    DatabaseManager, DbResult, DuplicateCandidate, FieldAction, FieldMixedState,
+    IntegrityScanProgress, MediaReachability, RelinkCandidate, Repository, RuleCombinationMode,
+    RuleDefinition, RuleField, SelectedMetadataSummary, SmartCollection, SmartRule,
+    LATEST_SCHEMA_VERSION,
 };
 pub use error::{MuvrixError, Result};
 pub use history::{

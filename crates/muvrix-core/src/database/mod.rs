@@ -1,12 +1,18 @@
 //! SQLite Embedded Media Library database manager and access layer.
 
+pub mod batch_editor;
+pub mod integrity;
 pub mod migrations;
 pub mod models;
 pub mod repository;
+pub mod smart_collections;
 
+pub use batch_editor::*;
+pub use integrity::*;
 pub use migrations::LATEST_SCHEMA_VERSION;
 pub use models::*;
 pub use repository::Repository;
+pub use smart_collections::*;
 
 use rusqlite::{Connection, Transaction};
 use std::path::Path;
@@ -508,5 +514,99 @@ impl DatabaseManager {
     pub fn clear_active_queue(&self) -> DbResult<()> {
         let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
         Repository::clear_active_queue(&conn).map_err(DatabaseError::Sqlite)
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase E3: Library Intelligence, Smart Collections, Batch & Integrity
+    // -------------------------------------------------------------------------
+
+    pub fn create_smart_collection(&self, sc: &SmartCollection) -> DbResult<i64> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::create_smart_collection(&conn, sc).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn get_smart_collection_by_id(&self, id: i64) -> DbResult<Option<SmartCollection>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::get_smart_collection_by_id(&conn, id).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn get_smart_collection_by_name(&self, name: &str) -> DbResult<Option<SmartCollection>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::get_smart_collection_by_name(&conn, name).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn update_smart_collection(&self, sc: &SmartCollection) -> DbResult<()> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::update_smart_collection(&conn, sc).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn delete_smart_collection(&self, id: i64) -> DbResult<()> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::delete_smart_collection(&conn, id).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn list_smart_collections(&self) -> DbResult<Vec<SmartCollection>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::list_smart_collections(&conn).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn count_smart_collection_items(&self, sc: &SmartCollection) -> DbResult<u64> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::count_smart_collection_items(&conn, sc).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn query_smart_collection_items(
+        &self,
+        sc: &SmartCollection,
+        pagination: Pagination,
+    ) -> DbResult<(Vec<LibraryItemView>, u64)> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::query_smart_collection_items(&conn, sc, pagination)
+            .map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn batch_update_metadata(
+        &self,
+        media_ids: &[i64],
+        request: &BatchMetadataRequest,
+    ) -> DbResult<BatchUpdateResult> {
+        let mut conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::batch_update_metadata(&mut conn, media_ids, request)
+            .map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn scan_library_integrity(
+        &self,
+        cancel_flag: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> DbResult<IntegrityScanProgress> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::scan_library_integrity(&conn, cancel_flag).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn relink_media_item(
+        &self,
+        media_id: i64,
+        replacement_path: &std::path::Path,
+    ) -> std::result::Result<MediaItem, String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| "Database lock poisoned".to_string())?;
+        Repository::relink_media_item(&conn, media_id, replacement_path)
+    }
+
+    pub fn generate_cleanup_preview(&self) -> DbResult<CleanupPreview> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::generate_cleanup_preview(&conn).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn get_unavailable_media_items(&self) -> DbResult<Vec<LibraryItemView>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::get_unavailable_media_items(&conn).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn execute_catalog_cleanup(&self, preview: &CleanupPreview) -> DbResult<usize> {
+        let mut conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::execute_catalog_cleanup(&mut conn, preview).map_err(DatabaseError::Sqlite)
     }
 }
