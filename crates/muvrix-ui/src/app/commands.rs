@@ -500,11 +500,12 @@ impl MuvrixApp {
             self.output.native_hdr_available,
             self.output.physical_verified
         );
-        let _ = ShaderManager::apply_anime4k_mode(
+        let _ = ShaderManager::apply_shader_pipeline(
             self.controller.handle(),
             self.anime4k_preset,
             self.anime4k_quality,
             None,
+            &self.video_settings.custom_shaders,
         );
         self.save_media_settings();
     }

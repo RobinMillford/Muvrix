@@ -50,8 +50,9 @@ pub use settings::{
     AccentColor, AudioChannelsSetting, PersistedMediaSettings, ThemeMode, CURRENT_SETTINGS_VERSION,
 };
 pub use shader::{
-    Anime4KPreset, GamutMappingMode, ShaderManager, ShaderProfile, ShaderQuality, TargetPrimaries,
-    TargetTrc, ToneMappingAlgorithm, VideoAdjustmentSettings,
+    evaluate_tone_mapping_curve, Anime4KPreset, CustomShaderEntry, DebandPreset, GamutMappingMode,
+    ShaderManager, ShaderProfile, ShaderQuality, TargetPrimaries, TargetTrc, ToneMappingAlgorithm,
+    VideoAdjustmentSettings,
 };
 pub use stream::{
     HttpRangeStream, IoSeekableStream, MemoryStream, MpvStreamBridge, ReadAheadStream,

@@ -45,6 +45,7 @@ fn test_full_restart_persistence_lifecycle() {
         hdr_compute_peak: true,
         tone_mapping_max_boost: 2.0,
         active_shaders: vec!["Anime4K_Restore_CNN_L.glsl".to_string()],
+        ..Default::default()
     };
 
     let mut eq = EqualizerSettings {
@@ -225,6 +226,7 @@ fn test_real_application_settings_persistence_and_libmpv_restoration_lifecycle()
         hdr_compute_peak: true,
         tone_mapping_max_boost: 2.0,
         active_shaders: vec![],
+        ..Default::default()
     };
 
     let mut eq = EqualizerSettings {

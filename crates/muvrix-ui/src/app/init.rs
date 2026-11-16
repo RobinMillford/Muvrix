@@ -433,6 +433,9 @@ impl MuvrixApp {
                 persisted.anime4k_preset
             },
             anime4k_quality: persisted.anime4k_quality,
+            custom_shader_path_input: String::new(),
+            custom_shader_error: None,
+            tone_mapping_hover_nits: None,
             equalizer_settings: {
                 let mut eq = if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("equalizer")
                     || std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("audio")

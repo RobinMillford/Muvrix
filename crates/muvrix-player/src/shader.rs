@@ -249,6 +249,89 @@ impl GamutMappingMode {
     }
 }
 
+/// Custom user shader entry in a user-managed GLSL shader chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomShaderEntry {
+    pub name: String,
+    pub path: String,
+    pub enabled: bool,
+}
+
+impl CustomShaderEntry {
+    pub fn new(path: String) -> Self {
+        let name = Path::new(&path)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or(&path)
+            .to_string();
+        Self {
+            name,
+            path,
+            enabled: true,
+        }
+    }
+}
+
+/// Curated deband filter presets for banding removal and gradient smoothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DebandPreset {
+    #[default]
+    Default,
+    Medium,
+    Aggressive,
+    Anime,
+}
+
+impl DebandPreset {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Medium => "Medium",
+            Self::Aggressive => "Aggressive",
+            Self::Anime => "Anime / Clean",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Default => "Default (1 pass, thresh 64, range 16, grain 48)",
+            Self::Medium => "Medium (2 passes, thresh 96, range 20, grain 64)",
+            Self::Aggressive => "Aggressive (4 passes, thresh 144, range 24, grain 96)",
+            Self::Anime => "Anime / Clean (3 passes, thresh 120, low grain 32)",
+        }
+    }
+
+    pub fn apply_to(&self, settings: &mut VideoAdjustmentSettings) {
+        settings.deband = true;
+        match self {
+            Self::Default => {
+                settings.deband_iterations = 1;
+                settings.deband_threshold = 64;
+                settings.deband_range = 16;
+                settings.deband_grain = 48;
+            }
+            Self::Medium => {
+                settings.deband_iterations = 2;
+                settings.deband_threshold = 96;
+                settings.deband_range = 20;
+                settings.deband_grain = 64;
+            }
+            Self::Aggressive => {
+                settings.deband_iterations = 4;
+                settings.deband_threshold = 144;
+                settings.deband_range = 24;
+                settings.deband_grain = 96;
+            }
+            Self::Anime => {
+                settings.deband_iterations = 3;
+                settings.deband_threshold = 120;
+                settings.deband_range = 24;
+                settings.deband_grain = 32;
+            }
+        }
+    }
+}
+
 /// Picture adjustment settings matching native mpv fragment shader and libplacebo properties.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VideoAdjustmentSettings {
@@ -259,7 +342,23 @@ pub struct VideoAdjustmentSettings {
     pub gamma: i32,      // -100..100, default 0
     pub hue: i32,        // -100..100, default 0
     pub sharpen: f64,    // -5.0..5.0, default 0.0
-    pub deband: bool,    // default false
+
+    // Deband filter parameters
+    pub deband: bool, // default false
+    #[serde(default = "default_deband_iterations")]
+    pub deband_iterations: i32, // 1..16, default 1
+    #[serde(default = "default_deband_threshold")]
+    pub deband_threshold: i32, // 0..4096, default 64
+    #[serde(default = "default_deband_range")]
+    pub deband_range: i32, // 1..64, default 16
+    #[serde(default = "default_deband_grain")]
+    pub deband_grain: i32, // 0..4096, default 48
+
+    // Denoise (hqdn3d) filter parameters
+    #[serde(default)]
+    pub denoise: bool, // default false
+    #[serde(default = "default_denoise_strength")]
+    pub denoise_strength: f64, // 0.1..10.0, default 3.0
 
     // Video geometry and framing
     pub aspect_ratio: String, // "auto" (-1), "16:9", "4:3", "2.35:1", "1:1"
@@ -275,8 +374,28 @@ pub struct VideoAdjustmentSettings {
     pub gamut_mapping: GamutMappingMode,
     pub hdr_compute_peak: bool,
     pub tone_mapping_max_boost: f64,
+    #[serde(default)]
+    pub target_peak: u32, // 0 = Auto / Native display, 100..4000 nits
 
     pub active_shaders: Vec<String>,
+    #[serde(default)]
+    pub custom_shaders: Vec<CustomShaderEntry>,
+}
+
+fn default_deband_iterations() -> i32 {
+    1
+}
+fn default_deband_threshold() -> i32 {
+    64
+}
+fn default_deband_range() -> i32 {
+    16
+}
+fn default_deband_grain() -> i32 {
+    48
+}
+fn default_denoise_strength() -> f64 {
+    3.0
 }
 
 impl Default for VideoAdjustmentSettings {
@@ -289,6 +408,12 @@ impl Default for VideoAdjustmentSettings {
             hue: 0,
             sharpen: 0.0,
             deband: false,
+            deband_iterations: 1,
+            deband_threshold: 64,
+            deband_range: 16,
+            deband_grain: 48,
+            denoise: false,
+            denoise_strength: 3.0,
             aspect_ratio: "auto".to_string(),
             zoom: 0.0,
             pan_x: 0.0,
@@ -300,7 +425,9 @@ impl Default for VideoAdjustmentSettings {
             gamut_mapping: GamutMappingMode::Auto,
             hdr_compute_peak: true,
             tone_mapping_max_boost: 1.0,
+            target_peak: 0,
             active_shaders: Vec::new(),
+            custom_shaders: Vec::new(),
         }
     }
 }
@@ -339,6 +466,38 @@ impl ShaderManager {
         handle.set_property("hue", h)?;
         handle.set_property("sharpen", sh)?;
         handle.set_property("deband", settings.deband)?;
+
+        // Fine-grained deband tuning parameters
+        if settings.deband {
+            let _ = handle.set_property(
+                "deband-iterations",
+                settings.deband_iterations.clamp(1, 16) as i64,
+            );
+            let _ = handle.set_property(
+                "deband-threshold",
+                settings.deband_threshold.clamp(0, 4096) as i64,
+            );
+            let _ = handle.set_property("deband-range", settings.deband_range.clamp(1, 64) as i64);
+            let _ =
+                handle.set_property("deband-grain", settings.deband_grain.clamp(0, 4096) as i64);
+        }
+
+        // Denoise (hqdn3d) video filter
+        if settings.denoise {
+            let s = settings.denoise_strength.clamp(0.1, 10.0);
+            let _ = handle.set_property_string(
+                "vf",
+                &format!(
+                    "lavfi=[hqdn3d={:.1}:{:.1}:{:.1}:{:.1}]",
+                    s,
+                    s * 0.75,
+                    s * 1.25,
+                    s
+                ),
+            );
+        } else {
+            let _ = handle.set_property_string("vf", "");
+        }
 
         // Video geometry & aspect ratio
         let aspect_val = if settings.aspect_ratio.is_empty() || settings.aspect_ratio == "auto" {
@@ -379,6 +538,12 @@ impl ShaderManager {
             "tone-mapping-max-boost",
             settings.tone_mapping_max_boost.clamp(1.0, 10.0),
         );
+
+        if settings.target_peak > 0 {
+            let _ = handle.set_property_string("target-peak", &settings.target_peak.to_string());
+        } else {
+            let _ = handle.set_property_string("target-peak", "auto");
+        }
 
         Ok(())
     }
@@ -716,4 +881,129 @@ impl ShaderManager {
     ) -> Result<Vec<String>, MpvError> {
         Self::apply_anime4k_mode(handle, preset, ShaderQuality::Balanced, Some(base_dir))
     }
+
+    /// Applies the unified shader pipeline combining active Anime4K preset passes
+    /// with user-managed custom GLSL / .hook shaders in a single atomic change-list operation.
+    pub fn apply_shader_pipeline(
+        handle: &MpvHandle,
+        preset: Anime4KPreset,
+        quality: ShaderQuality,
+        base_dir: Option<&Path>,
+        custom_shaders: &[CustomShaderEntry],
+    ) -> Result<Vec<String>, MpvError> {
+        let mut combined_paths = Vec::new();
+
+        // 1. Gather Anime4K shaders if enabled
+        if preset != Anime4KPreset::Disabled {
+            let dir = match base_dir {
+                Some(d) => d.to_path_buf(),
+                None => Self::resolve_anime4k_shader_dir().ok_or(MpvError::Generic)?,
+            };
+            let names = Self::get_anime4k_shader_names_with_quality(preset, quality);
+            for name in &names {
+                let full_path = dir.join(name);
+                let path_str = full_path.to_str().ok_or(MpvError::InvalidParameter)?;
+                let canonical = Self::validate_shader_confined_to_dir(path_str, &dir)?;
+                combined_paths.push(canonical.to_string_lossy().to_string());
+            }
+        }
+
+        // 2. Gather active user custom shaders
+        for entry in custom_shaders {
+            if entry.enabled && !entry.path.trim().is_empty() {
+                let canonical = Self::validate_shader_path(&entry.path)?;
+                let path_str = canonical.to_string_lossy().to_string();
+                if !combined_paths.contains(&path_str) {
+                    combined_paths.push(path_str);
+                }
+            }
+        }
+
+        // 3. If no shaders are active, clear glsl-shaders
+        if combined_paths.is_empty() {
+            Self::clear_shaders(handle)?;
+            return Ok(vec![]);
+        }
+
+        // 4. Validate uniqueness and set via change-list
+        Self::validate_shader_chain_uniqueness(&combined_paths)?;
+        let str_refs: Vec<&str> = combined_paths.iter().map(|s| s.as_str()).collect();
+        Self::set_shaders_via_change_list(handle, &str_refs)?;
+
+        Ok(combined_paths)
+    }
+
+    /// Evaluates tone mapping curve mapping input HDR luminance (in nits, 0..10000)
+    /// to normalized output display luminance (0.0..1.0).
+    pub fn evaluate_tone_mapping_curve(
+        algorithm: ToneMappingAlgorithm,
+        in_nits: f64,
+        target_peak_nits: f64,
+        max_boost: f64,
+    ) -> f64 {
+        let peak = if target_peak_nits > 0.0 {
+            target_peak_nits
+        } else {
+            1000.0
+        };
+        let boost = max_boost.clamp(1.0, 10.0);
+        let x = (in_nits / peak).max(0.0) * boost;
+
+        match algorithm {
+            ToneMappingAlgorithm::Clip => x.min(1.0),
+            ToneMappingAlgorithm::Linear => (x / 10.0).min(1.0),
+            ToneMappingAlgorithm::Reinhard => x / (1.0 + x),
+            ToneMappingAlgorithm::Hable => {
+                fn hable_f(v: f64) -> f64 {
+                    let a = 0.15;
+                    let b = 0.50;
+                    let c = 0.10;
+                    let d = 0.20;
+                    let e = 0.02;
+                    let f = 0.30;
+                    ((v * (a * v + c * b) + d * e) / (v * (a * v + b) + d * f)) - (e / f)
+                }
+                let w = 11.2;
+                let white_scale = 1.0 / hable_f(w);
+                (hable_f(x) * white_scale).clamp(0.0, 1.0)
+            }
+            ToneMappingAlgorithm::Mobius => {
+                let j = 0.45;
+                if x <= j {
+                    x
+                } else {
+                    let a = -j * j;
+                    let b = 2.0 * j;
+                    (b * x + a) / (x + 1.0)
+                }
+                .clamp(0.0, 1.0)
+            }
+            ToneMappingAlgorithm::Bt2390 | ToneMappingAlgorithm::Bt2446a => {
+                let knee = 0.5;
+                if x <= knee {
+                    x
+                } else {
+                    let t = (x - knee) / (1.0 + x - knee);
+                    knee + (1.0 - knee) * (1.0 - (-3.0 * t).exp())
+                }
+                .clamp(0.0, 1.0)
+            }
+            ToneMappingAlgorithm::Spline | ToneMappingAlgorithm::Auto => {
+                let s = (x / (1.0 + x)).clamp(0.0, 1.0);
+                (s * s * (3.0 - 2.0 * s)).clamp(0.0, 1.0)
+            }
+            _ => (x / (1.0 + x)).clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// Evaluates tone mapping curve mapping input HDR luminance (in nits, 0..10000)
+/// to normalized output display luminance (0.0..1.0).
+pub fn evaluate_tone_mapping_curve(
+    algorithm: ToneMappingAlgorithm,
+    in_nits: f64,
+    target_peak_nits: f64,
+    max_boost: f64,
+) -> f64 {
+    ShaderManager::evaluate_tone_mapping_curve(algorithm, in_nits, target_peak_nits, max_boost)
 }

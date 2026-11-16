@@ -1048,9 +1048,45 @@ impl PlaybackController {
         crate::shader::ShaderManager::apply_anime4k_mode(&self.handle, preset, quality, None)
     }
 
+    /// Applies the unified shader pipeline combining Anime4K passes and custom user shaders.
+    pub fn apply_shader_pipeline(
+        &self,
+        preset: crate::shader::Anime4KPreset,
+        quality: crate::shader::ShaderQuality,
+        custom_shaders: &[crate::shader::CustomShaderEntry],
+    ) -> Result<Vec<String>, MpvError> {
+        crate::shader::ShaderManager::apply_shader_pipeline(
+            &self.handle,
+            preset,
+            quality,
+            None,
+            custom_shaders,
+        )
+    }
+
     /// Clears all active video shaders.
     pub fn clear_shaders(&self) -> Result<(), MpvError> {
         crate::shader::ShaderManager::clear_shaders(&self.handle)
+    }
+
+    /// Applies a curated deband preset.
+    pub fn set_deband_preset(
+        &self,
+        preset: crate::shader::DebandPreset,
+        settings: &mut crate::shader::VideoAdjustmentSettings,
+    ) -> Result<(), MpvError> {
+        preset.apply_to(settings);
+        self.apply_video_adjustments(settings)
+    }
+
+    /// Sets the target peak luminance in nits (0 = Auto / display native).
+    pub fn set_target_peak(
+        &self,
+        target_peak_nits: u32,
+        settings: &mut crate::shader::VideoAdjustmentSettings,
+    ) -> Result<(), MpvError> {
+        settings.target_peak = target_peak_nits;
+        self.apply_video_adjustments(settings)
     }
 
     /// Sets audio delay in seconds (-10.0..10.0s).

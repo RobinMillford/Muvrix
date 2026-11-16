@@ -836,3 +836,142 @@ fn default_adjustments_preserve_output_hdr_target() {
     assert_eq!(handle.get_property_string("target-trc").unwrap(), "auto");
     assert_eq!(handle.get_property_string("target-prim").unwrap(), "auto");
 }
+
+#[test]
+fn test_d4_video_adjustments_roundtrip_persistence() {
+    use muvrix_player::shader::{
+        CustomShaderEntry, GamutMappingMode, TargetPrimaries, TargetTrc, ToneMappingAlgorithm,
+    };
+
+    let original = VideoAdjustmentSettings {
+        brightness: 12,
+        contrast: 8,
+        saturation: 15,
+        gamma: 3,
+        hue: -5,
+        sharpen: 1.0,
+        deband: true,
+        deband_iterations: 3,
+        deband_threshold: 110,
+        deband_range: 22,
+        deband_grain: 36,
+        denoise: true,
+        denoise_strength: 3.5,
+        aspect_ratio: "16:9".to_string(),
+        zoom: 0.1,
+        pan_x: 0.02,
+        pan_y: -0.02,
+        rotate: 90,
+        tone_mapping: ToneMappingAlgorithm::Bt2446a,
+        target_trc: TargetTrc::Bt1886,
+        target_prim: TargetPrimaries::DciP3,
+        gamut_mapping: GamutMappingMode::Relative,
+        hdr_compute_peak: true,
+        tone_mapping_max_boost: 1.8,
+        target_peak: 800,
+        active_shaders: vec!["Anime4K_Restore_CNN_M.glsl".to_string()],
+        custom_shaders: vec![CustomShaderEntry {
+            name: "CAS.glsl".to_string(),
+            path: "/path/to/CAS.glsl".to_string(),
+            enabled: true,
+        }],
+    };
+
+    let serialized = serde_json::to_string_pretty(&original).expect("Serialize settings");
+    let deserialized: VideoAdjustmentSettings =
+        serde_json::from_str(&serialized).expect("Deserialize settings");
+
+    assert_eq!(original, deserialized);
+    assert_eq!(deserialized.deband_iterations, 3);
+    assert_eq!(deserialized.deband_threshold, 110);
+    assert_eq!(deserialized.target_peak, 800);
+    assert_eq!(deserialized.custom_shaders.len(), 1);
+    assert_eq!(deserialized.custom_shaders[0].name, "CAS.glsl");
+}
+
+#[test]
+fn test_d4_deband_iterations_range_grain_mpv_property_reflection() {
+    let handle = MpvHandle::new().expect("Create handle");
+    handle.set_option_string("vo", "null").unwrap();
+    handle.set_option_string("ao", "null").unwrap();
+    handle.initialize().unwrap();
+
+    let settings = VideoAdjustmentSettings {
+        deband: true,
+        deband_iterations: 4,
+        deband_threshold: 128,
+        deband_range: 32,
+        deband_grain: 64,
+        ..Default::default()
+    };
+
+    ShaderManager::apply_adjustments(&handle, &settings).expect("Apply deband adjustments");
+
+    assert!(handle.get_property::<bool>("deband").unwrap());
+    assert_eq!(handle.get_property::<i64>("deband-iterations").unwrap(), 4);
+    assert_eq!(handle.get_property::<i64>("deband-threshold").unwrap(), 128);
+    assert_eq!(handle.get_property::<i64>("deband-range").unwrap(), 32);
+    assert_eq!(handle.get_property::<i64>("deband-grain").unwrap(), 64);
+}
+
+#[test]
+fn test_d4_denoise_hqdn3d_vf_property_reflection() {
+    let handle = MpvHandle::new().expect("Create handle");
+    handle.set_option_string("vo", "null").unwrap();
+    handle.set_option_string("ao", "null").unwrap();
+    handle.initialize().unwrap();
+
+    let mut settings = VideoAdjustmentSettings {
+        denoise: true,
+        denoise_strength: 4.0,
+        ..Default::default()
+    };
+
+    let res = ShaderManager::apply_adjustments(&handle, &settings);
+    eprintln!("apply_adjustments result: {:?}", res);
+    let vf = handle.get_property_string("vf");
+    eprintln!("vf readback: {:?}", vf);
+    assert!(
+        vf.is_ok() && vf.as_ref().unwrap().contains("hqdn3d"),
+        "vf must contain hqdn3d filter string"
+    );
+
+    // Turning off denoise clears vf
+    settings.denoise = false;
+    ShaderManager::apply_adjustments(&handle, &settings).expect("Apply denoise off");
+    let vf_cleared = handle.get_property_string("vf").unwrap();
+    assert_eq!(vf_cleared, "");
+}
+
+#[test]
+fn test_d4_target_peak_auto_vs_explicit_nits() {
+    let handle = MpvHandle::new().expect("Create handle");
+    handle.set_option_string("vo", "null").unwrap();
+    handle.set_option_string("ao", "null").unwrap();
+    handle.initialize().unwrap();
+
+    let mut settings = VideoAdjustmentSettings {
+        target_peak: 1500,
+        ..Default::default()
+    };
+    ShaderManager::apply_adjustments(&handle, &settings).expect("Apply 1500 nits");
+    assert_eq!(handle.get_property_string("target-peak").unwrap(), "1500");
+
+    settings.target_peak = 0;
+    ShaderManager::apply_adjustments(&handle, &settings).expect("Apply auto nits");
+    assert_eq!(handle.get_property_string("target-peak").unwrap(), "auto");
+}
+
+#[test]
+fn test_d4_custom_shader_uniqueness_rejection() {
+    use muvrix_player::shader::CustomShaderEntry;
+
+    let entries = [
+        CustomShaderEntry::new("/path/to/cas.glsl".to_string()),
+        CustomShaderEntry::new("/path/to/cas.glsl".to_string()),
+    ];
+
+    let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+    let res = ShaderManager::validate_shader_chain_uniqueness(&paths);
+    assert!(res.is_err(), "Duplicate shader path must be rejected");
+}
