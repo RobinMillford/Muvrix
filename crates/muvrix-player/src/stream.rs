@@ -150,6 +150,7 @@ pub struct HttpRangeStream {
     total_size: Option<u64>,
     cancelled: AtomicBool,
     agent: ureq::Agent,
+    retry_policy: StreamRetryPolicy,
 }
 
 impl HttpRangeStream {
@@ -190,10 +191,16 @@ impl HttpRangeStream {
                 .timeout_connect(Duration::from_secs(5))
                 .timeout_read(Duration::from_secs(20))
                 .build(),
+            retry_policy: StreamRetryPolicy::default(),
         };
 
         stream.probe_size()?;
         Ok(stream)
+    }
+
+    /// Configures the retry policy for resilient range requests.
+    pub fn set_retry_policy(&mut self, policy: StreamRetryPolicy) {
+        self.retry_policy = policy;
     }
 
     /// Creates an `HttpRangeStream` parsed from a full HTTP/HTTPS URL.
@@ -335,31 +342,93 @@ impl SeekableStream for HttpRangeStream {
             return Ok(0);
         }
 
-        let response = self
-            .request()
-            .set("Range", &format!("bytes={start}-{end}"))
-            .call()
-            .map_err(Self::map_error)?;
-        let status = response.status();
-        if status != 206 && !(status == 200 && start == 0) {
-            return Err(std::io::Error::other(format!(
-                "HTTP Range request failed with status {status}"
-            )));
-        }
-        if let Some(total) = Self::parse_total(&response) {
-            self.total_size = Some(total);
-        }
-
-        let mut reader = response.into_reader();
         let max_to_read = (end - start + 1) as usize;
         let mut total_read = 0;
-        while total_read < max_to_read {
-            let n = reader.read(&mut buf[total_read..max_to_read])?;
-            if n == 0 {
+        let mut last_err = None;
+
+        for attempt in 0..=self.retry_policy.max_retries {
+            if self.cancelled.load(Ordering::Relaxed) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "Stream cancelled",
+                ));
+            }
+            if attempt > 0 {
+                let delay = self.retry_policy.delay_for_attempt(attempt);
+                std::thread::sleep(delay);
+            }
+
+            let cur_start = start + total_read as u64;
+            if cur_start > end {
                 break;
             }
-            total_read += n;
+
+            let response = match self
+                .request()
+                .set("Range", &format!("bytes={cur_start}-{end}"))
+                .call()
+            {
+                Ok(resp) => resp,
+                Err(err) => {
+                    let io_err = Self::map_error(err);
+                    if classify_io_error(&io_err) == StreamErrorKind::Transient
+                        && attempt < self.retry_policy.max_retries
+                    {
+                        last_err = Some(io_err);
+                        continue;
+                    }
+                    return Err(io_err);
+                }
+            };
+
+            let status = response.status();
+            if status != 206 && !(status == 200 && cur_start == 0) {
+                let err = std::io::Error::other(format!(
+                    "HTTP Range request failed with status {status}"
+                ));
+                if (status == 429 || status >= 500) && attempt < self.retry_policy.max_retries {
+                    last_err = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+            if let Some(total) = Self::parse_total(&response) {
+                self.total_size = Some(total);
+            }
+
+            let mut reader = response.into_reader();
+            let mut read_in_attempt = 0;
+            let needed = max_to_read - total_read;
+            let mut chunk_err = None;
+            while read_in_attempt < needed {
+                match reader.read(&mut buf[total_read + read_in_attempt..max_to_read]) {
+                    Ok(0) => break,
+                    Ok(n) => read_in_attempt += n,
+                    Err(e) => {
+                        chunk_err = Some(e);
+                        break;
+                    }
+                }
+            }
+            total_read += read_in_attempt;
+            if let Some(err) = chunk_err {
+                if classify_io_error(&err) == StreamErrorKind::Transient
+                    && attempt < self.retry_policy.max_retries
+                {
+                    last_err = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+            break;
         }
+
+        if total_read == 0 {
+            if let Some(err) = last_err {
+                return Err(err);
+            }
+        }
+
         self.position = self.position.saturating_add(total_read as u64);
         Ok(total_read)
     }
@@ -604,6 +673,45 @@ pub enum RecoveryState {
     Closed,
 }
 
+/// Telemetry counters and state shared between stream reader and UI/controller.
+#[derive(Debug, Clone)]
+pub struct StreamTelemetry {
+    pub state: Arc<RwLock<RecoveryState>>,
+    pub reconnect_count: Arc<AtomicU64>,
+    pub total_bytes_read: Arc<AtomicU64>,
+}
+
+impl Default for StreamTelemetry {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(RwLock::new(RecoveryState::Connected)),
+            reconnect_count: Arc::new(AtomicU64::new(0)),
+            total_bytes_read: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+impl StreamTelemetry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn current_state(&self) -> RecoveryState {
+        self.state
+            .read()
+            .map(|s| s.clone())
+            .unwrap_or(RecoveryState::Connected)
+    }
+
+    pub fn reconnect_attempts(&self) -> u64 {
+        self.reconnect_count.load(Ordering::Relaxed)
+    }
+
+    pub fn bytes_read(&self) -> u64 {
+        self.total_bytes_read.load(Ordering::Relaxed)
+    }
+}
+
 /// Factory function closure for creating or recreating seekable streams.
 pub type StreamOpener = Box<dyn Fn() -> std::io::Result<Box<dyn SeekableStream>> + Send + Sync>;
 
@@ -620,6 +728,7 @@ pub struct RecoverableStream {
     retry_policy: StreamRetryPolicy,
     state: RecoveryState,
     cancelled: Arc<AtomicBool>,
+    telemetry: Option<StreamTelemetry>,
 }
 
 impl RecoverableStream {
@@ -638,7 +747,39 @@ impl RecoverableStream {
             retry_policy,
             state: RecoveryState::Connected,
             cancelled: Arc::new(AtomicBool::new(false)),
+            telemetry: None,
         })
+    }
+
+    /// Creates a new `RecoverableStream` with telemetry observation.
+    pub fn new_with_telemetry<F>(
+        opener: F,
+        retry_policy: StreamRetryPolicy,
+        telemetry: StreamTelemetry,
+    ) -> std::io::Result<Self>
+    where
+        F: Fn() -> std::io::Result<Box<dyn SeekableStream>> + Send + Sync + 'static,
+    {
+        let stream = (opener)()?;
+        let size = stream.total_size();
+        if let Ok(mut lock) = telemetry.state.write() {
+            *lock = RecoveryState::Connected;
+        }
+        Ok(Self {
+            opener: Box::new(opener),
+            inner: Some(stream),
+            position: 0,
+            size,
+            retry_policy,
+            state: RecoveryState::Connected,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            telemetry: Some(telemetry),
+        })
+    }
+
+    /// Accesses the attached stream telemetry, if any.
+    pub fn telemetry(&self) -> Option<&StreamTelemetry> {
+        self.telemetry.as_ref()
     }
 
     /// Current observable recovery state.
@@ -664,6 +805,11 @@ impl RecoverableStream {
         for attempt in 1..=max_attempts {
             if self.cancelled.load(Ordering::Relaxed) {
                 self.state = RecoveryState::Closed;
+                if let Some(t) = &self.telemetry {
+                    if let Ok(mut lock) = t.state.write() {
+                        *lock = RecoveryState::Closed;
+                    }
+                }
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "Stream recovery cancelled",
@@ -674,6 +820,12 @@ impl RecoverableStream {
                 attempt,
                 max_attempts,
             };
+            if let Some(t) = &self.telemetry {
+                t.reconnect_count.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut lock) = t.state.write() {
+                    *lock = self.state.clone();
+                }
+            }
 
             let delay = self.retry_policy.delay_for_attempt(attempt);
             let sleep_step = Duration::from_millis(20);
@@ -681,6 +833,11 @@ impl RecoverableStream {
             while elapsed < delay {
                 if self.cancelled.load(Ordering::Relaxed) {
                     self.state = RecoveryState::Closed;
+                    if let Some(t) = &self.telemetry {
+                        if let Ok(mut lock) = t.state.write() {
+                            *lock = RecoveryState::Closed;
+                        }
+                    }
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "Stream recovery cancelled during backoff",
@@ -702,6 +859,11 @@ impl RecoverableStream {
                         }
                         self.inner = Some(new_stream);
                         self.state = RecoveryState::Connected;
+                        if let Some(t) = &self.telemetry {
+                            if let Ok(mut lock) = t.state.write() {
+                                *lock = RecoveryState::Connected;
+                            }
+                        }
                         log::info!(
                             "Stream successfully reconnected at offset {} on attempt {attempt}",
                             self.position
@@ -715,6 +877,11 @@ impl RecoverableStream {
                         );
                         if classify_io_error(&seek_err) == StreamErrorKind::Permanent {
                             self.state = RecoveryState::Failed(seek_err.to_string());
+                            if let Some(t) = &self.telemetry {
+                                if let Ok(mut lock) = t.state.write() {
+                                    *lock = self.state.clone();
+                                }
+                            }
                             return Err(seek_err);
                         }
                         last_err = seek_err;
@@ -724,6 +891,11 @@ impl RecoverableStream {
                     log::warn!("Stream opener attempt {attempt}/{max_attempts} failed: {open_err}");
                     if classify_io_error(&open_err) == StreamErrorKind::Permanent {
                         self.state = RecoveryState::Failed(open_err.to_string());
+                        if let Some(t) = &self.telemetry {
+                            if let Ok(mut lock) = t.state.write() {
+                                *lock = self.state.clone();
+                            }
+                        }
                         return Err(open_err);
                     }
                     last_err = open_err;
@@ -734,6 +906,11 @@ impl RecoverableStream {
         let fail_msg =
             format!("Stream recovery retries exhausted ({max_attempts} attempts): {last_err}");
         self.state = RecoveryState::Failed(fail_msg.clone());
+        if let Some(t) = &self.telemetry {
+            if let Ok(mut lock) = t.state.write() {
+                *lock = self.state.clone();
+            }
+        }
         Err(std::io::Error::new(std::io::ErrorKind::TimedOut, fail_msg))
     }
 }
@@ -760,11 +937,24 @@ impl SeekableStream for RecoverableStream {
             Ok(n) => {
                 self.position += n as u64;
                 self.state = RecoveryState::Connected;
+                if let Some(t) = &self.telemetry {
+                    t.total_bytes_read.fetch_add(n as u64, Ordering::Relaxed);
+                    if let Ok(mut lock) = t.state.write() {
+                        if *lock != RecoveryState::Connected {
+                            *lock = RecoveryState::Connected;
+                        }
+                    }
+                }
                 Ok(n)
             }
             Err(e) => match classify_io_error(&e) {
                 StreamErrorKind::Cancelled => {
                     self.state = RecoveryState::Closed;
+                    if let Some(t) = &self.telemetry {
+                        if let Ok(mut lock) = t.state.write() {
+                            *lock = RecoveryState::Closed;
+                        }
+                    }
                     Err(e)
                 }
                 StreamErrorKind::Transient => {
@@ -777,10 +967,18 @@ impl SeekableStream for RecoverableStream {
                     let inner = self.inner.as_mut().expect("Inner stream reconnected");
                     let n = inner.read(buf)?;
                     self.position += n as u64;
+                    if let Some(t) = &self.telemetry {
+                        t.total_bytes_read.fetch_add(n as u64, Ordering::Relaxed);
+                    }
                     Ok(n)
                 }
                 StreamErrorKind::Permanent => {
                     self.state = RecoveryState::Failed(e.to_string());
+                    if let Some(t) = &self.telemetry {
+                        if let Ok(mut lock) = t.state.write() {
+                            *lock = self.state.clone();
+                        }
+                    }
                     Err(e)
                 }
             },
@@ -824,6 +1022,11 @@ impl SeekableStream for RecoverableStream {
     fn cancel(&mut self) {
         self.cancelled.store(true, Ordering::SeqCst);
         self.state = RecoveryState::Closed;
+        if let Some(t) = &self.telemetry {
+            if let Ok(mut lock) = t.state.write() {
+                *lock = RecoveryState::Closed;
+            }
+        }
         if let Some(inner) = self.inner.as_mut() {
             inner.cancel();
         }

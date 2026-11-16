@@ -462,6 +462,27 @@ impl MuvrixApp {
                         }
                     }
 
+                    // Draw demuxer/stream buffer range on slider track
+                    let cache_time = self.controller.demuxer_cache_time();
+                    if duration > 0.0 && cache_time > time_pos {
+                        let painter = ui.painter();
+                        let frac_cur = (time_pos / max_dur).clamp(0.0, 1.0) as f32;
+                        let frac_buf = (cache_time / max_dur).clamp(0.0, 1.0) as f32;
+                        let x_start = response.rect.min.x + frac_cur * response.rect.width();
+                        let x_end = response.rect.min.x + frac_buf * response.rect.width();
+                        if x_end > x_start {
+                            let buf_rect = Rect::from_min_max(
+                                Pos2::new(x_start, response.rect.center().y - 2.5),
+                                Pos2::new(x_end, response.rect.center().y + 2.5),
+                            );
+                            painter.rect_filled(
+                                buf_rect,
+                                1.5_f32,
+                                Color32::from_rgba_premultiplied(90, 160, 240, 150),
+                            );
+                        }
+                    }
+
                     // Signature electric lime scrubber pin echoing logo right-leg cue
                     if duration > 0.0 {
                         let painter = ui.painter();
@@ -1528,6 +1549,60 @@ impl MuvrixApp {
                             self.pending_resume_prompt = None;
                         }
                     });
+                }
+
+                // Streaming Auto-Reconnect & Buffering Warning Badge (Phase D7)
+                if self.controller.is_stream_reconnecting() {
+                    let recon_w = 340.0_f32.min(rect.width() - 32.0);
+                    let recon_rect = Rect::from_min_size(
+                        Pos2::new(rect.center().x - recon_w * 0.5, rect.min.y + 24.0),
+                        Vec2::new(recon_w, 36.0),
+                    );
+                    ui.painter().rect(
+                        recon_rect,
+                        6.0_f32,
+                        Color32::from_rgba_premultiplied(35, 20, 10, 240),
+                        Stroke::new(1.5_f32, Color32::from_rgb(250, 160, 20)),
+                        StrokeKind::Inside,
+                    );
+                    let mut recon_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(recon_rect.shrink(6.0))
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    icons::icon_label(
+                        &mut recon_ui,
+                        Icon::Warning,
+                        16.0,
+                        Color32::from_rgb(250, 160, 20),
+                    );
+                    recon_ui.add_space(6.0);
+                    let badge_text = if let Some(telemetry) = self.controller.stream_telemetry() {
+                        match telemetry.current_state() {
+                            muvrix_player::RecoveryState::Reconnecting {
+                                attempt,
+                                max_attempts,
+                            } => {
+                                format!(
+                                    "⚡ Reconnecting Stream... (Attempt {attempt}/{max_attempts})"
+                                )
+                            }
+                            muvrix_player::RecoveryState::Failed(msg) => {
+                                format!("⚠ Stream Failed: {msg}")
+                            }
+                            _ => "⚡ Reconnecting Stream...".to_string(),
+                        }
+                    } else if self.controller.is_paused_for_cache() {
+                        "⚡ Buffering Network Stream...".to_string()
+                    } else {
+                        "⚡ Reconnecting Stream...".to_string()
+                    };
+                    recon_ui.label(
+                        RichText::new(badge_text)
+                            .strong()
+                            .size(12.0)
+                            .color(Color32::from_rgb(255, 215, 80)),
+                    );
                 }
 
                 // Contextual Overlays for player states

@@ -13,7 +13,7 @@ use muvrix_core::network::{
 };
 use muvrix_player::{
     HttpRangeStream, ReadAheadStream, RecoverableStream, SeekableStream, SftpSeekableStream,
-    SmbSeekableStream, StreamRetryPolicy,
+    SmbSeekableStream, StreamRetryPolicy, StreamTelemetry,
 };
 
 #[derive(Clone)]
@@ -164,6 +164,27 @@ impl RemoteSpec {
     }
 }
 
+/// Builds a recoverable, read-ahead remote stream with telemetry observation for the UI stream bridge.
+pub fn build_remote_stream_with_telemetry(
+    conn: &NetworkConnection,
+    remote_path: &str,
+    db: &DatabaseManager,
+    vault: &CredentialVault,
+    retry_policy: StreamRetryPolicy,
+    telemetry: Option<StreamTelemetry>,
+) -> Result<Box<dyn SeekableStream>, String> {
+    let spec = RemoteSpec::from_connection(conn, remote_path, db, vault)?;
+    let opener = move || spec.open_once();
+    let recoverable = if let Some(t) = telemetry {
+        RecoverableStream::new_with_telemetry(opener, retry_policy, t)
+            .map_err(|e| format!("remote stream open: {e}"))?
+    } else {
+        RecoverableStream::new(opener, retry_policy)
+            .map_err(|e| format!("remote stream open: {e}"))?
+    };
+    Ok(Box::new(ReadAheadStream::new(recoverable)))
+}
+
 /// Builds a recoverable, read-ahead remote stream for the UI stream bridge.
 pub fn build_remote_stream(
     conn: &NetworkConnection,
@@ -171,11 +192,14 @@ pub fn build_remote_stream(
     db: &DatabaseManager,
     vault: &CredentialVault,
 ) -> Result<Box<dyn SeekableStream>, String> {
-    let spec = RemoteSpec::from_connection(conn, remote_path, db, vault)?;
-    let opener = move || spec.open_once();
-    let recoverable = RecoverableStream::new(opener, StreamRetryPolicy::default())
-        .map_err(|e| format!("remote stream open: {e}"))?;
-    Ok(Box::new(ReadAheadStream::new(recoverable)))
+    build_remote_stream_with_telemetry(
+        conn,
+        remote_path,
+        db,
+        vault,
+        StreamRetryPolicy::default(),
+        None,
+    )
 }
 
 fn default_port(protocol: &str) -> u16 {

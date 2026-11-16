@@ -23,6 +23,22 @@ fn default_audio_boost_cap() -> i32 {
     30
 }
 
+fn default_stream_buffer_mb() -> u32 {
+    150
+}
+
+fn default_stream_back_buffer_mb() -> u32 {
+    50
+}
+
+fn default_stream_readahead_secs() -> u32 {
+    10
+}
+
+fn default_stream_max_retries() -> u32 {
+    5
+}
+
 /// Audio channel routing mode for the playback engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -131,6 +147,14 @@ pub struct PersistedMediaSettings {
     pub background_audio: bool,
     #[serde(default)]
     pub verbose_logging: bool,
+    #[serde(default = "default_stream_buffer_mb")]
+    pub stream_buffer_mb: u32,
+    #[serde(default = "default_stream_back_buffer_mb")]
+    pub stream_back_buffer_mb: u32,
+    #[serde(default = "default_stream_readahead_secs")]
+    pub stream_readahead_secs: u32,
+    #[serde(default = "default_stream_max_retries")]
+    pub stream_max_retries: u32,
 }
 
 impl Default for PersistedMediaSettings {
@@ -154,6 +178,10 @@ impl Default for PersistedMediaSettings {
             volume_boost_cap: 30,
             background_audio: true,
             verbose_logging: false,
+            stream_buffer_mb: 150,
+            stream_back_buffer_mb: 50,
+            stream_readahead_secs: 10,
+            stream_max_retries: 5,
         }
     }
 }

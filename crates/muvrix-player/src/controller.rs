@@ -10,7 +10,7 @@ use crate::event::{EndFileReason, Event};
 use crate::handle::MpvHandle;
 use crate::playlist::PlaylistItem;
 use crate::property::PropertyFormat;
-use crate::stream::{MpvStreamBridge, SeekableStream};
+use crate::stream::{MpvStreamBridge, RecoveryState, SeekableStream, StreamTelemetry};
 use crate::track::{ChapterInfo, SubtitleStyling, TrackInfo, TrackType};
 
 pub const PROP_TIME_POS: u64 = 1;
@@ -203,6 +203,7 @@ pub struct PlaybackController {
     panscan: f64,
     mpvex_commands: Vec<MpvexCommand>,
     stream_bridge: MpvStreamBridge,
+    stream_telemetry: Option<StreamTelemetry>,
     next_async_id: u64,
     pending_resume_pos: Option<f64>,
     pending_resume_audio: Option<Option<i64>>,
@@ -300,6 +301,7 @@ impl PlaybackController {
             panscan: 0.0,
             mpvex_commands: Vec::new(),
             stream_bridge,
+            stream_telemetry: None,
             next_async_id: 1000,
             pending_resume_pos: None,
             pending_resume_audio: None,
@@ -388,6 +390,75 @@ impl PlaybackController {
     /// Whether playback is stalled for caching/buffering.
     pub fn is_buffering(&self) -> bool {
         self.is_buffering
+    }
+
+    /// Duration of demuxer cached data ahead of the current playback position in seconds.
+    pub fn demuxer_cache_duration(&self) -> f64 {
+        self.handle
+            .get_property::<f64>("demuxer-cache-duration")
+            .unwrap_or(0.0)
+    }
+
+    /// Absolute timestamp in seconds up to which the demuxer has cached packets.
+    pub fn demuxer_cache_time(&self) -> f64 {
+        self.handle
+            .get_property::<f64>("demuxer-cache-time")
+            .unwrap_or(0.0)
+    }
+
+    /// Whether the demuxer cache is currently idle (not actively fetching).
+    pub fn demuxer_cache_idle(&self) -> bool {
+        self.handle
+            .get_property::<bool>("demuxer-cache-idle")
+            .unwrap_or(true)
+    }
+
+    /// Whether playback is paused waiting for cache refill.
+    pub fn is_paused_for_cache(&self) -> bool {
+        self.is_buffering
+            || self
+                .handle
+                .get_property::<bool>("paused-for-cache")
+                .unwrap_or(false)
+    }
+
+    /// Configures demuxer cache limits and read-ahead bounds for network streaming.
+    pub fn configure_stream_buffering(
+        &mut self,
+        max_bytes: u64,
+        max_back_bytes: u64,
+        readahead_secs: f64,
+    ) -> Result<(), MpvError> {
+        let _ = self
+            .handle
+            .set_property("demuxer-max-bytes", max_bytes as i64);
+        let _ = self
+            .handle
+            .set_property("demuxer-max-back-bytes", max_back_bytes as i64);
+        let _ = self
+            .handle
+            .set_property("demuxer-readahead-secs", readahead_secs);
+        Ok(())
+    }
+
+    /// Sets or clears active stream recovery telemetry tracking.
+    pub fn set_stream_telemetry(&mut self, telemetry: Option<StreamTelemetry>) {
+        self.stream_telemetry = telemetry;
+    }
+
+    /// Current stream recovery telemetry handle, if streaming.
+    pub fn stream_telemetry(&self) -> Option<StreamTelemetry> {
+        self.stream_telemetry.clone()
+    }
+
+    /// Checks if a remote stream is currently reconnecting or stalled for cache.
+    pub fn is_stream_reconnecting(&self) -> bool {
+        if let Some(t) = &self.stream_telemetry {
+            if let RecoveryState::Reconnecting { .. } = t.current_state() {
+                return true;
+            }
+        }
+        self.is_paused_for_cache()
     }
 
     /// Current playback speed multiplier.

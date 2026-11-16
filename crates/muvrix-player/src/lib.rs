@@ -57,9 +57,9 @@ pub use shader::{
 };
 pub use shuffle::{ShuffleTrackInfo, SmartShuffleEngine};
 pub use stream::{
-    HttpRangeStream, IoSeekableStream, MemoryStream, MpvStreamBridge, ReadAheadStream,
-    RecoverableStream, RecoveryState, SeekableStream, SftpSeekableStream, SmbSeekableStream,
-    StreamErrorKind, StreamRegistry, StreamRetryPolicy,
+    classify_io_error, HttpRangeStream, IoSeekableStream, MemoryStream, MpvStreamBridge,
+    ReadAheadStream, RecoverableStream, RecoveryState, SeekableStream, SftpSeekableStream,
+    SmbSeekableStream, StreamErrorKind, StreamRegistry, StreamRetryPolicy, StreamTelemetry,
 };
 pub use thumbnail::MpvThumbnailExtractor;
 pub use track::{

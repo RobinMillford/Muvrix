@@ -611,8 +611,23 @@ impl MuvrixApp {
             volume_boost_cap: self.equalizer_settings.volume_boost as i32,
             background_audio: self.background_audio,
             verbose_logging: self.verbose_logging,
+            stream_buffer_mb: self.stream_buffer_mb,
+            stream_back_buffer_mb: self.stream_back_buffer_mb,
+            stream_readahead_secs: self.stream_readahead_secs,
+            stream_max_retries: self.stream_max_retries,
         };
         let _ = settings.save(None);
+    }
+
+    /// Applies demuxer buffer sizing and stream read-ahead settings to libmpv and saves preferences.
+    pub fn apply_stream_buffering_settings(&mut self) {
+        let max_bytes = (self.stream_buffer_mb as u64) * 1024 * 1024;
+        let max_back_bytes = (self.stream_back_buffer_mb as u64) * 1024 * 1024;
+        let readahead_secs = self.stream_readahead_secs as f64;
+        let _ =
+            self.controller
+                .configure_stream_buffering(max_bytes, max_back_bytes, readahead_secs);
+        self.save_media_settings();
     }
 
     /// Synchronizes audio channels, volume normalization filter, pitch correction, and languages with libmpv.

@@ -4,8 +4,9 @@ use muvrix_core::network::{
     WebDavProvider,
 };
 
-use crate::app::MuvrixApp;
-use crate::remote_playback::build_remote_stream;
+use crate::app::{format_timestamp, MuvrixApp};
+use crate::remote_playback::build_remote_stream_with_telemetry;
+use crate::ui_components::BrandPalette;
 use crate::views::{format_file_size, AppView};
 
 impl MuvrixApp {
@@ -161,7 +162,20 @@ impl MuvrixApp {
                             }
 
                             if let Some((conn, target)) = stream_target {
-                                match build_remote_stream(&conn, &target, &self.db, &self.network_vault) {
+                                let telemetry = muvrix_player::StreamTelemetry::new();
+                                self.controller.set_stream_telemetry(Some(telemetry.clone()));
+                                let policy = muvrix_player::StreamRetryPolicy {
+                                    max_retries: self.stream_max_retries,
+                                    ..Default::default()
+                                };
+                                match build_remote_stream_with_telemetry(
+                                    &conn,
+                                    &target,
+                                    &self.db,
+                                    &self.network_vault,
+                                    policy,
+                                    Some(telemetry),
+                                ) {
                                     Ok(stream) => {
                                         let uri = self.stream_bridge.register(stream);
                                         self.browsing_error = None;
@@ -535,5 +549,195 @@ impl MuvrixApp {
                             ui.label(RichText::new(msg).color(Color32::from_rgb(100, 200, 100)).size(11.5));
                         }
                     });
+
+        // Section 5.1: Network Streaming Hardening, Buffering & Telemetry
+        ui.add_space(10.0);
+        ui.group(|ui| {
+            ui.label(
+                RichText::new("5.1 Streaming Hardening, Demuxer Cache & Auto-Reconnect")
+                    .strong()
+                    .size(14.0)
+                    .color(Color32::from_rgb(95, 185, 255)),
+            );
+            ui.label(
+                RichText::new(
+                    "Configure forward stream buffering, backwards seek cache, read-ahead window, and transient reconnect policies for remote media (WebDAV, SMB, SFTP).",
+                )
+                .size(12.0)
+                .color(Color32::from_gray(160)),
+            );
+
+            ui.add_space(8.0);
+
+            let mut changed = false;
+
+            // Stream Buffer Size (Forward Cache)
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Stream Buffer Size:")
+                        .strong()
+                        .color(Color32::from_gray(210)),
+                );
+                let slider = egui::Slider::new(&mut self.stream_buffer_mb, 50..=500)
+                    .suffix(" MiB")
+                    .text("Forward Demuxer Cache");
+                if ui.add(slider).changed() {
+                    changed = true;
+                }
+            });
+
+            // Back-Buffer Size (Reverse Seek Cache)
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Back-Buffer Size:")
+                        .strong()
+                        .color(Color32::from_gray(210)),
+                );
+                let slider = egui::Slider::new(&mut self.stream_back_buffer_mb, 20..=150)
+                    .suffix(" MiB")
+                    .text("Reverse Seek Memory");
+                if ui.add(slider).changed() {
+                    changed = true;
+                }
+            });
+
+            // Read-Ahead Window
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Read-Ahead Window:")
+                        .strong()
+                        .color(Color32::from_gray(210)),
+                );
+                let slider = egui::Slider::new(&mut self.stream_readahead_secs, 5..=60)
+                    .suffix(" s")
+                    .text("Demuxer Prefetch Time");
+                if ui.add(slider).changed() {
+                    changed = true;
+                }
+            });
+
+            // Max Reconnect Attempts
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Max Reconnect Retries:")
+                        .strong()
+                        .color(Color32::from_gray(210)),
+                );
+                let slider = egui::Slider::new(&mut self.stream_max_retries, 1..=10)
+                    .text("Attempts Before Failure");
+                if ui.add(slider).changed() {
+                    changed = true;
+                }
+            });
+
+            if changed {
+                self.apply_stream_buffering_settings();
+            }
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(6.0);
+
+            // Live Demuxer & Stream Telemetry Status Card
+            ui.label(
+                RichText::new("Live Stream & Demuxer Telemetry")
+                    .strong()
+                    .size(12.5)
+                    .color(BrandPalette::ELECTRIC_LIME),
+            );
+
+            let cache_duration = self.controller.demuxer_cache_duration();
+            let cache_time = self.controller.demuxer_cache_time();
+            let is_idle = self.controller.demuxer_cache_idle();
+            let is_buffering = self.controller.is_paused_for_cache();
+
+            let demuxer_status = if is_buffering {
+                ("Buffering (Stalled)", Color32::from_rgb(255, 180, 50))
+            } else if is_idle {
+                ("Idle (Buffer Full)", Color32::from_rgb(140, 210, 140))
+            } else {
+                ("Active (Prefetching)", Color32::from_rgb(90, 180, 255))
+            };
+
+            egui::Grid::new("stream_telemetry_grid")
+                .num_columns(2)
+                .spacing([20.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Demuxer Status:").color(Color32::from_gray(160)));
+                    ui.label(RichText::new(demuxer_status.0).strong().color(demuxer_status.1));
+                    ui.end_row();
+
+                    ui.label(RichText::new("Cached Duration:").color(Color32::from_gray(160)));
+                    ui.label(
+                        RichText::new(format!("{:.1} s ahead of playhead", cache_duration))
+                            .monospace()
+                            .color(Color32::WHITE),
+                    );
+                    ui.end_row();
+
+                    ui.label(RichText::new("Buffer End Position:").color(Color32::from_gray(160)));
+                    ui.label(
+                        RichText::new(format_timestamp(cache_time))
+                            .monospace()
+                            .color(Color32::from_rgb(125, 211, 252)),
+                    );
+                    ui.end_row();
+
+                    if let Some(telemetry) = self.controller.stream_telemetry() {
+                        let state = telemetry.current_state();
+                        let (state_text, state_col) = match state {
+                            muvrix_player::RecoveryState::Connected => (
+                                "Connected & Streaming".to_string(),
+                                Color32::from_rgb(100, 220, 100),
+                            ),
+                            muvrix_player::RecoveryState::Reconnecting {
+                                attempt,
+                                max_attempts,
+                            } => (
+                                format!("⚡ Reconnecting ({attempt}/{max_attempts})"),
+                                Color32::from_rgb(255, 180, 40),
+                            ),
+                            muvrix_player::RecoveryState::Failed(msg) => {
+                                (format!("Failed: {msg}"), Color32::from_rgb(255, 80, 80))
+                            }
+                            muvrix_player::RecoveryState::Closed => {
+                                ("Closed".to_string(), Color32::from_gray(140))
+                            }
+                        };
+
+                        ui.label(RichText::new("Transport State:").color(Color32::from_gray(160)));
+                        ui.label(RichText::new(state_text).strong().color(state_col));
+                        ui.end_row();
+
+                        ui.label(RichText::new("Bytes Streamed:").color(Color32::from_gray(160)));
+                        ui.label(
+                            RichText::new(format_file_size(telemetry.bytes_read()))
+                                .monospace()
+                                .color(Color32::WHITE),
+                        );
+                        ui.end_row();
+
+                        ui.label(RichText::new("Reconnect Attempts:").color(Color32::from_gray(160)));
+                        ui.label(
+                            RichText::new(format!("{}", telemetry.reconnect_attempts()))
+                                .monospace()
+                                .color(if telemetry.reconnect_attempts() > 0 {
+                                    Color32::from_rgb(255, 200, 80)
+                                } else {
+                                    Color32::WHITE
+                                }),
+                        );
+                        ui.end_row();
+                    } else {
+                        ui.label(RichText::new("Transport Stream:").color(Color32::from_gray(160)));
+                        ui.label(
+                            RichText::new("Local file playback / no custom stream mounted")
+                                .italics()
+                                .color(Color32::from_gray(140)),
+                        );
+                        ui.end_row();
+                    }
+                });
+        });
     }
 }

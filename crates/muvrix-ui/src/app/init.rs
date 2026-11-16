@@ -558,6 +558,10 @@ impl MuvrixApp {
                 None
             },
             network_host_key_input: String::new(),
+            stream_buffer_mb: persisted.stream_buffer_mb,
+            stream_back_buffer_mb: persisted.stream_back_buffer_mb,
+            stream_readahead_secs: persisted.stream_readahead_secs,
+            stream_max_retries: persisted.stream_max_retries,
             stream_bridge,
             browsing_conn_id: None,
             browsing_path: "/".to_string(),
@@ -628,6 +632,11 @@ impl MuvrixApp {
             .controller
             .set_volume_boost(app.equalizer_settings.volume_boost);
         let _ = app.controller.set_volume(persisted.volume);
+        let _ = app.controller.configure_stream_buffering(
+            (persisted.stream_buffer_mb as u64) * 1024 * 1024,
+            (persisted.stream_back_buffer_mb as u64) * 1024 * 1024,
+            persisted.stream_readahead_secs as f64,
+        );
 
         if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network") {
             if let Ok(conns) = app.db.list_connections() {
@@ -1035,6 +1044,29 @@ impl MuvrixApp {
             if let Ok(offset) = offset_str.parse::<f32>() {
                 app.home_carousel_scroll_offset = offset;
             }
+        }
+
+        if let Ok(recon_str) = std::env::var("MUVRIX_SIMULATE_STREAM_RECONNECT") {
+            let telemetry = muvrix_player::StreamTelemetry::new();
+            let attempt = recon_str.parse::<u32>().unwrap_or(2);
+            *telemetry.state.write().unwrap() = muvrix_player::RecoveryState::Reconnecting {
+                attempt,
+                max_attempts: 5,
+            };
+            telemetry
+                .reconnect_count
+                .store(attempt as u64, std::sync::atomic::Ordering::Relaxed);
+            telemetry
+                .total_bytes_read
+                .store(14_250_880, std::sync::atomic::Ordering::Relaxed);
+            app.controller.set_stream_telemetry(Some(telemetry));
+        } else if std::env::var("MUVRIX_SIMULATE_STREAM_STREAMING").is_ok() {
+            let telemetry = muvrix_player::StreamTelemetry::new();
+            *telemetry.state.write().unwrap() = muvrix_player::RecoveryState::Connected;
+            telemetry
+                .total_bytes_read
+                .store(48_920_412, std::sync::atomic::Ordering::Relaxed);
+            app.controller.set_stream_telemetry(Some(telemetry));
         }
 
         Ok(app)
