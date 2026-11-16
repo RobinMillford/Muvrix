@@ -401,7 +401,7 @@ impl MuvrixApp {
             selected_library_item: None,
             add_root_dialog_open: false,
             add_root_path_input: String::new(),
-            thumbnail_textures: std::collections::HashMap::new(),
+            thumbnail_textures: crate::thumbnail_cache::LruTextureCache::default(),
             logo_texture: None,
             active_scan_cancel: None,
             active_scan_rx: None,

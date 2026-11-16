@@ -12,6 +12,7 @@ pub mod path;
 pub mod platform;
 pub mod playlist;
 pub mod scanner;
+pub mod search;
 pub mod thumbnails;
 
 pub use backup::{BackupError, BackupSettings, CURRENT_BACKUP_SCHEMA};
@@ -38,6 +39,7 @@ pub use path::{
 };
 pub use platform::{DistroInfo, PlatformInfo, SessionType};
 pub use scanner::{ScanOptions, ScanProgress, ScanSummary, ScannerService};
+pub use search::sanitize_fts5_query;
 pub use thumbnails::{
     calculate_thumbnail_seek_seconds, FallbackThumbnailExtractor, ThumbnailCache, ThumbnailError,
     ThumbnailExtractor, ThumbnailResult,

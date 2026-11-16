@@ -25,10 +25,12 @@ pub mod render_engine;
 #[cfg(target_os = "linux")]
 pub mod runner;
 pub mod telemetry;
+pub mod thumbnail_cache;
 pub mod trace;
 pub mod ui_components;
 pub mod views;
 pub mod wake;
 
 pub use app::MuvrixApp;
+pub use thumbnail_cache::LruTextureCache;
 pub use views::AppView;

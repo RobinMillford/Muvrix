@@ -978,15 +978,23 @@ impl Repository {
         let mut query_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(ref q) = filter.search_query {
-            let pattern = format!("%{}%", q.trim());
-            where_clauses.push(
-                "(mi.file_name LIKE ? OR mm.title LIKE ? OR mm.artist LIKE ? OR mm.album LIKE ? OR mm.genre LIKE ?)"
-            );
-            query_params.push(Box::new(pattern.clone()));
-            query_params.push(Box::new(pattern.clone()));
-            query_params.push(Box::new(pattern.clone()));
-            query_params.push(Box::new(pattern.clone()));
-            query_params.push(Box::new(pattern));
+            let sanitized = crate::search::sanitize_fts5_query(q);
+            if !sanitized.is_empty() {
+                where_clauses.push(
+                    "mi.id IN (SELECT rowid FROM media_items_fts WHERE media_items_fts MATCH ?)",
+                );
+                query_params.push(Box::new(sanitized));
+            } else if !q.trim().is_empty() {
+                let pattern = format!("%{}%", q.trim());
+                where_clauses.push(
+                    "(mi.file_name LIKE ? OR mm.title LIKE ? OR mm.artist LIKE ? OR mm.album LIKE ? OR mm.genre LIKE ?)"
+                );
+                query_params.push(Box::new(pattern.clone()));
+                query_params.push(Box::new(pattern.clone()));
+                query_params.push(Box::new(pattern.clone()));
+                query_params.push(Box::new(pattern.clone()));
+                query_params.push(Box::new(pattern));
+            }
         }
 
         if let Some(media_type) = filter.media_type {

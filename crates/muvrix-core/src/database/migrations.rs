@@ -3,7 +3,7 @@
 use rusqlite::{Connection, Result, Transaction};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const LATEST_SCHEMA_VERSION: u32 = 5;
+pub const LATEST_SCHEMA_VERSION: u32 = 6;
 
 /// Apply all pending database migrations within a transaction.
 pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
@@ -57,6 +57,13 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
         let tx = conn.transaction()?;
         migration_005_watch_state(&tx)?;
         record_migration(&tx, 5, "Library watched state for batch actions")?;
+        tx.commit()?;
+    }
+
+    if current_version < 6 {
+        let tx = conn.transaction()?;
+        migration_006_fts5_search(&tx)?;
+        record_migration(&tx, 6, "FTS5 full-text search virtual table and triggers")?;
         tx.commit()?;
     }
 
@@ -312,6 +319,99 @@ fn migration_005_watch_state(tx: &Transaction) -> Result<()> {
             is_watched INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL
         );
+        ",
+    )?;
+    Ok(())
+}
+
+fn migration_006_fts5_search(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS media_metadata (
+            media_id INTEGER PRIMARY KEY REFERENCES media_items(id) ON DELETE CASCADE,
+            title TEXT,
+            original_title TEXT,
+            description TEXT,
+            genre TEXT,
+            release_year INTEGER,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            overall_bitrate INTEGER NOT NULL DEFAULT 0,
+            container TEXT,
+            video_codec TEXT,
+            audio_codec TEXT,
+            width INTEGER NOT NULL DEFAULT 0,
+            height INTEGER NOT NULL DEFAULT 0,
+            fps REAL NOT NULL DEFAULT 0.0,
+            hdr_type TEXT,
+            audio_channels INTEGER NOT NULL DEFAULT 0,
+            sample_rate INTEGER NOT NULL DEFAULT 0,
+            bit_depth INTEGER NOT NULL DEFAULT 0,
+            artist TEXT,
+            album TEXT,
+            album_artist TEXT,
+            track_number INTEGER,
+            disc_number INTEGER
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS media_items_fts USING fts5(
+            file_name,
+            title,
+            artist,
+            album,
+            genre,
+            tokenize='unicode61'
+        );
+
+        -- Synchronize any existing media items and metadata into FTS5
+        INSERT OR REPLACE INTO media_items_fts (rowid, file_name, title, artist, album, genre)
+        SELECT
+            mi.id,
+            mi.file_name,
+            COALESCE(mm.title, ''),
+            COALESCE(mm.artist, ''),
+            COALESCE(mm.album, ''),
+            COALESCE(mm.genre, '')
+        FROM media_items mi
+        LEFT JOIN media_metadata mm ON mi.id = mm.media_id;
+
+        -- Triggers to maintain real-time bidirectional FTS index synchronization
+        CREATE TRIGGER IF NOT EXISTS trg_media_items_fts_insert AFTER INSERT ON media_items
+        BEGIN
+            INSERT INTO media_items_fts (rowid, file_name, title, artist, album, genre)
+            VALUES (new.id, new.file_name, '', '', '', '');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_media_items_fts_delete AFTER DELETE ON media_items
+        BEGIN
+            DELETE FROM media_items_fts WHERE rowid = old.id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_media_items_fts_update AFTER UPDATE OF file_name ON media_items
+        BEGIN
+            UPDATE media_items_fts
+            SET file_name = new.file_name
+            WHERE rowid = new.id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_media_metadata_fts_insert AFTER INSERT ON media_metadata
+        BEGIN
+            UPDATE media_items_fts
+            SET title = COALESCE(new.title, ''),
+                artist = COALESCE(new.artist, ''),
+                album = COALESCE(new.album, ''),
+                genre = COALESCE(new.genre, '')
+            WHERE rowid = new.media_id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_media_metadata_fts_update AFTER UPDATE ON media_metadata
+        BEGIN
+            UPDATE media_items_fts
+            SET title = COALESCE(new.title, ''),
+                artist = COALESCE(new.artist, ''),
+                album = COALESCE(new.album, ''),
+                genre = COALESCE(new.genre, '')
+            WHERE rowid = new.media_id;
+        END;
         ",
     )?;
     Ok(())

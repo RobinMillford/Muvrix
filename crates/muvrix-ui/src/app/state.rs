@@ -217,7 +217,7 @@ pub struct MuvrixApp {
     pub(crate) selected_library_item: Option<LibraryItemView>,
     pub(crate) add_root_dialog_open: bool,
     pub(crate) add_root_path_input: String,
-    pub(crate) thumbnail_textures: std::collections::HashMap<String, egui::TextureHandle>,
+    pub(crate) thumbnail_textures: crate::thumbnail_cache::LruTextureCache,
     pub(crate) logo_texture: Option<egui::TextureHandle>,
     pub(crate) active_scan_cancel: Option<Arc<AtomicBool>>,
     pub(crate) active_scan_rx: Option<mpsc::Receiver<ScanProgress>>,

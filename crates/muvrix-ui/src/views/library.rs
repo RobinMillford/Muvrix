@@ -527,62 +527,77 @@ impl MuvrixApp {
                     self.add_root_dialog_open = true;
                 }
             } else if self.library_is_grid {
-                // Pre-load thumbnail textures for visible items
-                for item_view in &self.library_items {
-                    if let Some(ref path_str) = item_view.thumbnail_path {
-                        if !self.thumbnail_textures.contains_key(path_str) {
-                            let p = std::path::Path::new(path_str);
-                            if p.is_file() {
-                                if let Ok(bytes) = std::fs::read(p) {
-                                    if let Ok(img) = image::load_from_memory(&bytes) {
-                                        let rgba = img.to_rgba8();
-                                        let size = [img.width() as usize, img.height() as usize];
-                                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                                            size,
-                                            rgba.as_raw(),
-                                        );
-                                        let tex = ctx.load_texture(
-                                            path_str,
-                                            color_image,
-                                            egui::TextureOptions::LINEAR,
-                                        );
-                                        self.thumbnail_textures.insert(path_str.clone(), tex);
+                // Responsive Virtualized Grid Card Display
+                let available = ui.available_width();
+                // Deduct scrollbar (18px) and container padding (30px reserve)
+                let usable_width = (available - 48.0).max(220.0);
+
+                let (cols, spacing) = if usable_width >= 1050.0 {
+                    (4, 16.0_f32)
+                } else if usable_width >= 720.0 {
+                    (3, 14.0_f32)
+                } else if usable_width >= 460.0 {
+                    (2, 12.0_f32)
+                } else {
+                    (1, 8.0_f32)
+                };
+
+                let card_outer_width =
+                    ((usable_width - ((cols - 1) as f32 * spacing)) / cols as f32).floor();
+                let card_inner_width = (card_outer_width - 16.0).max(160.0);
+                let preview_height = (card_inner_width * 0.5625)
+                    .round()
+                    .clamp(90.0, 160.0);
+                let card_row_height = preview_height + 120.0;
+
+                let card_frame = egui::Frame::new()
+                    .fill(BrandPalette::ELEVATED_SURFACE)
+                    .stroke(Stroke::new(1.0_f32, BrandPalette::SLATE_BORDER))
+                    .corner_radius(10.0_f32)
+                    .inner_margin(egui::Margin::same(10));
+
+                let total_items = self.library_items.len();
+                let total_rows = total_items.div_ceil(cols);
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show_rows(ui, card_row_height, total_rows, |ui, row_range| {
+                        for row_idx in row_range {
+                            if row_idx >= total_rows {
+                                break;
+                            }
+                            let start = row_idx * cols;
+                            let end = (start + cols).min(total_items);
+                            let chunk = &self.library_items[start..end];
+
+                            // Pre-load thumbnail textures for visible items in this row only
+                            for item_view in chunk {
+                                if let Some(ref path_str) = item_view.thumbnail_path {
+                                    if !self.thumbnail_textures.contains_key(path_str) {
+                                        let p = std::path::Path::new(path_str);
+                                        if p.is_file() {
+                                            if let Ok(bytes) = std::fs::read(p) {
+                                                if let Ok(img) = image::load_from_memory(&bytes) {
+                                                    let rgba = img.to_rgba8();
+                                                    let size = [img.width() as usize, img.height() as usize];
+                                                    let byte_size = size[0] * size[1] * 4;
+                                                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                                        size,
+                                                        rgba.as_raw(),
+                                                    );
+                                                    let tex = ctx.load_texture(
+                                                        path_str,
+                                                        color_image,
+                                                        egui::TextureOptions::LINEAR,
+                                                    );
+                                                    self.thumbnail_textures.insert(path_str.clone(), tex, byte_size);
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
-                        }
-                    }
-                }
 
-                // Responsive Grid Card Display
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let available = ui.available_width();
-                        // Deduct scrollbar (18px) and container padding (30px reserve)
-                        let usable_width = (available - 48.0).max(220.0);
-
-                        let (cols, spacing) = if usable_width >= 1050.0 {
-                            (4, 16.0_f32)
-                        } else if usable_width >= 720.0 {
-                            (3, 14.0_f32)
-                        } else if usable_width >= 460.0 {
-                            (2, 12.0_f32)
-                        } else {
-                            (1, 8.0_f32)
-                        };
-
-                        let card_outer_width =
-                            ((usable_width - ((cols - 1) as f32 * spacing)) / cols as f32).floor();
-                        let card_inner_width = (card_outer_width - 16.0).max(160.0);
-
-                        let card_frame = egui::Frame::new()
-                            .fill(BrandPalette::ELEVATED_SURFACE)
-                            .stroke(Stroke::new(1.0_f32, BrandPalette::SLATE_BORDER))
-                            .corner_radius(10.0_f32)
-                            .inner_margin(egui::Margin::same(10));
-
-                        for chunk in self.library_items.chunks(cols) {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = spacing;
                                 for item_view in chunk {
@@ -862,120 +877,153 @@ impl MuvrixApp {
                         }
                     });
             } else {
-                // Table / List View
+                // Table / List View (Virtualized)
+                let total_items = self.library_items.len();
+                let row_height = 34.0_f32;
+
+                // Sticky Header Row
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    if self.library_multi_select {
+                        ui.allocate_ui(Vec2::new(45.0, 20.0), |ui| {
+                            ui.label(RichText::new("Select").strong().color(BrandPalette::MUTED_TEXT));
+                        });
+                    }
+                    ui.allocate_ui(Vec2::new(30.0, 20.0), |ui| {
+                        ui.label(RichText::new("Fav").strong().color(BrandPalette::MUTED_TEXT));
+                    });
+                    ui.allocate_ui(Vec2::new(260.0, 20.0), |ui| {
+                        ui.label(RichText::new("Title / File Name").strong().color(BrandPalette::MUTED_TEXT));
+                    });
+                    ui.allocate_ui(Vec2::new(60.0, 20.0), |ui| {
+                        ui.label(RichText::new("Type").strong().color(BrandPalette::MUTED_TEXT));
+                    });
+                    ui.allocate_ui(Vec2::new(70.0, 20.0), |ui| {
+                        ui.label(RichText::new("Format").strong().color(BrandPalette::MUTED_TEXT));
+                    });
+                    ui.allocate_ui(Vec2::new(75.0, 20.0), |ui| {
+                        ui.label(RichText::new("Duration").strong().color(BrandPalette::MUTED_TEXT));
+                    });
+                    ui.allocate_ui(Vec2::new(75.0, 20.0), |ui| {
+                        ui.label(RichText::new("Size").strong().color(BrandPalette::MUTED_TEXT));
+                    });
+                    ui.label(RichText::new("Actions").strong().color(BrandPalette::MUTED_TEXT));
+                });
+                ui.separator();
+
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        egui::Grid::new("library_table_grid")
-                            .striped(true)
-                            .spacing([12.0, 6.0])
-                            .show(ui, |ui| {
-                                // Header row
-                                if self.library_multi_select {
-                                    ui.label(RichText::new("Select").strong());
-                                }
-                                ui.label(RichText::new("Fav").strong());
-                                ui.label(RichText::new("Title / File Name").strong());
-                                ui.label(RichText::new("Type").strong());
-                                ui.label(RichText::new("Format").strong());
-                                ui.label(RichText::new("Duration").strong());
-                                ui.label(RichText::new("Size").strong());
-                                ui.label(RichText::new("Actions").strong());
-                                ui.end_row();
+                    .show_rows(ui, row_height, total_items, |ui, row_range| {
+                        for idx in row_range {
+                            if idx >= total_items {
+                                break;
+                            }
+                            let item_view = &self.library_items[idx];
+                            let bg_color = if idx % 2 == 1 {
+                                Color32::from_rgba_unmultiplied(255, 255, 255, 4)
+                            } else {
+                                Color32::TRANSPARENT
+                            };
 
-                                for item_view in &self.library_items {
-                                    if self.library_multi_select {
-                                        let mut selected =
-                                            self.library_selection.contains(item_view.item.id);
-                                        if ui.checkbox(&mut selected, "").changed() {
-                                            selection_toggle = Some(item_view.item.id);
-                                        }
-                                    }
-                                    let star = if item_view.is_favourite { "★" } else { "☆" };
-                                    let star_color = if item_view.is_favourite {
-                                        Color32::from_rgb(255, 200, 50)
-                                    } else {
-                                        Color32::from_gray(150)
-                                    };
-                                    if ui.button(RichText::new(star).color(star_color)).clicked() {
-                                        toggle_fav =
-                                            Some((item_view.item.id, !item_view.is_favourite));
-                                    }
-
-                                    let title = item_view
-                                        .metadata
-                                        .as_ref()
-                                        .and_then(|m| m.title.as_ref())
-                                        .unwrap_or(&item_view.item.file_name);
-                                    let title_response = ui.selectable_label(false, title);
-                                    if title_response.double_clicked() {
-                                        play_path = Some(item_view.item.canonical_path.clone());
-                                    } else if title_response.clicked() {
-                                        select_item = Some(item_view.clone());
-                                    }
-
-                                    let type_label = match item_view.item.media_type {
-                                        MediaType::Video => "Video",
-                                        MediaType::Audio => "Audio",
-                                    };
-                                    ui.label(
-                                        RichText::new(type_label).color(Color32::from_gray(160)),
-                                    );
-
-                                    let codec = item_view
-                                        .metadata
-                                        .as_ref()
-                                        .and_then(|m| {
-                                            m.video_codec
-                                                .as_deref()
-                                                .or(m.audio_codec.as_deref())
-                                        })
-                                        .unwrap_or(&item_view.item.file_extension);
-                                    ui.label(
-                                        RichText::new(codec.to_uppercase())
-                                            .color(Color32::from_gray(160)),
-                                    );
-
-                                    let dur_str = item_view
-                                        .metadata
-                                        .as_ref()
-                                        .map(|m| format_timestamp(m.duration_ms as f64 / 1000.0))
-                                        .unwrap_or_else(|| "-".to_string());
-                                    ui.label(
-                                        RichText::new(dur_str)
-                                            .monospace()
-                                            .color(Color32::from_gray(160)),
-                                    );
-
-                                    ui.label(
-                                        RichText::new(format_file_size(item_view.item.file_size))
-                                            .color(Color32::from_gray(160)),
-                                    );
-
+                            egui::Frame::new()
+                                .fill(bg_color)
+                                .inner_margin(egui::Margin::symmetric(4, 2))
+                                .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        if ui.button("▶ Play").clicked() {
-                                            play_path = Some(item_view.item.canonical_path.clone());
-                                        }
-                                        if ui
-                                            .button("➕")
-                                            .on_hover_text("Enqueue to Playlist")
-                                            .clicked()
-                                        {
-                                            enqueue_path =
-                                                Some(item_view.item.canonical_path.clone());
-                                        }
-                                        if ui.button("ℹ").on_hover_text("View Details").clicked() {
-                                            select_item = Some(item_view.clone());
-                                        }
-                                        if ui.button("⋮").on_hover_text("More actions").clicked() {
-                                            self.library_context_item = Some(item_view.clone());
-                                            self.show_library_context_menu = true;
-                                        }
-                                    });
+                                        ui.spacing_mut().item_spacing.x = 12.0;
 
-                                    ui.end_row();
-                                }
-                            });
+                                        if self.library_multi_select {
+                                            ui.allocate_ui(Vec2::new(45.0, 24.0), |ui| {
+                                                let mut selected = self.library_selection.contains(item_view.item.id);
+                                                if ui.checkbox(&mut selected, "").changed() {
+                                                    selection_toggle = Some(item_view.item.id);
+                                                }
+                                            });
+                                        }
+
+                                        ui.allocate_ui(Vec2::new(30.0, 24.0), |ui| {
+                                            let star = if item_view.is_favourite { "★" } else { "☆" };
+                                            let star_color = if item_view.is_favourite {
+                                                Color32::from_rgb(255, 200, 50)
+                                            } else {
+                                                Color32::from_gray(150)
+                                            };
+                                            if ui.button(RichText::new(star).color(star_color)).clicked() {
+                                                toggle_fav = Some((item_view.item.id, !item_view.is_favourite));
+                                            }
+                                        });
+
+                                        ui.allocate_ui(Vec2::new(260.0, 24.0), |ui| {
+                                            let title = item_view
+                                                .metadata
+                                                .as_ref()
+                                                .and_then(|m| m.title.as_ref())
+                                                .unwrap_or(&item_view.item.file_name);
+                                            let title_response = ui.selectable_label(false, title);
+                                            if title_response.double_clicked() {
+                                                play_path = Some(item_view.item.canonical_path.clone());
+                                            } else if title_response.clicked() {
+                                                select_item = Some(item_view.clone());
+                                            }
+                                        });
+
+                                        ui.allocate_ui(Vec2::new(60.0, 24.0), |ui| {
+                                            let type_label = match item_view.item.media_type {
+                                                MediaType::Video => "Video",
+                                                MediaType::Audio => "Audio",
+                                            };
+                                            ui.label(RichText::new(type_label).color(Color32::from_gray(160)));
+                                        });
+
+                                        ui.allocate_ui(Vec2::new(70.0, 24.0), |ui| {
+                                            let codec = item_view
+                                                .metadata
+                                                .as_ref()
+                                                .and_then(|m| {
+                                                    m.video_codec.as_deref().or(m.audio_codec.as_deref())
+                                                })
+                                                .unwrap_or(&item_view.item.file_extension);
+                                            ui.label(RichText::new(codec.to_uppercase()).color(Color32::from_gray(160)));
+                                        });
+
+                                        ui.allocate_ui(Vec2::new(75.0, 24.0), |ui| {
+                                            let dur_str = item_view
+                                                .metadata
+                                                .as_ref()
+                                                .map(|m| format_timestamp(m.duration_ms as f64 / 1000.0))
+                                                .unwrap_or_else(|| "-".to_string());
+                                            ui.label(RichText::new(dur_str).monospace().color(Color32::from_gray(160)));
+                                        });
+
+                                        ui.allocate_ui(Vec2::new(75.0, 24.0), |ui| {
+                                            ui.label(
+                                                RichText::new(format_file_size(item_view.item.file_size))
+                                                    .color(Color32::from_gray(160)),
+                                            );
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            if ui.button("▶ Play").clicked() {
+                                                play_path = Some(item_view.item.canonical_path.clone());
+                                            }
+                                            if ui
+                                                .button("➕")
+                                                .on_hover_text("Enqueue to Playlist")
+                                                .clicked()
+                                            {
+                                                enqueue_path = Some(item_view.item.canonical_path.clone());
+                                            }
+                                            if ui.button("ℹ").on_hover_text("View Details").clicked() {
+                                                select_item = Some(item_view.clone());
+                                            }
+                                            if ui.button("⋮").on_hover_text("More actions").clicked() {
+                                                self.library_context_item = Some(item_view.clone());
+                                                self.show_library_context_menu = true;
+                                            }
+                                        });
+                                    });
+                                });
+                        }
                     });
             }
 
