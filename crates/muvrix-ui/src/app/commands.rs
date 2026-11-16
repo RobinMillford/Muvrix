@@ -511,8 +511,12 @@ impl MuvrixApp {
 
     pub fn apply_equalizer_settings(&mut self) {
         self.equalizer_settings.sync_gains_to_bands();
-        let _ =
-            EqualizerManager::apply_to_handle(self.controller.handle(), &self.equalizer_settings);
+        let needs_pan = self.audio_channels.needs_pan_filter();
+        let mut eq = self.equalizer_settings.clone();
+        if self.volume_normalization {
+            eq.dynaudnorm = true;
+        }
+        let _ = EqualizerManager::apply_unified_to_handle(self.controller.handle(), &eq, needs_pan);
         self.save_media_settings();
     }
 
@@ -553,17 +557,12 @@ impl MuvrixApp {
         let _ = self
             .controller
             .set_audio_delay(self.default_audio_delay_ms as f64 / 1000.0);
-        let mut filters = Vec::new();
+        let needs_pan = self.audio_channels.needs_pan_filter();
+        let mut eq = self.equalizer_settings.clone();
         if self.volume_normalization {
-            filters.push("dynaudnorm");
+            eq.dynaudnorm = true;
         }
-        if self.audio_channels.needs_pan_filter() {
-            filters.push("pan=[stereo|c0=c1|c1=c0]");
-        }
-        let _ = self
-            .controller
-            .handle()
-            .set_property_string("af", &filters.join(","));
+        let _ = EqualizerManager::apply_unified_to_handle(self.controller.handle(), &eq, needs_pan);
     }
 
     /// Exports current application configuration to a user-selected XML backup file.

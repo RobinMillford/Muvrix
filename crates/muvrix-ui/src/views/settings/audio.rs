@@ -1,30 +1,738 @@
-use eframe::egui::{self, Color32, RichText};
-use muvrix_player::equalizer::{EqualizerManager, EqualizerPreset, EQ_FREQUENCIES};
+use eframe::egui::{self, Color32, RichText, Sense, StrokeKind};
+use muvrix_player::equalizer::{
+    Bs2bPreset, EqualizerManager, EqualizerPreset, EqualizerSettings, EQ_FREQUENCIES,
+};
 use muvrix_player::AudioChannelsSetting;
 
 use crate::app::MuvrixApp;
 use crate::branding::BrandPalette;
 
+/// Renders a spline-interpolated, mathematically calibrated frequency response curve
+/// for the 10-band peaking biquad equalizer cascade across 20 Hz to 20 kHz.
+fn render_eq_frequency_response_curve(ui: &mut egui::Ui, eq: &EqualizerSettings) {
+    let height = 120.0;
+    let width = ui.available_width().max(320.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    // Obsidian Dark canvas
+    painter.rect_filled(rect, 4.0, Color32::from_rgb(8, 13, 18));
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(24, 33, 43)),
+        StrokeKind::Inside,
+    );
+
+    let left = rect.left() + 40.0;
+    let right = rect.right() - 14.0;
+    let top = rect.top() + 10.0;
+    let bottom = rect.bottom() - 20.0;
+    let plot_w = (right - left).max(10.0);
+    let plot_h = (bottom - top).max(10.0);
+    let zero_y = top + plot_h * 0.5;
+
+    // dB grid lines: +12, +6, 0, -6, -12
+    let db_steps = [
+        (12.0_f64, "+12"),
+        (6.0_f64, "+6"),
+        (0.0_f64, "0dB"),
+        (-6.0_f64, "-6"),
+        (-12.0_f64, "-12"),
+    ];
+    for &(db, label) in &db_steps {
+        let norm_y = (12.0 - db) / 24.0;
+        let y = top + plot_h * norm_y as f32;
+        let is_zero = db == 0.0;
+        let stroke_color = if is_zero {
+            Color32::from_rgba_unmultiplied(197, 243, 106, 110)
+        } else {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 18)
+        };
+        painter.line_segment(
+            [egui::pos2(left, y), egui::pos2(right, y)],
+            egui::Stroke::new(if is_zero { 1.5_f32 } else { 0.75_f32 }, stroke_color),
+        );
+        painter.text(
+            egui::pos2(rect.left() + 34.0, y),
+            egui::Align2::RIGHT_CENTER,
+            label,
+            egui::FontId::monospace(9.0),
+            if is_zero {
+                Color32::from_rgb(197, 243, 106)
+            } else {
+                Color32::from_gray(120)
+            },
+        );
+    }
+
+    // Logarithmic frequency grid lines and labels: 20 Hz to 20 kHz
+    let freq_labels: [(f64, &'static str); 11] = [
+        (20.0, "20"),
+        (50.0, "50"),
+        (100.0, "100"),
+        (250.0, "250"),
+        (500.0, "500"),
+        (1000.0, "1k"),
+        (2000.0, "2k"),
+        (4000.0, "4k"),
+        (8000.0, "8k"),
+        (16000.0, "16k"),
+        (20000.0, "20k"),
+    ];
+    let log_min = 20.0f64.log10();
+    let log_max = 20000.0f64.log10();
+
+    for &(f, label) in &freq_labels {
+        let t = ((f.log10() - log_min) / (log_max - log_min)).clamp(0.0, 1.0) as f32;
+        let x = left + plot_w * t;
+        painter.line_segment(
+            [egui::pos2(x, top), egui::pos2(x, bottom)],
+            egui::Stroke::new(0.5_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 18)),
+        );
+        painter.text(
+            egui::pos2(x, bottom + 10.0),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::monospace(9.0),
+            Color32::from_gray(130),
+        );
+    }
+
+    // Sample frequency curve points (128 points for smooth biquad rendering)
+    let curve_points = eq.frequency_response_curve(128);
+    let mut screen_points = Vec::with_capacity(curve_points.len());
+
+    for (freq, gain) in &curve_points {
+        let t = ((freq.log10() - log_min) / (log_max - log_min)).clamp(0.0, 1.0) as f32;
+        let x = left + plot_w * t;
+        let norm_y = ((12.0 - gain) / 24.0).clamp(0.0, 1.0) as f32;
+        let y = top + plot_h * norm_y;
+        screen_points.push(egui::pos2(x, y));
+    }
+
+    // Shaded fill between 0 dB baseline and response curve
+    if screen_points.len() > 1 {
+        let mut fill_mesh = egui::Mesh::default();
+        let fill_color = Color32::from_rgba_unmultiplied(197, 243, 106, 26);
+        for i in 0..screen_points.len() - 1 {
+            let p1 = screen_points[i];
+            let p2 = screen_points[i + 1];
+            let b1 = egui::pos2(p1.x, zero_y);
+            let b2 = egui::pos2(p2.x, zero_y);
+
+            let idx = fill_mesh.vertices.len() as u32;
+            fill_mesh.vertices.push(egui::epaint::Vertex {
+                pos: p1,
+                uv: egui::epaint::WHITE_UV,
+                color: fill_color,
+            });
+            fill_mesh.vertices.push(egui::epaint::Vertex {
+                pos: p2,
+                uv: egui::epaint::WHITE_UV,
+                color: fill_color,
+            });
+            fill_mesh.vertices.push(egui::epaint::Vertex {
+                pos: b2,
+                uv: egui::epaint::WHITE_UV,
+                color: fill_color,
+            });
+            fill_mesh.vertices.push(egui::epaint::Vertex {
+                pos: b1,
+                uv: egui::epaint::WHITE_UV,
+                color: fill_color,
+            });
+            fill_mesh.add_triangle(idx, idx + 1, idx + 2);
+            fill_mesh.add_triangle(idx, idx + 2, idx + 3);
+        }
+        painter.add(egui::Shape::mesh(fill_mesh));
+
+        // Response curve polyline in Electric Lime
+        painter.add(egui::Shape::line(
+            screen_points,
+            egui::Stroke::new(2.0_f32, Color32::from_rgb(197, 243, 106)),
+        ));
+    }
+
+    // Interactive hover crosshair and readout
+    if let Some(hover_pos) = response.hover_pos() {
+        if hover_pos.x >= left
+            && hover_pos.x <= right
+            && hover_pos.y >= top
+            && hover_pos.y <= bottom
+        {
+            let t = ((hover_pos.x - left) / plot_w).clamp(0.0, 1.0) as f64;
+            let hovered_freq = 10.0f64.powf(log_min + t * (log_max - log_min));
+            let hovered_gain = eq.cumulative_response_at_freq(hovered_freq);
+            let norm_y = ((12.0 - hovered_gain) / 24.0).clamp(0.0, 1.0) as f32;
+            let curve_y = top + plot_h * norm_y;
+
+            // Crosshair guidelines
+            painter.line_segment(
+                [
+                    egui::pos2(hover_pos.x, top),
+                    egui::pos2(hover_pos.x, bottom),
+                ],
+                egui::Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 70)),
+            );
+            painter.line_segment(
+                [egui::pos2(left, curve_y), egui::pos2(right, curve_y)],
+                egui::Stroke::new(0.75_f32, Color32::from_rgba_unmultiplied(197, 243, 106, 90)),
+            );
+            painter.circle_filled(
+                egui::pos2(hover_pos.x, curve_y),
+                3.5,
+                Color32::from_rgb(197, 243, 106),
+            );
+
+            // Frequency and Gain pill badge
+            let text = format!("{:.0} Hz | {:+.1} dB", hovered_freq, hovered_gain);
+            let pill_pos = egui::pos2(
+                (hover_pos.x + 8.0).min(right - 95.0),
+                (curve_y - 20.0).max(top + 4.0),
+            );
+            let pill_rect = egui::Rect::from_min_size(pill_pos, egui::vec2(95.0, 16.0));
+            painter.rect_filled(pill_rect, 3.0, Color32::from_rgb(24, 33, 43));
+            painter.rect_stroke(
+                pill_rect,
+                3.0,
+                egui::Stroke::new(1.0_f32, Color32::from_rgb(197, 243, 106)),
+                StrokeKind::Inside,
+            );
+            painter.text(
+                pill_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                text,
+                egui::FontId::monospace(9.5),
+                Color32::from_rgb(244, 245, 240),
+            );
+        }
+    }
+}
+
 impl MuvrixApp {
     pub(crate) fn render_settings_audio(&mut self, ui: &mut egui::Ui) {
-        // Section 1: Audio Channel Routing & Output Balance
+        // =====================================================================
+        // SECTION 1: 10-Band Parametric Equalizer & Interactive Frequency Curve
+        // =====================================================================
         ui.group(|ui| {
             ui.set_width(ui.available_width());
             ui.label(
-                RichText::new("1. Audio Channel Routing")
+                RichText::new("1. 10-Band Parametric Equalizer & Frequency Response Curve")
+                    .strong()
+                    .size(14.0)
+                    .color(Color32::from_rgb(95, 185, 255)),
+            );
+            ui.label(
+                RichText::new(
+                    "High-fidelity peaking biquad equalizer with real-time transfer function visualization from 20 Hz to 20 kHz.",
+                )
+                .size(12.0)
+                .color(Color32::from_gray(160)),
+            );
+
+            ui.add_space(4.0);
+
+            // Diagnostics & Headroom status
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("DSP Filter Engine:")
+                        .size(11.0)
+                        .color(Color32::from_gray(140)),
+                );
+                ui.label(
+                    RichText::new("FFmpeg Biquad Cascade / libmpv af")
+                        .monospace()
+                        .size(11.0)
+                        .color(Color32::from_rgb(147, 197, 253)),
+                );
+                if self.equalizer_settings.has_clipping_risk() {
+                    ui.label(
+                        RichText::new("⚠️ Digital Clipping Risk")
+                            .size(11.0)
+                            .color(Color32::from_rgb(251, 191, 36)),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new("✓ Headroom Safe")
+                            .size(11.0)
+                            .color(Color32::from_rgb(134, 239, 172)),
+                    );
+                }
+            });
+
+            ui.add_space(6.0);
+
+            let mut eq_changed = false;
+
+            ui.horizontal(|ui| {
+                if ui
+                    .checkbox(
+                        &mut self.equalizer_settings.is_enabled,
+                        "Enable 10-Band Equalizer",
+                    )
+                    .changed()
+                {
+                    eq_changed = true;
+                }
+            });
+
+            ui.add_space(4.0);
+
+            // Preset selector
+            ui.horizontal(|ui| {
+                ui.label("EQ Preset: ");
+                let preset_label = self.equalizer_settings.active_preset.as_str();
+                egui::ComboBox::from_id_salt("eq_preset_combo")
+                    .selected_text(preset_label)
+                    .show_ui(ui, |ui| {
+                        let presets = [
+                            EqualizerPreset::Flat,
+                            EqualizerPreset::BassBoost,
+                            EqualizerPreset::BassReduction,
+                            EqualizerPreset::TrebleBoost,
+                            EqualizerPreset::TrebleReduction,
+                            EqualizerPreset::VocalClarity,
+                            EqualizerPreset::Rock,
+                            EqualizerPreset::Classical,
+                            EqualizerPreset::Electronic,
+                            EqualizerPreset::Cinema,
+                        ];
+                        for p in presets {
+                            if ui
+                                .selectable_label(
+                                    self.equalizer_settings.active_preset == p,
+                                    p.as_str(),
+                                )
+                                .clicked()
+                            {
+                                self.equalizer_settings.active_preset = p;
+                                self.equalizer_settings.gains = p.default_gains();
+                                if p == EqualizerPreset::Flat {
+                                    self.equalizer_settings.preamp_db = 0.0;
+                                }
+                                eq_changed = true;
+                            }
+                        }
+                    });
+            });
+
+            ui.add_space(4.0);
+
+            // Headroom Warning and Auto-Attenuate button
+            if self.equalizer_settings.has_clipping_risk() {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(
+                            "⚠️ Positive EQ gains may cause digital clipping with current preamp.",
+                        )
+                        .color(Color32::from_rgb(251, 191, 36))
+                        .size(11.5),
+                    );
+                    let safe_preamp = self.equalizer_settings.calculate_safe_preamp();
+                    if ui
+                        .button(format!("Auto-Attenuate Preamp ({:.1} dB)", safe_preamp))
+                        .clicked()
+                    {
+                        self.equalizer_settings.preamp_db = safe_preamp;
+                        eq_changed = true;
+                    }
+                });
+            }
+
+            // Preamp Slider
+            ui.horizontal(|ui| {
+                ui.label("Preamp Gain: ");
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.equalizer_settings.preamp_db, -12.0..=12.0)
+                            .text("dB"),
+                    )
+                    .changed()
+                {
+                    if self.equalizer_settings.active_preset != EqualizerPreset::Custom {
+                        self.equalizer_settings.active_preset = EqualizerPreset::Custom;
+                    }
+                    eq_changed = true;
+                }
+                ui.add_space(10.0);
+                ui.checkbox(&mut self.eq_show_q_factors, "Show Parametric Q Controls");
+            });
+
+            ui.add_space(6.0);
+
+            // -----------------------------------------------------------------
+            // D3.1: Interactive Frequency Response Curve
+            // -----------------------------------------------------------------
+            ui.label(
+                RichText::new("Frequency Response (20 Hz – 20 kHz cumulative magnitude):")
+                    .size(11.0)
+                    .color(Color32::from_gray(160)),
+            );
+            render_eq_frequency_response_curve(ui, &self.equalizer_settings);
+
+            ui.add_space(8.0);
+
+            // 10 Frequency Band Sliders
+            ui.horizontal(|ui| {
+                for (i, &freq) in EQ_FREQUENCIES.iter().enumerate() {
+                    ui.vertical(|ui| {
+                        let label = if freq >= 1000.0 {
+                            format!("{:.0}k", freq / 1000.0)
+                        } else {
+                            format!("{:.0}", freq)
+                        };
+                        ui.label(RichText::new(&label).size(10.5));
+                        let slider =
+                            egui::Slider::new(&mut self.equalizer_settings.gains[i], -12.0..=12.0)
+                                .vertical()
+                                .show_value(false);
+                        if ui.add_sized([24.0, 85.0], slider).changed() {
+                            self.equalizer_settings.active_preset = EqualizerPreset::Custom;
+                            eq_changed = true;
+                        }
+                        ui.label(
+                            RichText::new(format!("{:.1}", self.equalizer_settings.gains[i]))
+                                .size(9.5),
+                        );
+                    });
+                }
+            });
+
+            // Parametric Q Controls (when toggled)
+            if self.eq_show_q_factors {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Band Q-Factors (Bandwidth: Higher = Sharper peak):")
+                        .size(11.0)
+                        .color(Color32::from_gray(160)),
+                );
+                ui.horizontal(|ui| {
+                    for (i, &freq) in EQ_FREQUENCIES.iter().enumerate() {
+                        ui.vertical(|ui| {
+                            let label = if freq >= 1000.0 {
+                                format!("{:.0}k", freq / 1000.0)
+                            } else {
+                                format!("{:.0}", freq)
+                            };
+                            ui.label(RichText::new(&label).size(9.5));
+                            let mut q = self
+                                .equalizer_settings
+                                .bands
+                                .get(i)
+                                .map(|b| b.q_factor)
+                                .unwrap_or(1.414);
+                            if ui
+                                .add(egui::DragValue::new(&mut q).range(0.1..=10.0).speed(0.05))
+                                .changed()
+                            {
+                                if let Some(b) = self.equalizer_settings.bands.get_mut(i) {
+                                    b.q_factor = q;
+                                    self.equalizer_settings.active_preset = EqualizerPreset::Custom;
+                                    eq_changed = true;
+                                }
+                            }
+                        });
+                    }
+                });
+            }
+
+            ui.add_space(6.0);
+            if ui.button("Reset Equalizer to Flat (0 dB)").clicked() {
+                self.equalizer_settings.gains = [0.0; 10];
+                self.equalizer_settings.preamp_db = 0.0;
+                self.equalizer_settings.active_preset = EqualizerPreset::Flat;
+                eq_changed = true;
+            }
+
+            if eq_changed {
+                self.apply_equalizer_settings();
+            }
+        });
+
+        ui.add_space(6.0);
+
+        // =====================================================================
+        // SECTION 2: Headphone Crossfeed (Bauer BS2B)
+        // =====================================================================
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new("2. Headphone Crossfeed (Bauer BS2B)")
                     .strong()
                     .size(14.0)
                     .color(BrandPalette::ELECTRIC_LIME),
             );
             ui.label(
                 RichText::new(
-                    "Configure speaker channel downmix policy and stereo channel orientation.",
+                    "Blends stereo channels using binaural delay and frequency attenuation to eliminate listener fatigue on headphones.",
                 )
                 .size(12.0)
                 .color(BrandPalette::MUTED_TEXT),
             );
             ui.add_space(4.0);
 
+            let mut crossfeed_changed = false;
+            ui.horizontal(|ui| {
+                if ui
+                    .checkbox(
+                        &mut self.equalizer_settings.crossfeed_enabled,
+                        "Enable Bauer Headphone Crossfeed",
+                    )
+                    .changed()
+                {
+                    crossfeed_changed = true;
+                }
+
+                ui.add_space(14.0);
+                ui.label("Crossfeed Preset: ");
+                let cur_preset = self.equalizer_settings.crossfeed_preset;
+                egui::ComboBox::from_id_salt("bs2b_preset_combo")
+                    .selected_text(cur_preset.as_str())
+                    .show_ui(ui, |ui| {
+                        for p in [Bs2bPreset::Default, Bs2bPreset::ChuMoy, Bs2bPreset::JanMeier] {
+                            if ui.selectable_label(cur_preset == p, p.as_str()).clicked() {
+                                self.equalizer_settings.crossfeed_preset = p;
+                                crossfeed_changed = true;
+                            }
+                        }
+                    });
+            });
+
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(format!(
+                    "Active Profile: {}",
+                    self.equalizer_settings.crossfeed_preset.description()
+                ))
+                .italics()
+                .size(11.0)
+                .color(Color32::from_gray(160)),
+            );
+
+            if crossfeed_changed {
+                self.apply_equalizer_settings();
+            }
+        });
+
+        ui.add_space(6.0);
+
+        // =====================================================================
+        // SECTION 3: Dynamic Range Compression & Gain Reduction HUD
+        // =====================================================================
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new("3. Dynamic Range Normalization & Gain Reduction HUD")
+                    .strong()
+                    .size(14.0)
+                    .color(BrandPalette::ELECTRIC_LIME),
+            );
+            ui.label(
+                RichText::new(
+                    "Real-time dynamics monitoring and telemetry for dynamic audio normalization.",
+                )
+                .size(12.0)
+                .color(BrandPalette::MUTED_TEXT),
+            );
+            ui.add_space(4.0);
+
+            if ui
+                .checkbox(
+                    &mut self.volume_normalization,
+                    "Volume Normalization (dynaudnorm)",
+                )
+                .on_hover_text(
+                    "Smooth out extreme volume fluctuations between loud action and quiet dialogue.",
+                )
+                .changed()
+            {
+                self.sync_audio_preferences();
+                self.save_media_settings();
+            }
+
+            let is_norm_active = self.volume_normalization || self.equalizer_settings.dynaudnorm;
+            let telemetry = self.controller.dynamics_telemetry(is_norm_active);
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if telemetry.normalization_active {
+                    ui.label(
+                        RichText::new("● DYNAMICS ACTIVE")
+                            .strong()
+                            .size(11.0)
+                            .color(BrandPalette::ELECTRIC_LIME),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new("○ DYNAMICS INACTIVE")
+                            .size(11.0)
+                            .color(Color32::from_gray(140)),
+                    );
+                }
+
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new(&telemetry.status_message)
+                        .size(11.5)
+                        .color(Color32::from_gray(180)),
+                );
+            });
+
+            ui.add_space(6.0);
+
+            // Calibrated Gain Reduction Meter (0 dB down to -24 dB)
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Gain Reduction:").strong().size(11.5));
+                let gr_db = telemetry.gain_reduction_db.unwrap_or(0.0).clamp(-24.0, 0.0);
+                let meter_width = 240.0;
+                let meter_height = 14.0;
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(meter_width, meter_height),
+                    Sense::hover(),
+                );
+                let painter = ui.painter_at(rect);
+
+                // Meter background track
+                painter.rect_filled(rect, 3.0, Color32::from_rgb(16, 24, 32));
+                painter.rect_stroke(
+                    rect,
+                    3.0,
+                    egui::Stroke::new(1.0_f32, Color32::from_rgb(32, 43, 54)),
+                    StrokeKind::Inside,
+                );
+
+                if telemetry.normalization_active {
+                    let reduction_fraction = (-gr_db / 24.0).clamp(0.0, 1.0) as f32;
+                    if reduction_fraction > 0.005 {
+                        let fill_width = meter_width * reduction_fraction;
+                        let fill_rect = egui::Rect::from_min_max(
+                            egui::pos2(rect.max.x - fill_width, rect.min.y),
+                            egui::pos2(rect.max.x, rect.max.y),
+                        );
+                        let fill_color = if gr_db < -12.0 {
+                            Color32::from_rgb(239, 68, 68) // red
+                        } else if gr_db < -6.0 {
+                            Color32::from_rgb(245, 158, 11) // amber
+                        } else {
+                            BrandPalette::ELECTRIC_LIME // lime green
+                        };
+                        painter.rect_filled(fill_rect, 2.0, fill_color);
+                    }
+                }
+
+                // Numeric readout
+                if let Some(val) = telemetry.gain_reduction_db {
+                    ui.label(
+                        RichText::new(format!("{:.1} dB", val))
+                            .strong()
+                            .size(11.5)
+                            .color(BrandPalette::ELECTRIC_LIME),
+                    );
+                } else if telemetry.normalization_active {
+                    ui.label(
+                        RichText::new("0.0 dB (Filter Active)")
+                            .size(11.0)
+                            .color(BrandPalette::ELECTRIC_LIME),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new("0.0 dB (Bypassed)")
+                            .size(11.0)
+                            .color(Color32::from_gray(140)),
+                    );
+                }
+            });
+
+            // Meter scale ticks
+            ui.horizontal(|ui| {
+                ui.add_space(95.0);
+                ui.label(RichText::new("-24dB").size(9.0).color(Color32::from_gray(120)));
+                ui.add_space(34.0);
+                ui.label(RichText::new("-18dB").size(9.0).color(Color32::from_gray(120)));
+                ui.add_space(34.0);
+                ui.label(RichText::new("-12dB").size(9.0).color(Color32::from_gray(120)));
+                ui.add_space(34.0);
+                ui.label(RichText::new("-6dB").size(9.0).color(Color32::from_gray(120)));
+                ui.add_space(34.0);
+                ui.label(RichText::new("0dB").size(9.0).color(Color32::from_gray(120)));
+            });
+
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Architecture Note: Peak suppression and dynamic normalization are applied in real-time via FFmpeg dynaudnorm. Direct per-frame gain telemetry is monitored when exposed by the filter graph.")
+                    .italics()
+                    .size(10.5)
+                    .color(Color32::from_gray(140)),
+            );
+        });
+
+        ui.add_space(6.0);
+
+        // =====================================================================
+        // SECTION 4: Seamless Audio & Gapless Transitions
+        // =====================================================================
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new("4. Seamless Audio & Gapless Transitions")
+                    .strong()
+                    .size(14.0)
+                    .color(BrandPalette::ELECTRIC_LIME),
+            );
+            ui.label(
+                RichText::new(
+                    "Eliminates audible dropouts and micro-gaps between sequential queue tracks with demuxer pre-caching.",
+                )
+                .size(12.0)
+                .color(BrandPalette::MUTED_TEXT),
+            );
+            ui.add_space(4.0);
+
+            let mut gapless = self.controller.gapless_audio();
+            if ui
+                .checkbox(&mut gapless, "Enable Gapless Audio Playback")
+                .on_hover_text(
+                    "Keep audio hardware sinks continuously initialized across track transitions.",
+                )
+                .changed()
+            {
+                let mode = if gapless { "yes" } else { "no" };
+                let _ = self.controller.set_gapless_audio(mode);
+            }
+
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new("Demuxer queue prefetch: Active (10.0s readahead window)")
+                    .italics()
+                    .size(11.0)
+                    .color(Color32::from_gray(160)),
+            );
+        });
+
+        ui.add_space(6.0);
+
+        // =====================================================================
+        // SECTION 5: Audio Channel Routing & Device Management
+        // =====================================================================
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new("5. Audio Channel Routing & Output Device")
+                    .strong()
+                    .size(14.0)
+                    .color(BrandPalette::ELECTRIC_LIME),
+            );
+            ui.label(
+                RichText::new(
+                    "Configure speaker channel downmix policy, stereo orientation, and physical audio output routing.",
+                )
+                .size(12.0)
+                .color(BrandPalette::MUTED_TEXT),
+            );
+            ui.add_space(4.0);
+
+            // Channels dropdown
             let mut current_channels = self.audio_channels;
             egui::ComboBox::from_id_salt("audio_channels_dropdown")
                 .selected_text(current_channels.label())
@@ -55,404 +763,150 @@ impl MuvrixApp {
                 self.save_media_settings();
             }
 
-            ui.add_space(2.0);
+            ui.add_space(4.0);
+
+            // Pitch correction & Background audio
+            ui.horizontal(|ui| {
+                if ui
+                    .checkbox(
+                        &mut self.audio_pitch_correction,
+                        "Audio Pitch Correction (scaletempo2)",
+                    )
+                    .on_hover_text(
+                        "Maintain natural vocal pitch across speed changes (0.25x – 4.0x).",
+                    )
+                    .changed()
+                {
+                    self.sync_audio_preferences();
+                    self.save_media_settings();
+                }
+
+                ui.add_space(10.0);
+                if ui
+                    .checkbox(
+                        &mut self.background_audio,
+                        "Continue Audio Playback in Background",
+                    )
+                    .on_hover_text(
+                        "Keep playing audio while the desktop window is minimized or unfocused.",
+                    )
+                    .changed()
+                {
+                    self.save_media_settings();
+                }
+            });
+
+            ui.add_space(6.0);
+
+            // Preferred Languages & Audio Delay
             ui.label(
-                RichText::new(format!(
-                    "Active policy: {}",
-                    self.audio_channels.description()
-                ))
-                .italics()
-                .size(11.0)
-                .color(Color32::from_gray(160)),
+                RichText::new(
+                    "Preferred Audio Languages (comma-separated ISO-639 codes, e.g. en, eng, ja, jpn):",
+                )
+                .size(11.5)
+                .color(BrandPalette::MUTED_TEXT),
             );
+            ui.horizontal(|ui| {
+                let mut changed = false;
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.preferred_audio_languages)
+                            .hint_text("en, eng, ja, jpn")
+                            .desired_width(260.0),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+                if ui.button("Apply Languages").clicked() || changed {
+                    self.sync_audio_preferences();
+                    self.save_media_settings();
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Audio Delay Synchronization:")
+                        .size(12.0)
+                        .strong(),
+                );
+                let mut delay = self.default_audio_delay_ms;
+                if ui
+                    .add(egui::Slider::new(&mut delay, -5000..=5000).text("ms delay offset"))
+                    .changed()
+                {
+                    self.default_audio_delay_ms = delay;
+                    self.sync_audio_preferences();
+                    self.save_media_settings();
+                }
+                if ui.button("Reset (0 ms)").clicked() {
+                    self.default_audio_delay_ms = 0;
+                    self.sync_audio_preferences();
+                    self.save_media_settings();
+                }
+            });
+
+            ui.add_space(6.0);
+
+            // Volume Boost Ceiling
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Volume Boost Ceiling:").strong());
+                let mut boost = self.equalizer_settings.volume_boost.clamp(100.0, 130.0);
+                if ui
+                    .add(
+                        egui::Slider::new(&mut boost, 100.0..=130.0)
+                            .text("% (software gain)"),
+                    )
+                    .changed()
+                {
+                    self.equalizer_settings.volume_boost = boost;
+                    let _ = self.controller.set_volume_boost(boost);
+                    let _ = self.controller.set_volume(self.controller.volume());
+                    self.save_media_settings();
+                }
+                ui.label(format!(
+                    "Current ceiling: {:.0}%",
+                    self.controller.volume_boost_max()
+                ));
+            });
+
+            ui.add_space(6.0);
+
+            // Audio Output Device
+            ui.label(RichText::new("Audio Output Device:").strong().size(12.5));
+            ui.horizontal(|ui| {
+                let current_dev_desc = self
+                    .audio_devices
+                    .iter()
+                    .find(|d| d.name == self.selected_audio_device)
+                    .map(|d| d.description.as_str())
+                    .unwrap_or("Auto-select device");
+
+                egui::ComboBox::from_id_salt("audio_output_device_combo")
+                    .selected_text(current_dev_desc)
+                    .show_ui(ui, |ui| {
+                        for dev in &self.audio_devices {
+                            if ui
+                                .selectable_label(
+                                    self.selected_audio_device == dev.name,
+                                    &dev.description,
+                                )
+                                .clicked()
+                            {
+                                self.selected_audio_device = dev.name.clone();
+                                let _ = EqualizerManager::set_audio_device_with_fallback(
+                                    self.controller.handle(),
+                                    &dev.name,
+                                );
+                            }
+                        }
+                    });
+
+                if ui.button("Refresh Devices").clicked() {
+                    self.refresh_audio_devices();
+                }
+            });
         });
-
-        ui.add_space(6.0);
-
-        // Section 2: Audio Processing & Normalization
-        ui.group(|ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(
-                            RichText::new("2. Audio Processing & Normalization")
-                                .strong()
-                                .size(14.0)
-                                .color(BrandPalette::ELECTRIC_LIME),
-                        );
-                        ui.add_space(4.0);
-
-                        if ui
-                            .checkbox(
-                                &mut self.volume_normalization,
-                                "Volume Normalization (dynaudnorm)",
-                            )
-                            .on_hover_text(
-                                "Smooth out extreme volume fluctuations between loud action and quiet dialogue.",
-                            )
-                            .changed()
-                        {
-                            self.sync_audio_preferences();
-                            self.save_media_settings();
-                        }
-
-                        if ui
-                            .checkbox(
-                                &mut self.audio_pitch_correction,
-                                "Audio Pitch Correction (scaletempo2)",
-                            )
-                            .on_hover_text(
-                                "Maintain natural vocal pitch across speed changes (0.25x – 4.0x).",
-                            )
-                            .changed()
-                        {
-                            self.sync_audio_preferences();
-                            self.save_media_settings();
-                        }
-
-                        if ui
-                            .checkbox(
-                                &mut self.background_audio,
-                                "Continue Audio Playback in Background",
-                            )
-                            .on_hover_text(
-                                "Keep playing audio while the desktop window is minimized or unfocused.",
-                            )
-                            .changed()
-                        {
-                            self.save_media_settings();
-                        }
-                    });
-
-        ui.add_space(6.0);
-
-        // Section 3: Preferred Languages & Audio Delay
-        ui.group(|ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(
-                            RichText::new("3. Language Selection & Track Sync")
-                                .strong()
-                                .size(14.0)
-                                .color(BrandPalette::ELECTRIC_LIME),
-                        );
-                        ui.label(
-                            RichText::new(
-                                "Preferred Audio Languages (comma-separated ISO-639 codes, e.g. en, eng, ja, jpn):",
-                            )
-                            .size(11.5)
-                            .color(BrandPalette::MUTED_TEXT),
-                        );
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            let mut changed = false;
-                            if ui
-                                .add(
-                                    egui::TextEdit::singleline(
-                                        &mut self.preferred_audio_languages,
-                                    )
-                                    .hint_text("en, eng, ja, jpn")
-                                    .desired_width(260.0),
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                            if ui.button("Apply Languages").clicked() || changed {
-                                self.sync_audio_preferences();
-                                self.save_media_settings();
-                            }
-                        });
-
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new("Audio Delay Synchronization:")
-                                .size(12.0)
-                                .strong(),
-                        );
-                        ui.horizontal(|ui| {
-                            let mut delay = self.default_audio_delay_ms;
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut delay, -5000..=5000)
-                                        .text("ms delay offset"),
-                                )
-                                .changed()
-                            {
-                                self.default_audio_delay_ms = delay;
-                                self.sync_audio_preferences();
-                                self.save_media_settings();
-                            }
-                            if ui.button("Reset (0 ms)").clicked() {
-                                self.default_audio_delay_ms = 0;
-                                self.sync_audio_preferences();
-                                self.save_media_settings();
-                            }
-                        });
-                    });
-
-        ui.add_space(6.0);
-
-        // Section 4: Audio Equalizer & Output Device Routing
-        ui.group(|ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(
-                            RichText::new("4. 10-Band Parametric Equalizer & Audio DSP Routing")
-                                .strong()
-                                .size(14.0)
-                                .color(Color32::from_rgb(95, 185, 255)),
-                        );
-                        ui.label(
-                            RichText::new(
-                                "Configure 10-band peaking biquad equalizer filters with Q-factor shaping, dynamic audio normalization, delay synchronization, and physical output routing.",
-                            )
-                            .size(12.0)
-                            .color(Color32::from_gray(160)),
-                        );
-
-                        ui.add_space(6.0);
-
-                        ui.group(|ui| {
-                            ui.label(RichText::new("Volume Boost Ceiling").strong());
-                            ui.horizontal(|ui| {
-                                let mut boost = self.equalizer_settings.volume_boost.clamp(100.0, 130.0);
-                                if ui
-                                    .add(
-                                        egui::Slider::new(&mut boost, 100.0..=130.0)
-                                            .text("% (software gain)"),
-                                    )
-                                    .changed()
-                                {
-                                    self.equalizer_settings.volume_boost = boost;
-                                    let _ = self.controller.set_volume_boost(boost);
-                                    let _ = self.controller.set_volume(self.controller.volume());
-                                    self.save_media_settings();
-                                }
-                                ui.label(format!(
-                                    "Current ceiling: {:.0}%",
-                                    self.controller.volume_boost_max()
-                                ));
-                            });
-                        });
-
-                        ui.add_space(6.0);
-
-                        // Capability Diagnostics Badges
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("DSP Engine:").size(11.0).color(Color32::from_gray(140)));
-                            ui.label(
-                                RichText::new("FFmpeg Biquad / libmpv af")
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(Color32::from_rgb(147, 197, 253)),
-                            );
-                            if self.equalizer_settings.has_clipping_risk() {
-                                ui.label(
-                                    RichText::new("⚠️ Digital Clipping Risk")
-                                        .size(11.0)
-                                        .color(Color32::from_rgb(251, 191, 36)),
-                                );
-                            } else {
-                                ui.label(
-                                    RichText::new("✓ Headroom Safe")
-                                        .size(11.0)
-                                        .color(Color32::from_rgb(134, 239, 172)),
-                                );
-                            }
-                        });
-
-                        ui.add_space(8.0);
-
-                        let mut eq_changed = false;
-
-                        ui.horizontal(|ui| {
-                            if ui.checkbox(&mut self.equalizer_settings.is_enabled, "Enable 10-Band Equalizer").changed() {
-                                eq_changed = true;
-                            }
-                            if ui.checkbox(&mut self.equalizer_settings.dynaudnorm, "Dynamic Audio Normalizer (dynaudnorm)").changed() {
-                                eq_changed = true;
-                            }
-                            if ui.checkbox(&mut self.equalizer_settings.pitch_correction, "Preserve Pitch (scaletempo2)").changed() {
-                                eq_changed = true;
-                            }
-                        });
-
-                        ui.add_space(4.0);
-
-                        // Presets
-                        ui.horizontal(|ui| {
-                            ui.label("EQ Preset: ");
-                            let preset_label = self.equalizer_settings.active_preset.as_str();
-                            egui::ComboBox::from_id_salt("eq_preset_combo")
-                                .selected_text(preset_label)
-                                .show_ui(ui, |ui| {
-                                    let presets = [
-                                        EqualizerPreset::Flat,
-                                        EqualizerPreset::BassBoost,
-                                        EqualizerPreset::BassReduction,
-                                        EqualizerPreset::TrebleBoost,
-                                        EqualizerPreset::TrebleReduction,
-                                        EqualizerPreset::VocalClarity,
-                                        EqualizerPreset::Rock,
-                                        EqualizerPreset::Classical,
-                                        EqualizerPreset::Electronic,
-                                        EqualizerPreset::Cinema,
-                                    ];
-                                    for p in presets {
-                                        if ui.selectable_label(self.equalizer_settings.active_preset == p, p.as_str()).clicked() {
-                                            self.equalizer_settings.active_preset = p;
-                                            self.equalizer_settings.gains = p.default_gains();
-                                            if p == EqualizerPreset::Flat {
-                                                self.equalizer_settings.preamp_db = 0.0;
-                                            }
-                                            eq_changed = true;
-                                        }
-                                    }
-                                });
-                        });
-
-                        ui.add_space(4.0);
-
-                        // Headroom Warning and Auto-Attenuate button
-                        if self.equalizer_settings.has_clipping_risk() {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("⚠️ Positive EQ gains may cause digital clipping with current preamp.")
-                                        .color(Color32::from_rgb(251, 191, 36))
-                                        .size(11.5),
-                                );
-                                let safe_preamp = self.equalizer_settings.calculate_safe_preamp();
-                                if ui.button(format!("Auto-Attenuate Preamp ({:.1} dB)", safe_preamp)).clicked() {
-                                    self.equalizer_settings.preamp_db = safe_preamp;
-                                    eq_changed = true;
-                                }
-                            });
-                        }
-
-                        // Preamp Slider
-                        ui.horizontal(|ui| {
-                            ui.label("Preamp Gain: ");
-                            if ui.add(egui::Slider::new(&mut self.equalizer_settings.preamp_db, -12.0..=12.0).text("dB")).changed() {
-                                if self.equalizer_settings.active_preset != EqualizerPreset::Custom {
-                                    self.equalizer_settings.active_preset = EqualizerPreset::Custom;
-                                }
-                                eq_changed = true;
-                            }
-                            ui.add_space(10.0);
-                            ui.checkbox(&mut self.eq_show_q_factors, "Show Parametric Q Controls");
-                        });
-
-                        ui.add_space(6.0);
-
-                        // 10 Frequency Band Sliders
-                        ui.horizontal(|ui| {
-                            for (i, &freq) in EQ_FREQUENCIES.iter().enumerate() {
-                                ui.vertical(|ui| {
-                                    let label = if freq >= 1000.0 {
-                                        format!("{:.0}k", freq / 1000.0)
-                                    } else {
-                                        format!("{:.0}", freq)
-                                    };
-                                    ui.label(RichText::new(&label).size(10.5));
-                                    let slider = egui::Slider::new(&mut self.equalizer_settings.gains[i], -12.0..=12.0)
-                                        .vertical()
-                                        .show_value(false);
-                                    if ui.add_sized([24.0, 90.0], slider).changed() {
-                                        self.equalizer_settings.active_preset = EqualizerPreset::Custom;
-                                        eq_changed = true;
-                                    }
-                                    ui.label(RichText::new(format!("{:.1}", self.equalizer_settings.gains[i])).size(9.5));
-                                });
-                            }
-                        });
-
-                        // Parametric Q Controls (when toggled)
-                        if self.eq_show_q_factors {
-                            ui.add_space(4.0);
-                            ui.label(RichText::new("Band Q-Factors (Bandwidth: Higher = Sharper peak):").size(11.0).color(Color32::from_gray(160)));
-                            ui.horizontal(|ui| {
-                                for (i, &freq) in EQ_FREQUENCIES.iter().enumerate() {
-                                    ui.vertical(|ui| {
-                                        let label = if freq >= 1000.0 {
-                                            format!("{:.0}k", freq / 1000.0)
-                                        } else {
-                                            format!("{:.0}", freq)
-                                        };
-                                        ui.label(RichText::new(&label).size(9.5));
-                                        let mut q = self.equalizer_settings.bands.get(i).map(|b| b.q_factor).unwrap_or(1.414);
-                                        if ui.add(egui::DragValue::new(&mut q).range(0.1..=10.0).speed(0.05)).changed() {
-                                            if let Some(b) = self.equalizer_settings.bands.get_mut(i) {
-                                                b.q_factor = q;
-                                                self.equalizer_settings.active_preset = EqualizerPreset::Custom;
-                                                eq_changed = true;
-                                            }
-                                        }
-                                    });
-                                }
-                            });
-                        }
-
-                        ui.add_space(6.0);
-                        ui.separator();
-                        ui.label(RichText::new("Audio DSP & Synchronization:").strong().size(12.5));
-
-                        ui.horizontal(|ui| {
-                            ui.label("Audio Delay: ");
-                            if ui.add(egui::Slider::new(&mut self.equalizer_settings.audio_delay, -2.0..=2.0).step_by(0.05).text("seconds")).changed() {
-                                eq_changed = true;
-                            }
-                            ui.add_space(10.0);
-                            ui.label("Channel Layout: ");
-                            let cur_layout = self.equalizer_settings.channel_layout.clone();
-                            egui::ComboBox::from_id_salt("eq_channel_layout_combo")
-                                .selected_text(&cur_layout)
-                                .show_ui(ui, |ui| {
-                                    for layout in ["auto", "stereo", "5.1", "7.1"] {
-                                        if ui.selectable_label(cur_layout == layout, layout).clicked() {
-                                            self.equalizer_settings.channel_layout = layout.to_string();
-                                            eq_changed = true;
-                                        }
-                                    }
-                                });
-                        });
-
-                        if eq_changed {
-                            self.apply_equalizer_settings();
-                        }
-
-                        ui.add_space(6.0);
-                        if ui.button("Reset Equalizer to Flat (0 dB)").clicked() {
-                            self.equalizer_settings.gains = [0.0; 10];
-                            self.equalizer_settings.preamp_db = 0.0;
-                            self.equalizer_settings.active_preset = EqualizerPreset::Flat;
-                            self.apply_equalizer_settings();
-                        }
-
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(4.0);
-
-                        // Audio Output Device
-                        ui.label(RichText::new("Audio Output Device:").strong().size(12.5));
-                        ui.horizontal(|ui| {
-                            let current_dev_desc = self.audio_devices
-                                .iter()
-                                .find(|d| d.name == self.selected_audio_device)
-                                .map(|d| d.description.as_str())
-                                .unwrap_or("Auto-select device");
-
-                            egui::ComboBox::from_id_salt("audio_output_device_combo")
-                                .selected_text(current_dev_desc)
-                                .show_ui(ui, |ui| {
-                                    for dev in &self.audio_devices {
-                                        if ui.selectable_label(self.selected_audio_device == dev.name, &dev.description).clicked() {
-                                            self.selected_audio_device = dev.name.clone();
-                                            let _ = EqualizerManager::set_audio_device_with_fallback(self.controller.handle(), &dev.name);
-                                        }
-                                    }
-                                });
-
-                            if ui.button("Refresh Devices").clicked() {
-                                self.refresh_audio_devices();
-                            }
-                        });
-                    });
     }
 }

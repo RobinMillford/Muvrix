@@ -9,7 +9,7 @@ use muvrix_core::database::DatabaseManager;
 use muvrix_core::history::HistoryStore;
 use muvrix_core::network::CredentialVault;
 use muvrix_core::thumbnails::ThumbnailCache;
-use muvrix_player::equalizer::{AudioDeviceInfo, EqualizerSettings};
+use muvrix_player::equalizer::{AudioDeviceInfo, EqualizerPreset, EqualizerSettings};
 use muvrix_player::shader::VideoAdjustmentSettings;
 use muvrix_player::{
     DecodePolicy, MpvHandle, MpvRenderContext, MpvStreamBridge, PlaybackController,
@@ -355,7 +355,11 @@ impl MuvrixApp {
             theme_mode: persisted.theme_mode,
             accent_color: persisted.accent_color,
             audio_channels: persisted.audio_channels,
-            volume_normalization: persisted.volume_normalization,
+            volume_normalization: if let Ok(norm) = std::env::var("MUVRIX_VOLUME_NORMALIZATION") {
+                norm == "1" || norm.eq_ignore_ascii_case("true")
+            } else {
+                persisted.volume_normalization
+            },
             audio_pitch_correction: persisted.audio_pitch_correction,
             preferred_audio_languages: persisted.preferred_audio_languages.clone(),
             default_audio_delay_ms: persisted.default_audio_delay_ms,
@@ -429,15 +433,77 @@ impl MuvrixApp {
                 persisted.anime4k_preset
             },
             anime4k_quality: persisted.anime4k_quality,
-            equalizer_settings: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref()
-                == Ok("equalizer")
-            {
-                EqualizerSettings {
-                    is_enabled: true,
-                    ..Default::default()
+            equalizer_settings: {
+                let mut eq = if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("equalizer")
+                    || std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("audio")
+                {
+                    EqualizerSettings {
+                        is_enabled: true,
+                        ..Default::default()
+                    }
+                } else {
+                    persisted.equalizer
+                };
+
+                if let Ok(preset_str) = std::env::var("MUVRIX_EQ_PRESET") {
+                    eq.is_enabled = true;
+                    match preset_str.to_lowercase().as_str() {
+                        "flat" => eq.apply_preset(EqualizerPreset::Flat),
+                        "bass_boost" | "bass" => eq.apply_preset(EqualizerPreset::BassBoost),
+                        "bass_reduction" => eq.apply_preset(EqualizerPreset::BassReduction),
+                        "treble_boost" | "treble" => eq.apply_preset(EqualizerPreset::TrebleBoost),
+                        "treble_reduction" => eq.apply_preset(EqualizerPreset::TrebleReduction),
+                        "vocal_clarity" | "vocal" => eq.apply_preset(EqualizerPreset::VocalClarity),
+                        "rock" => eq.apply_preset(EqualizerPreset::Rock),
+                        "classical" => eq.apply_preset(EqualizerPreset::Classical),
+                        "electronic" => eq.apply_preset(EqualizerPreset::Electronic),
+                        "cinema" => eq.apply_preset(EqualizerPreset::Cinema),
+                        _ => {}
+                    }
                 }
-            } else {
-                persisted.equalizer
+
+                if let Ok(gains_str) = std::env::var("MUVRIX_EQ_GAINS") {
+                    eq.is_enabled = true;
+                    let parts: Vec<f64> = gains_str
+                        .split(',')
+                        .filter_map(|s| s.trim().parse::<f64>().ok())
+                        .collect();
+                    for (i, &g) in parts.iter().take(10).enumerate() {
+                        eq.set_band_gain(i, g);
+                    }
+                }
+
+                if let Ok(preamp_str) = std::env::var("MUVRIX_EQ_PREAMP") {
+                    if let Ok(p) = preamp_str.parse::<f64>() {
+                        eq.preamp_db = p;
+                    }
+                }
+
+                if let Ok(bs2b_str) = std::env::var("MUVRIX_BS2B") {
+                    match bs2b_str.to_lowercase().as_str() {
+                        "off" | "0" | "false" => eq.crossfeed_enabled = false,
+                        "default" => {
+                            eq.crossfeed_enabled = true;
+                            eq.crossfeed_preset = muvrix_player::Bs2bPreset::Default;
+                        }
+                        "cmoy" | "chu_moy" => {
+                            eq.crossfeed_enabled = true;
+                            eq.crossfeed_preset = muvrix_player::Bs2bPreset::ChuMoy;
+                        }
+                        "jmeier" | "jan_meier" => {
+                            eq.crossfeed_enabled = true;
+                            eq.crossfeed_preset = muvrix_player::Bs2bPreset::JanMeier;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if let Ok(norm_str) = std::env::var("MUVRIX_VOLUME_NORMALIZATION") {
+                    let active = norm_str == "1" || norm_str.eq_ignore_ascii_case("true");
+                    eq.dynaudnorm = active;
+                }
+
+                eq
             },
             eq_show_q_factors: false,
             audio_devices: initial_audio_devices,

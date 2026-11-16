@@ -75,25 +75,29 @@ impl MuvrixApp {
             ui.separator();
             ui.add_space(8.0);
 
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.set_max_width(920.0);
-                    match self.settings_tab {
-                        SettingsTab::Subtitles => self.render_settings_subtitles(ui),
-                        SettingsTab::VideoEnhancement => self.render_settings_video(ui),
-                        SettingsTab::Audio | SettingsTab::EqualizerAudio => {
-                            self.render_settings_audio(ui)
-                        }
-                        SettingsTab::NetworkMedia => self.render_settings_network(ui),
-                        SettingsTab::Appearance => self.render_settings_appearance(ui),
-                        SettingsTab::ConfigEditor => self.render_settings_config_editor(ui),
-                        SettingsTab::Advanced | SettingsTab::Preferences => {
-                            self.render_settings_advanced(ui)
-                        }
-                        SettingsTab::About => self.render_settings_about(ui),
+            let mut scroll_area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+            if let Ok(offset_str) = std::env::var("MUVRIX_SETTINGS_SCROLL_Y") {
+                if let Ok(offset) = offset_str.parse::<f32>() {
+                    scroll_area = scroll_area.vertical_scroll_offset(offset);
+                }
+            }
+            scroll_area.show(ui, |ui| {
+                ui.set_max_width(920.0);
+                match self.settings_tab {
+                    SettingsTab::Subtitles => self.render_settings_subtitles(ui),
+                    SettingsTab::VideoEnhancement => self.render_settings_video(ui),
+                    SettingsTab::Audio | SettingsTab::EqualizerAudio => {
+                        self.render_settings_audio(ui)
                     }
-                });
+                    SettingsTab::NetworkMedia => self.render_settings_network(ui),
+                    SettingsTab::Appearance => self.render_settings_appearance(ui),
+                    SettingsTab::ConfigEditor => self.render_settings_config_editor(ui),
+                    SettingsTab::Advanced | SettingsTab::Preferences => {
+                        self.render_settings_advanced(ui)
+                    }
+                    SettingsTab::About => self.render_settings_about(ui),
+                }
+            });
         });
     }
 }

@@ -373,7 +373,8 @@ impl MuvrixApp {
                     } else {
                         2.0
                     };
-                    let card_w = ((avail_w - (num_visible - 1.0) * 12.0) / num_visible).max(240.0);
+                    let card_outer_w = ((avail_w - (num_visible - 1.0) * 12.0) / num_visible).max(240.0);
+                    let card_inner_w = (card_outer_w - 32.0).max(180.0);
 
                     ui.horizontal(|ui| {
                         ui.label(
@@ -413,7 +414,7 @@ impl MuvrixApp {
                                     .on_hover_text("Scroll carousel to next items")
                                     .clicked()
                                 {
-                                    self.home_carousel_scroll_offset += card_w + 12.0;
+                                    self.home_carousel_scroll_offset += card_outer_w + 12.0;
                                 }
                                 if ui
                                     .button(
@@ -425,7 +426,7 @@ impl MuvrixApp {
                                     .clicked()
                                 {
                                     self.home_carousel_scroll_offset =
-                                        (self.home_carousel_scroll_offset - (card_w + 12.0)).max(0.0);
+                                        (self.home_carousel_scroll_offset - (card_outer_w + 12.0)).max(0.0);
                                 }
                             }
                         });
@@ -457,8 +458,8 @@ impl MuvrixApp {
                                         let file_exists =
                                             std::path::Path::new(&entry.path).exists();
                                         ui_components::highlighted_card_frame().show(ui, |ui| {
-                                            ui.set_width(card_w);
-                                            ui.set_max_width(card_w);
+                                            ui.set_width(card_inner_w);
+                                            ui.set_max_width(card_inner_w);
                                             ui.vertical(|ui| {
                                                 ui.horizontal(|ui| {
                                                     icons::icon_label(
@@ -473,7 +474,7 @@ impl MuvrixApp {
                                                     );
                                                     ui.add_space(4.0);
                                                     let name = &entry.display_name;
-                                                    let label_w = (card_w - 48.0).max(100.0);
+                                                    let label_w = (card_inner_w - 48.0).max(100.0);
                                                     ui.add_sized(
                                                         [label_w, 18.0],
                                                         egui::Label::new(

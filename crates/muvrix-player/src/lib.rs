@@ -27,12 +27,12 @@ pub use capability::{
 
 pub use command::{LoadFileMode, SeekMode};
 pub use controller::{
-    parse_mpvex_command, AbLoopState, MpvexCommand, PlaybackController, PlaybackState, RepeatMode,
-    SteppingPreset,
+    parse_mpvex_command, AbLoopState, DynamicsTelemetry, MpvexCommand, PlaybackController,
+    PlaybackState, RepeatMode, SteppingPreset,
 };
 pub use decode::{DecodeObservation, DecodePath, DecodePolicy, PlatformFamily};
 pub use equalizer::{
-    AudioDeviceInfo, AudioOutputDevice, EqBand, EqualizerManager, EqualizerPreset,
+    AudioDeviceInfo, AudioOutputDevice, Bs2bPreset, EqBand, EqualizerManager, EqualizerPreset,
     EqualizerSettings, EQ_FREQUENCIES,
 };
 pub use error::MpvError;

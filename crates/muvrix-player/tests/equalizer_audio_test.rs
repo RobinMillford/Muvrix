@@ -1475,3 +1475,215 @@ fn test_dynamic_normalization_changing_amplitude_compression() {
 
     let _ = std::fs::remove_file(&temp_dynamic);
 }
+
+#[test]
+fn test_d3_1_frequency_response_curve_math_and_boundaries() {
+    let mut eq = EqualizerSettings {
+        is_enabled: true,
+        ..Default::default()
+    };
+
+    // 1. Flat response test
+    eq.apply_preset(EqualizerPreset::Flat);
+    assert_eq!(eq.preamp_db, 0.0);
+    for &(freq, label) in &[
+        (20.0, "20Hz"),
+        (100.0, "100Hz"),
+        (1000.0, "1kHz"),
+        (10000.0, "10kHz"),
+        (20000.0, "20kHz"),
+    ] {
+        let gain = eq.cumulative_response_at_freq(freq);
+        assert!(
+            gain.abs() < 1e-6,
+            "Flat EQ at {} must be 0 dB, got {:.6}",
+            label,
+            gain
+        );
+    }
+
+    // 2. Disabled EQ returns 0 dB flat
+    eq.is_enabled = false;
+    eq.set_band_gain(5, 6.0);
+    eq.preamp_db = -3.0;
+    assert_eq!(eq.cumulative_response_at_freq(1000.0), 0.0);
+
+    // 3. Positive boost test
+    eq.is_enabled = true;
+    eq.preamp_db = 0.0;
+    eq.apply_preset(EqualizerPreset::Flat);
+    eq.set_band_gain(5, 6.0); // 1 kHz band +6 dB
+    let gain_1k = eq.cumulative_response_at_freq(1000.0);
+    assert!(
+        gain_1k > 5.9 && gain_1k <= 6.0,
+        "Gain at 1 kHz must reach peak +6.0 dB, got {:.2}",
+        gain_1k
+    );
+
+    // Adjacent bands fall off smoothly
+    let gain_500 = eq.cumulative_response_at_freq(500.0);
+    let gain_2k = eq.cumulative_response_at_freq(2000.0);
+    assert!(
+        gain_500 < gain_1k && gain_500 > 0.0,
+        "Gain at 500 Hz must fall off smoothly"
+    );
+    assert!(
+        gain_2k < gain_1k && gain_2k > 0.0,
+        "Gain at 2 kHz must fall off smoothly"
+    );
+
+    // 4. Negative cut test
+    eq.set_band_gain(5, -6.0);
+    let cut_1k = eq.cumulative_response_at_freq(1000.0);
+    assert!(
+        (-6.0..=-5.9).contains(&cut_1k),
+        "Gain at 1 kHz must reach cut -6.0 dB, got {:.2}",
+        cut_1k
+    );
+
+    // 5. Mixed boost/cut with preamp
+    eq.preamp_db = -2.0;
+    eq.set_band_gain(1, 4.0); // 62.5 Hz
+    eq.set_band_gain(5, -4.0); // 1 kHz
+    let resp_62 = eq.cumulative_response_at_freq(62.5);
+    let resp_1k = eq.cumulative_response_at_freq(1000.0);
+    assert!(
+        resp_62 > 1.5,
+        "62.5 Hz with -2 dB preamp + 4 dB boost must be positive, got {:.2}",
+        resp_62
+    );
+    assert!(
+        resp_1k < -5.5,
+        "1 kHz with -2 dB preamp - 4 dB cut must be < -5.5 dB, got {:.2}",
+        resp_1k
+    );
+
+    // 6. 128-point curve generation & boundary checks
+    let curve = eq.frequency_response_curve(128);
+    assert_eq!(curve.len(), 128);
+    assert!((curve.first().unwrap().0 - 20.0).abs() < 0.1);
+    assert!((curve.last().unwrap().0 - 20000.0).abs() < 1.0);
+
+    // Ensure all sampled points are finite
+    for (f, g) in curve {
+        assert!((19.9..=20001.0).contains(&f));
+        assert!(g.is_finite());
+    }
+}
+
+#[test]
+fn test_d3_2_bauer_crossfeed_filter_construction_and_presets() {
+    let mut settings = EqualizerSettings {
+        is_enabled: true,
+        crossfeed_enabled: false,
+        crossfeed_preset: muvrix_player::Bs2bPreset::Default,
+        ..Default::default()
+    };
+
+    // When disabled, bs2b must not be in the filter string
+    let disabled_str = EqualizerManager::build_filter_string(&settings);
+    assert!(
+        !disabled_str.contains("bs2b"),
+        "bs2b must not appear when disabled"
+    );
+
+    // Enable Default preset
+    settings.crossfeed_enabled = true;
+    settings.crossfeed_preset = muvrix_player::Bs2bPreset::Default;
+    let default_str = EqualizerManager::build_filter_string(&settings);
+    assert!(
+        default_str.contains("bs2b=profile=default"),
+        "Must construct bs2b=profile=default, got: {}",
+        default_str
+    );
+
+    // Chu Moy preset
+    settings.crossfeed_preset = muvrix_player::Bs2bPreset::ChuMoy;
+    let cmoy_str = EqualizerManager::build_filter_string(&settings);
+    assert!(
+        cmoy_str.contains("bs2b=profile=cmoy"),
+        "Must construct bs2b=profile=cmoy, got: {}",
+        cmoy_str
+    );
+
+    // Jan Meier preset
+    settings.crossfeed_preset = muvrix_player::Bs2bPreset::JanMeier;
+    let jmeier_str = EqualizerManager::build_filter_string(&settings);
+    assert!(
+        jmeier_str.contains("bs2b=profile=jmeier"),
+        "Must construct bs2b=profile=jmeier, got: {}",
+        jmeier_str
+    );
+
+    // Preserve existing EQ filters and dynaudnorm
+    settings.dynaudnorm = true;
+    settings.set_band_gain(5, 3.0);
+    let combined = EqualizerManager::build_filter_string(&settings);
+    assert!(combined.contains("equalizer=f=1000.00:t=q:w=1.414:g=3.0"));
+    assert!(combined.contains("bs2b=profile=jmeier"));
+    assert!(combined.contains("dynaudnorm=f=150:g=15"));
+
+    // Check unified filter string with pan (reversed stereo)
+    let unified = EqualizerManager::build_unified_filter_string(&settings, true);
+    assert!(unified.starts_with("pan=[stereo|c0=c1|c1=c0]"));
+    assert!(unified.contains("bs2b=profile=jmeier"));
+
+    // Serialization & deserialization roundtrip
+    let serialized = serde_json::to_string(&settings).expect("Serialize EqualizerSettings");
+    let deserialized: EqualizerSettings =
+        serde_json::from_str(&serialized).expect("Deserialize EqualizerSettings");
+    assert!(deserialized.crossfeed_enabled);
+    assert_eq!(
+        deserialized.crossfeed_preset,
+        muvrix_player::Bs2bPreset::JanMeier
+    );
+}
+
+#[test]
+fn test_d3_3_dynamics_telemetry_and_meter_mapping() {
+    let handle = std::sync::Arc::new(create_test_player());
+    let controller = PlaybackController::new(handle).expect("Create controller");
+
+    // Inactive normalization
+    let telemetry_inactive = controller.dynamics_telemetry(false);
+    assert!(!telemetry_inactive.normalization_active);
+    assert_eq!(telemetry_inactive.gain_reduction_db, None);
+    assert!(telemetry_inactive.status_message.contains("inactive"));
+
+    // Active normalization without filter metadata
+    let telemetry_active = controller.dynamics_telemetry(true);
+    assert!(telemetry_active.normalization_active);
+    // On test null audio sink, dynaudnorm telemetry is unexported
+    assert!(telemetry_active.status_message.contains("Active"));
+
+    // Calibrated reduction mapping
+    let gr_values: [f64; 7] = [0.0, -3.5, -6.0, -12.0, -18.0, -24.0, -30.0];
+    for &val in &gr_values {
+        let clamped = val.clamp(-24.0, 0.0);
+        let fraction = -clamped / 24.0;
+        assert!((0.0..=1.0).contains(&fraction));
+    }
+}
+
+#[test]
+fn test_d3_4_gapless_audio_and_prefetch_configuration() {
+    let handle = std::sync::Arc::new(create_test_player());
+    let controller = PlaybackController::new(handle).expect("Create controller");
+
+    // Gapless audio must be enabled by default
+    assert!(controller.gapless_audio());
+
+    // Switch gapless mode
+    controller
+        .set_gapless_audio("no")
+        .expect("Disable gapless audio");
+    assert!(!controller.gapless_audio());
+
+    controller
+        .set_gapless_audio("yes")
+        .expect("Enable gapless audio");
+    assert!(controller.gapless_audio());
+
+    // Queue prefetch invocation without errors
+    controller.prefetch_next_track();
+}

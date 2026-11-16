@@ -27,6 +27,48 @@ pub enum EqualizerPreset {
     Custom,
 }
 
+/// Presets for the Bauer stereophonic-to-binaural (bs2b) headphone crossfeed filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Bs2bPreset {
+    #[default]
+    Default,
+    ChuMoy,
+    JanMeier,
+}
+
+impl Bs2bPreset {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::ChuMoy => "Chu Moy",
+            Self::JanMeier => "Jan Meier",
+        }
+    }
+
+    pub fn mpv_profile(&self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::ChuMoy => "cmoy",
+            Self::JanMeier => "jmeier",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Default => {
+                "Standard Bauer curve (cut 700 Hz, feed 4.5 dB) for natural headphone balance."
+            }
+            Self::ChuMoy => {
+                "Chu Moy circuit (cut 700 Hz, feed 6.0 dB) for moderate crossfeed blending."
+            }
+            Self::JanMeier => {
+                "Jan Meier circuit (cut 650 Hz, feed 9.5 dB) for stronger acoustic cross-talk."
+            }
+        }
+    }
+}
+
 impl EqualizerPreset {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -106,6 +148,12 @@ pub struct EqualizerSettings {
     pub channel_layout: String, // "auto", "stereo", "5.1", "7.1"
     pub volume_boost: f64,      // 100.0..150.0%
 
+    // Headphone Crossfeed (BS2B)
+    #[serde(default)]
+    pub crossfeed_enabled: bool,
+    #[serde(default)]
+    pub crossfeed_preset: Bs2bPreset,
+
     // User-defined presets
     pub custom_presets: Vec<CustomEqPreset>,
 }
@@ -128,6 +176,8 @@ impl Default for EqualizerSettings {
             audio_delay: 0.0,
             channel_layout: "auto".to_string(),
             volume_boost: 100.0,
+            crossfeed_enabled: false,
+            crossfeed_preset: Bs2bPreset::Default,
             custom_presets: Vec::new(),
         }
     }
@@ -274,6 +324,30 @@ impl EqualizerSettings {
         total
     }
 
+    /// Evaluates the cumulative frequency response in dB at frequency `f_hz` (including preamp gain if EQ is enabled).
+    pub fn cumulative_response_at_freq(&self, f_hz: f64) -> f64 {
+        if !self.is_enabled {
+            return 0.0;
+        }
+        self.preamp_db + self.combined_gain_at_freq(f_hz)
+    }
+
+    /// Generates a smooth frequency response curve across `num_points` logarithmically spaced frequencies from 20 Hz to 20 kHz.
+    pub fn frequency_response_curve(&self, num_points: usize) -> Vec<(f64, f64)> {
+        let n = num_points.clamp(16, 512);
+        let log_min = 20.0f64.log10();
+        let log_max = 20000.0f64.log10();
+        let mut curve = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64 / (n - 1) as f64;
+            let log_f = log_min + t * (log_max - log_min);
+            let freq = 10.0f64.powf(log_f);
+            let gain = self.cumulative_response_at_freq(freq);
+            curve.push((freq, gain));
+        }
+        curve
+    }
+
     /// Evaluates the peak combined gain (dB) across logarithmically spaced frequencies from 20 Hz to 20,000 Hz,
     /// accounting for cascading and overlapping adjacent peaking biquad filters.
     pub fn peak_combined_boost(&self) -> f64 {
@@ -410,10 +484,31 @@ impl EqualizerManager {
             }
         }
 
+        if settings.crossfeed_enabled {
+            filters.push(format!(
+                "bs2b=profile={}",
+                settings.crossfeed_preset.mpv_profile()
+            ));
+        }
+
         if settings.dynaudnorm {
             filters.push("dynaudnorm=f=150:g=15".to_string());
         }
 
+        filters.join(",")
+    }
+
+    /// Builds a unified mpv `af` audio filter graph string including channel routing (pan),
+    /// preamp, equalizer biquads, Bauer crossfeed, and dynamic normalization.
+    pub fn build_unified_filter_string(settings: &EqualizerSettings, needs_pan: bool) -> String {
+        let mut filters = Vec::new();
+        if needs_pan {
+            filters.push("pan=[stereo|c0=c1|c1=c0]".to_string());
+        }
+        let base = Self::build_filter_string(settings);
+        if !base.is_empty() {
+            filters.push(base);
+        }
         filters.join(",")
     }
 
@@ -423,6 +518,19 @@ impl EqualizerManager {
         settings: &EqualizerSettings,
     ) -> Result<(), MpvError> {
         let filter_str = Self::build_filter_string(settings);
+        handle.set_property_string("af", &filter_str)?;
+        Self::apply_dsp_options(handle, settings)?;
+        Ok(())
+    }
+
+    /// Dispatches the unified equalizer filter graph string to an active mpv instance,
+    /// preserving channel pan orientation if requested.
+    pub fn apply_unified_to_handle(
+        handle: &MpvHandle,
+        settings: &EqualizerSettings,
+        needs_pan: bool,
+    ) -> Result<(), MpvError> {
+        let filter_str = Self::build_unified_filter_string(settings, needs_pan);
         handle.set_property_string("af", &filter_str)?;
         Self::apply_dsp_options(handle, settings)?;
         Ok(())
