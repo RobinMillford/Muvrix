@@ -322,6 +322,9 @@ impl MuvrixApp {
                 }
                 let _ = self.controller.seek(seconds, SeekMode::Absolute);
             }
+            MediaAction::SetVolume(vol) => {
+                let _ = self.controller.set_volume(vol * 100.0);
+            }
         }
     }
 

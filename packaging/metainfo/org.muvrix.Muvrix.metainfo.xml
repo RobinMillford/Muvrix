@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.muvrix.Muvrix</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Muvrix</name>
+  <summary>Modern native desktop media player with advanced video shaders and pro audio DSP</summary>
+  <url type="homepage">https://github.com/muvrix/muvrix-desktop</url>
+  <developer id="org.muvrix">
+    <name>Muvrix Desktop Team</name>
+  </developer>
+
+  <description>
+    <p>
+      Muvrix is a fast, beautiful, and extensible native media player built in Rust and powered by libmpv.
+      Designed for modern desktops, it offers uncompromising performance and an exquisite user interface.
+    </p>
+    <p>Key highlights include:</p>
+    <ul>
+      <li>GPU-accelerated rendering and color management pipeline</li>
+      <li>Interactive 10-band graphic equalizer, Bauer headphone crossfeed, and dynamics compressor</li>
+      <li>Custom video shader pipeline, real-time tone mapping, and HDR display calibration</li>
+      <li>High-performance media library indexing with SQLite FTS5 search</li>
+      <li>Queue management with smart weighted shuffle and multi-format playlist import/export</li>
+      <li>Hardened network streaming with auto-reconnect and demuxer buffer management</li>
+      <li>Native desktop integration with Linux D-Bus MPRIS v2 and display sleep inhibition</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.muvrix.Muvrix.desktop</launchable>
+
+  <provides>
+    <binary>muvrix</binary>
+    <mediatype>video/mp4</mediatype>
+    <mediatype>video/x-matroska</mediatype>
+    <mediatype>video/webm</mediatype>
+    <mediatype>video/quicktime</mediatype>
+    <mediatype>audio/flac</mediatype>
+    <mediatype>audio/mpeg</mediatype>
+    <mediatype>audio/ogg</mediatype>
+  </provides>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.1.0" date="2026-11-16">
+      <description>
+        <p>Production release introducing the full Phase D feature suite.</p>
+      </description>
+    </release>
+  </releases>
+</component>

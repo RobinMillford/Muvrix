@@ -1,0 +1,14 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release --bin muvrix
+
+override_dh_auto_install:
+	install -d debian/muvrix/usr/bin
+	install -m 755 target/release/muvrix debian/muvrix/usr/bin/muvrix
+	install -d debian/muvrix/usr/share/applications
+	install -m 644 packaging/appimage/muvrix.desktop debian/muvrix/usr/share/applications/muvrix.desktop
+	install -d debian/muvrix/usr/share/metainfo
+	install -m 644 packaging/metainfo/org.muvrix.Muvrix.metainfo.xml debian/muvrix/usr/share/metainfo/org.muvrix.Muvrix.metainfo.xml

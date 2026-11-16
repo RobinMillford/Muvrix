@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Muvrix
+GenericName=Media Player
+Comment=Modern native desktop media player with advanced video shaders and pro audio DSP
+Exec=AppRun %U
+Icon=io.muvrix.Muvrix
+Terminal=false
+Type=Application
+Categories=AudioVideo;Player;Video;Audio;
+MimeType=video/mp4;video/x-matroska;video/webm;video/x-msvideo;video/quicktime;audio/flac;audio/mpeg;audio/ogg;audio/wav;audio/aac;
+StartupNotify=true
+StartupWMClass=muvrix
+Keywords=player;video;audio;mpv;dsp;equalizer;hdr;

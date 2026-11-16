@@ -2,6 +2,7 @@ use eframe::egui::{self, Color32, RichText};
 use muvrix_player::{AccentColor, ThemeMode};
 
 use crate::app::MuvrixApp;
+use crate::branding::BrandPalette;
 
 impl MuvrixApp {
     pub(crate) fn render_settings_appearance(&mut self, ui: &mut egui::Ui) {
@@ -94,6 +95,62 @@ impl MuvrixApp {
                             }
                         }
                     });
+            });
+        });
+
+        ui.add_space(8.0);
+        ui.group(|ui| {
+            ui.label(
+                RichText::new("Window & Desktop Frame")
+                    .strong()
+                    .size(14.0)
+                    .color(Color32::from_rgb(95, 185, 255)),
+            );
+            ui.label(
+                RichText::new(
+                    "Configure native window borders, frameless presentation, and compact mini-player behavior.",
+                )
+                .size(11.5)
+                .color(Color32::from_gray(150)),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("Display Mode:");
+                let current_mode = if self.is_pip {
+                    "Compact Mini-Player (Floating PiP)"
+                } else if self.is_fullscreen {
+                    "Borderless Fullscreen"
+                } else {
+                    "Standard Native Window"
+                };
+                ui.label(
+                    RichText::new(current_mode)
+                        .strong()
+                        .color(BrandPalette::ELECTRIC_LIME),
+                );
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .button(if self.is_pip {
+                        "Exit Mini-Player"
+                    } else {
+                        "Switch to Mini-Player (PiP)"
+                    })
+                    .clicked()
+                {
+                    self.toggle_pip(ui.ctx());
+                }
+                if ui
+                    .button(if self.is_fullscreen {
+                        "Exit Fullscreen"
+                    } else {
+                        "Toggle Fullscreen"
+                    })
+                    .clicked()
+                {
+                    self.toggle_fullscreen(ui.ctx());
+                }
             });
         });
     }

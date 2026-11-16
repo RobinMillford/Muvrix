@@ -1,0 +1,7 @@
+muvrix (0.1.0-1) unstable; urgency=medium
+
+  * Initial production release of Muvrix Desktop.
+  * Complete Phase D features: Pro Audio DSP, Video Shaders, FTS5 Search,
+    Advanced Queues, Resilient Streaming, and Native MPRIS Integration.
+
+ -- Muvrix Desktop Team <dev@muvrix.org>  Sun, 16 Nov 2026 12:00:00 +0000

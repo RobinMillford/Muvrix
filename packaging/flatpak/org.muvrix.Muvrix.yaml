@@ -1,0 +1,44 @@
+app-id: org.muvrix.Muvrix
+runtime: org.freedesktop.Platform
+runtime-version: '23.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: muvrix
+
+finish-args:
+  # Display & Windowing
+  - --share=ipc
+  - --socket=x11
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+
+  # Audio playback
+  - --socket=pulseaudio
+
+  # Network streaming (HTTP, HLS, DASH, WebDAV)
+  - --share=network
+
+  # Media access
+  - --filesystem=xdg-videos:ro
+  - --filesystem=xdg-music:ro
+  - --filesystem=xdg-download:ro
+  - --filesystem=home:ro
+
+  # Desktop integration & MPRIS v2
+  - --own-name=org.mpris.MediaPlayer2.muvrix
+  - --talk-name=org.freedesktop.ScreenSaver
+  - --talk-name=org.freedesktop.PowerManagement.Inhibit
+
+modules:
+  - name: muvrix
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --bin muvrix
+      - install -Dm755 target/release/muvrix /app/bin/muvrix
+      - install -Dm644 packaging/appimage/muvrix.desktop /app/share/applications/org.muvrix.Muvrix.desktop
+      - install -Dm644 packaging/metainfo/org.muvrix.Muvrix.metainfo.xml /app/share/metainfo/org.muvrix.Muvrix.metainfo.xml
+    sources:
+      - type: dir
+        path: ../../

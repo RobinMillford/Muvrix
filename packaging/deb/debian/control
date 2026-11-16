@@ -1,0 +1,21 @@
+Source: muvrix
+Section: video
+Priority: optional
+Maintainer: Muvrix Desktop Team <dev@muvrix.org>
+Build-Depends: debhelper-compat (= 13), cargo, rustc, libmpv-dev (>= 0.35.0), libplacebo-dev, libegl1-mesa-dev, libgl1-mesa-dev, libasound2-dev, libpulse-dev, libdbus-1-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/muvrix/muvrix-desktop
+
+Package: muvrix
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, libmpv2 (>= 0.35.0) | libmpv1
+Description: Modern native desktop media player
+ Muvrix is a high-performance desktop media player written in Rust and powered by libmpv.
+ Features include:
+  * Hardware-accelerated decoding and presentation
+  * Interactive 10-band audio equalizer with Bauer crossfeed and dynamics normalization
+  * Custom video shaders and HDR calibration
+  * SQLite-backed media catalog with FTS5 search
+  * Gapless playback and cross-format playlist queues
+  * Resilient network streaming with auto-reconnection
+  * Full D-Bus MPRIS v2 media controls and display sleep inhibition

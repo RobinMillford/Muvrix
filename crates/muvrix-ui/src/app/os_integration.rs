@@ -20,13 +20,51 @@ impl MuvrixApp {
         }
 
         if let Some(session) = &self.media_session {
-            let title = self
+            let mut title = self
                 .controller
                 .current_file()
                 .and_then(|path| std::path::Path::new(path).file_name())
                 .and_then(|name| name.to_str())
                 .unwrap_or("No media")
                 .to_string();
+            let mut artist = String::new();
+            let mut album = String::new();
+            let mut art_url = None;
+            let mut track_number = None;
+
+            if let Some(current_path) = self.controller.current_file() {
+                if let Ok(Some(lib_item)) = self.db.get_media_item_by_canonical_path(current_path) {
+                    if let Ok(Some(meta)) = self.db.get_metadata(lib_item.id) {
+                        if let Some(t) = meta.title {
+                            if !t.is_empty() {
+                                title = t;
+                            }
+                        }
+                        if let Some(a) = meta.artist {
+                            artist = a;
+                        }
+                        if let Some(alb) = meta.album {
+                            album = alb;
+                        }
+                        track_number = meta.track_number;
+                    }
+                    if let Ok(Some(art)) = self.db.get_artwork(lib_item.id) {
+                        if !art.file_path.is_empty() {
+                            art_url = Some(
+                                if art.file_path.starts_with("http://")
+                                    || art.file_path.starts_with("https://")
+                                    || art.file_path.starts_with("file://")
+                                {
+                                    art.file_path
+                                } else {
+                                    format!("file://{}", art.file_path)
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+
             let status = match self.controller.state() {
                 PlaybackState::Playing | PlaybackState::Buffering => "Playing",
                 PlaybackState::Paused => "Paused",
@@ -34,12 +72,18 @@ impl MuvrixApp {
             };
             let playlist_pos = self.controller.playlist_pos();
             let playlist_count = self.controller.playlist_count();
+            let volume = (self.controller.volume() / 100.0).clamp(0.0, 1.0);
+
             session.update(MediaSnapshot {
                 title,
-                artist: String::new(),
+                artist,
+                album,
+                art_url,
+                track_number,
                 playback_status: status.to_string(),
                 duration_us: (self.controller.duration() * 1_000_000.0) as i64,
                 position_us: (self.controller.time_pos() * 1_000_000.0) as i64,
+                volume,
                 can_next: playlist_pos
                     .map(|pos| pos + 1 < playlist_count)
                     .unwrap_or(false),

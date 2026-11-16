@@ -248,5 +248,127 @@ impl MuvrixApp {
                 self.toggle_pip(ui.ctx());
             }
         });
+
+        ui.add_space(8.0);
+
+        // Section 7: Desktop Integration, Media Keys & Power Management
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new("7. Desktop Integration & Power Management")
+                    .strong()
+                    .size(14.0)
+                    .color(BrandPalette::ELECTRIC_LIME),
+            );
+            ui.label(
+                RichText::new(
+                    "Real-time operating system integration via Linux D-Bus MPRIS v2 and automatic display sleep inhibition.",
+                )
+                .size(12.0)
+                .color(BrandPalette::MUTED_TEXT),
+            );
+            ui.add_space(6.0);
+
+            // MPRIS Status Grid
+            egui::Grid::new("mpris_telemetry_grid")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("MPRIS v2 D-Bus Interface:")
+                            .color(BrandPalette::MUTED_TEXT)
+                            .size(12.0),
+                    );
+                    if self.media_session.is_some() {
+                        ui.label(
+                            RichText::new("● Active (org.mpris.MediaPlayer2.muvrix)")
+                                .color(BrandPalette::ELECTRIC_LIME)
+                                .size(12.0)
+                                .strong(),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("○ Inactive / Standalone")
+                                .color(BrandPalette::MUTED_TEXT)
+                                .size(12.0),
+                        );
+                    }
+                    ui.end_row();
+
+                    ui.label(
+                        RichText::new("Media Keys & Transport:")
+                            .color(BrandPalette::MUTED_TEXT)
+                            .size(12.0),
+                    );
+                    ui.label(
+                        RichText::new("Play, Pause, Stop, Next, Previous, Seek, Volume")
+                            .color(BrandPalette::IVORY_TEXT)
+                            .size(12.0),
+                    );
+                    ui.end_row();
+
+                    ui.label(
+                        RichText::new("Desktop Shell Metadata:")
+                            .color(BrandPalette::MUTED_TEXT)
+                            .size(12.0),
+                    );
+                    let (title_text, artist_text) = if let Some(ref session) = self.media_session {
+                        let snap = session.current_snapshot();
+                        let title = if snap.title.is_empty() {
+                            "No media"
+                        } else {
+                            &snap.title
+                        };
+                        let artist = if snap.artist.is_empty() {
+                            "None"
+                        } else {
+                            &snap.artist
+                        };
+                        (title.to_string(), artist.to_string())
+                    } else {
+                        ("No media".to_string(), "None".to_string())
+                    };
+                    ui.label(
+                        RichText::new(format!("Title: '{title_text}' | Artist: '{artist_text}'"))
+                            .color(Color32::from_gray(190))
+                            .size(11.5),
+                    );
+                    ui.end_row();
+
+                    ui.label(
+                        RichText::new("Display Sleep Inhibitor:")
+                            .color(BrandPalette::MUTED_TEXT)
+                            .size(12.0),
+                    );
+                    let backend_label = self.sleep_inhibitor.active_backend().label();
+                    if self.sleep_inhibitor.is_inhibited() {
+                        ui.label(
+                            RichText::new(format!("● Active ({backend_label})"))
+                                .color(BrandPalette::ELECTRIC_LIME)
+                                .size(12.0)
+                                .strong(),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(format!("○ Standby ({backend_label})"))
+                                .color(Color32::from_gray(160))
+                                .size(12.0),
+                        );
+                    }
+                    ui.end_row();
+
+                    ui.label(
+                        RichText::new("Supported Desktops:")
+                            .color(BrandPalette::MUTED_TEXT)
+                            .size(12.0),
+                    );
+                    ui.label(
+                        RichText::new("GNOME, KDE Plasma, XFCE, Sway, Hyprland, Waybar")
+                            .color(Color32::from_gray(170))
+                            .size(11.5),
+                    );
+                    ui.end_row();
+                });
+        });
     }
 }

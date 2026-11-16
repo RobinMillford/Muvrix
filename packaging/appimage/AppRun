@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Muvrix AppImage runtime entrypoint
+set -eo pipefail
+
+HERE="$(dirname "$(readlink -f "${0}")")"
+export APPDIR="${HERE}"
+export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${APPDIR}/usr/lib64:${APPDIR}/lib:${APPDIR}/lib64:${LD_LIBRARY_PATH:-}"
+export XDG_DATA_DIRS="${APPDIR}/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+export MUVRIX_ASSETS_DIR="${APPDIR}/usr/share/muvrix/assets"
+
+# If invoked with --appimage-extract-and-run or directly
+if [ -x "${APPDIR}/usr/bin/muvrix" ]; then
+    exec "${APPDIR}/usr/bin/muvrix" "$@"
+elif [ -x "${APPDIR}/bin/muvrix" ]; then
+    exec "${APPDIR}/bin/muvrix" "$@"
+else
+    echo "Error: Muvrix executable not found in AppDir (${APPDIR})" >&2
+    exit 1
+fi

@@ -15,7 +15,7 @@ pub const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
 pub const MPRIS_NAME: &str = "org.mpris.MediaPlayer2.muvrix";
 const TRACK_ID: &str = "/org/muvrix/track";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MediaAction {
     Play,
     Pause,
@@ -25,6 +25,7 @@ pub enum MediaAction {
     Previous,
     SeekBy(i64),
     SeekTo(i64),
+    SetVolume(f64),
 }
 
 /// Current state exposed to desktop media widgets.
@@ -32,9 +33,13 @@ pub enum MediaAction {
 pub struct MediaSnapshot {
     pub title: String,
     pub artist: String,
+    pub album: String,
+    pub art_url: Option<String>,
+    pub track_number: Option<i32>,
     pub playback_status: String,
     pub duration_us: i64,
     pub position_us: i64,
+    pub volume: f64,
     pub can_next: bool,
     pub can_previous: bool,
 }
@@ -158,6 +163,15 @@ impl MediaPlayer2Player {
         if !snapshot.artist.is_empty() {
             metadata.insert("xesam:artist".to_string(), string_value(&snapshot.artist));
         }
+        if !snapshot.album.is_empty() {
+            metadata.insert("xesam:album".to_string(), string_value(&snapshot.album));
+        }
+        if let Some(art) = &snapshot.art_url {
+            metadata.insert("mpris:artUrl".to_string(), string_value(art));
+        }
+        if let Some(track_no) = snapshot.track_number {
+            metadata.insert("xesam:trackNumber".to_string(), OwnedValue::from(track_no));
+        }
         if snapshot.duration_us > 0 {
             metadata.insert(
                 "mpris:length".to_string(),
@@ -165,6 +179,17 @@ impl MediaPlayer2Player {
             );
         }
         metadata
+    }
+
+    #[zbus(property)]
+    fn volume(&self) -> f64 {
+        self.shared.snapshot().volume.clamp(0.0, 1.0)
+    }
+
+    #[zbus(property)]
+    fn set_volume(&self, volume: f64) {
+        self.shared
+            .push(MediaAction::SetVolume(volume.clamp(0.0, 1.0)));
     }
 
     #[zbus(property)]
@@ -318,6 +343,10 @@ impl MediaSession {
             .map(|mut actions| std::mem::take(&mut *actions))
             .unwrap_or_default()
     }
+
+    pub fn current_snapshot(&self) -> MediaSnapshot {
+        self.shared.snapshot()
+    }
 }
 
 impl Drop for MediaSession {
@@ -329,10 +358,27 @@ impl Drop for MediaSession {
     }
 }
 
-/// Linux screen-saver inhibitor. Unavailable sessions are a silent no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SleepInhibitBackend {
+    ScreenSaver,
+    PowerManagement,
+    None,
+}
+
+impl SleepInhibitBackend {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::ScreenSaver => "org.freedesktop.ScreenSaver",
+            Self::PowerManagement => "org.freedesktop.PowerManagement.Inhibit",
+            Self::None => "None (Uninhibited / Standby)",
+        }
+    }
+}
+
+/// Linux screen-saver and power management inhibitor. Unavailable sessions are a silent no-op.
 pub struct SleepInhibitor {
     connection: Option<Connection>,
-    cookie: Mutex<Option<u32>>,
+    cookie: Mutex<Option<(u32, SleepInhibitBackend)>>,
 }
 
 impl SleepInhibitor {
@@ -350,6 +396,20 @@ impl SleepInhibitor {
         }
     }
 
+    /// Checks if sleep inhibition is currently active.
+    pub fn is_inhibited(&self) -> bool {
+        self.cookie.lock().map(|c| c.is_some()).unwrap_or(false)
+    }
+
+    /// Reports the active D-Bus inhibition interface backend.
+    pub fn active_backend(&self) -> SleepInhibitBackend {
+        self.cookie
+            .lock()
+            .ok()
+            .and_then(|c| c.map(|(_, b)| b))
+            .unwrap_or(SleepInhibitBackend::None)
+    }
+
     pub fn set_inhibited(&self, inhibited: bool) {
         let Some(connection) = self.connection.as_ref() else {
             return;
@@ -361,29 +421,68 @@ impl SleepInhibitor {
             if cookie.is_some() {
                 return;
             }
-            match connection.call_method(
+            // Primary backend: org.freedesktop.ScreenSaver
+            let screensaver_res = connection.call_method(
                 Some("org.freedesktop.ScreenSaver"),
                 "/org/freedesktop/ScreenSaver",
                 Some("org.freedesktop.ScreenSaver"),
                 "Inhibit",
                 &("muvrix", "Playing media"),
-            ) {
+            );
+            match screensaver_res {
                 Ok(reply) => {
                     if let Ok(value) = reply.body().deserialize::<u32>() {
-                        *cookie = Some(value);
+                        *cookie = Some((value, SleepInhibitBackend::ScreenSaver));
+                        log::info!(
+                            "Inhibited screensaver via org.freedesktop.ScreenSaver (cookie {value})"
+                        );
+                        return;
                     }
                 }
-                Err(error) => log::warn!("screen-saver inhibit failed: {error}"),
+                Err(e) => {
+                    log::debug!(
+                        "ScreenSaver inhibit failed ({e}), attempting PowerManagement fallback"
+                    );
+                }
             }
-        } else if let Some(value) = cookie.take() {
-            if let Err(error) = connection.call_method(
-                Some("org.freedesktop.ScreenSaver"),
-                "/org/freedesktop/ScreenSaver",
-                Some("org.freedesktop.ScreenSaver"),
-                "UnInhibit",
-                &(value,),
-            ) {
-                log::warn!("screen-saver uninhibit failed: {error}");
+
+            // Fallback backend: org.freedesktop.PowerManagement.Inhibit
+            let pm_res = connection.call_method(
+                Some("org.freedesktop.PowerManagement.Inhibit"),
+                "/org/freedesktop/PowerManagement/Inhibit",
+                Some("org.freedesktop.PowerManagement.Inhibit"),
+                "Inhibit",
+                &("muvrix", "Playing media"),
+            );
+            match pm_res {
+                Ok(reply) => {
+                    if let Ok(value) = reply.body().deserialize::<u32>() {
+                        *cookie = Some((value, SleepInhibitBackend::PowerManagement));
+                        log::info!("Inhibited screensaver via org.freedesktop.PowerManagement (cookie {value})");
+                    }
+                }
+                Err(error) => log::warn!("All desktop sleep inhibition attempts failed: {error}"),
+            }
+        } else if let Some((value, backend)) = cookie.take() {
+            let (service, path, iface) = match backend {
+                SleepInhibitBackend::ScreenSaver => (
+                    "org.freedesktop.ScreenSaver",
+                    "/org/freedesktop/ScreenSaver",
+                    "org.freedesktop.ScreenSaver",
+                ),
+                SleepInhibitBackend::PowerManagement => (
+                    "org.freedesktop.PowerManagement.Inhibit",
+                    "/org/freedesktop/PowerManagement/Inhibit",
+                    "org.freedesktop.PowerManagement.Inhibit",
+                ),
+                SleepInhibitBackend::None => return,
+            };
+            if let Err(error) =
+                connection.call_method(Some(service), path, Some(iface), "UnInhibit", &(value,))
+            {
+                log::warn!("Sleep uninhibit ({service}) failed: {error}");
+            } else {
+                log::info!("Released sleep inhibition ({service}, cookie {value})");
             }
         }
     }
@@ -423,9 +522,13 @@ mod tests {
         let snapshot = MediaSnapshot {
             title: "Demo".to_string(),
             artist: "Muvrix".to_string(),
+            album: "Sample Album".to_string(),
+            art_url: None,
+            track_number: Some(1),
             playback_status: "Playing".to_string(),
             duration_us: 60_000_000,
             position_us: 10_000_000,
+            volume: 1.0,
             can_next: true,
             can_previous: false,
         };
