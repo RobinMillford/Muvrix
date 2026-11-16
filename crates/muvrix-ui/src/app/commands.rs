@@ -419,8 +419,77 @@ impl MuvrixApp {
         self.controller
             .playlist_play_index(0)
             .map_err(|e| e.to_string())?;
+        self.sync_active_queue_to_db();
         self.current_view = AppView::Player;
         Ok(())
+    }
+
+    /// Persists current playback queue and cursor into SQLite.
+    pub fn sync_active_queue_to_db(&self) {
+        let items = self.controller.playlist();
+        let cur_pos = self.controller.playlist_pos();
+        let active_entries: Vec<muvrix_core::database::ActiveQueueEntry> = items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| muvrix_core::database::ActiveQueueEntry {
+                position: idx,
+                path: item.filename.clone(),
+                title: item.title.clone(),
+                duration_ms: 0,
+                is_current: cur_pos == Some(idx) || item.is_current || item.is_playing,
+            })
+            .collect();
+        let _ = self.db.save_active_queue(&active_entries);
+    }
+
+    /// Clears the active playback queue in SQLite.
+    pub fn clear_active_queue_in_db(&self) {
+        let _ = self.db.clear_active_queue();
+    }
+
+    /// Shuffles the active queue. Uses smart shuffle with artist/album separation if enabled.
+    pub fn execute_shuffle(&mut self) {
+        if self.playlist_use_smart_shuffle {
+            let playlist = self.controller.playlist().to_vec();
+            if playlist.is_empty() {
+                return;
+            }
+            let tracks: Vec<muvrix_player::shuffle::ShuffleTrackInfo> = playlist
+                .iter()
+                .enumerate()
+                .map(|(idx, item)| {
+                    let mut artist = None;
+                    let mut album = None;
+                    let mut genre = None;
+                    if let Ok(Some(lib_item)) =
+                        self.db.get_media_item_by_canonical_path(&item.filename)
+                    {
+                        if let Ok(Some(meta)) = self.db.get_metadata(lib_item.id) {
+                            artist = meta.artist;
+                            album = meta.album;
+                            genre = meta.genre;
+                        }
+                    }
+                    muvrix_player::shuffle::ShuffleTrackInfo {
+                        index: idx,
+                        title: item.title.clone(),
+                        artist,
+                        album,
+                        genre,
+                    }
+                })
+                .collect();
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(42);
+            let _ = self.controller.playlist_smart_shuffle(&tracks, seed);
+            self.playlist_status = Some("Smart shuffled queue with artist separation".to_string());
+        } else {
+            let _ = self.controller.playlist_shuffle();
+            self.playlist_status = Some("Shuffled queue".to_string());
+        }
+        self.sync_active_queue_to_db();
     }
 
     /// Toggles fullscreen window state.

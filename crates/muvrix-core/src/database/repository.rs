@@ -1380,4 +1380,58 @@ impl Repository {
         }
         Ok(list)
     }
+
+    // -------------------------------------------------------------------------
+    // Persistent Active Playback Queue
+    // -------------------------------------------------------------------------
+
+    pub fn save_active_queue(conn: &mut Connection, items: &[ActiveQueueEntry]) -> Result<()> {
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM active_playback_queue", [])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO active_playback_queue (position, path, title, duration_ms, is_current)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for item in items {
+                stmt.execute(params![
+                    item.position as i64,
+                    item.path,
+                    item.title,
+                    item.duration_ms as i64,
+                    item.is_current as i32,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn load_active_queue(conn: &Connection) -> Result<Vec<ActiveQueueEntry>> {
+        let mut stmt = conn.prepare(
+            "SELECT position, path, title, duration_ms, is_current
+             FROM active_playback_queue
+             ORDER BY position ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ActiveQueueEntry {
+                position: row.get::<_, i64>(0)? as usize,
+                path: row.get(1)?,
+                title: row.get(2)?,
+                duration_ms: row.get::<_, i64>(3)? as u64,
+                is_current: row.get::<_, i32>(4)? != 0,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    pub fn clear_active_queue(conn: &Connection) -> Result<()> {
+        conn.execute("DELETE FROM active_playback_queue", [])?;
+        Ok(())
+    }
 }

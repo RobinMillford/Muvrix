@@ -308,27 +308,45 @@ mod tests {
     #[test]
     fn test_vault_store_get_remove_lifecycle() {
         let vault = CredentialVault::new();
-        vault.store("test_ref_1", "super_secret_value_123");
-        assert_eq!(
-            vault.get("test_ref_1"),
-            Some("super_secret_value_123".to_string())
+        let key = format!(
+            "test_ref_lifecycle_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         );
+        vault.store(&key, "super_secret_value_123");
+        assert_eq!(vault.get(&key), Some("super_secret_value_123".to_string()));
 
-        vault.remove("test_ref_1");
-        assert_eq!(vault.get("test_ref_1"), None);
+        vault.remove(&key);
+        assert_eq!(vault.get(&key), None);
     }
 
     #[test]
     fn test_vault_clear() {
         let vault = CredentialVault::new();
-        vault.store("ref_a", "secret_a");
-        vault.store("ref_b", "secret_b");
-        assert!(vault.get("ref_a").is_some());
-        assert!(vault.get("ref_b").is_some());
+        let key_a = format!(
+            "ref_a_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let key_b = format!(
+            "ref_b_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        vault.store(&key_a, "secret_a");
+        vault.store(&key_b, "secret_b");
+        assert!(vault.get(&key_a).is_some());
+        assert!(vault.get(&key_b).is_some());
 
         vault.clear();
-        assert_eq!(vault.get("ref_a"), None);
-        assert_eq!(vault.get("ref_b"), None);
+        assert_eq!(vault.get(&key_a), None);
+        assert_eq!(vault.get(&key_b), None);
     }
 
     #[test]

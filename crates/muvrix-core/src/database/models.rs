@@ -392,3 +392,13 @@ impl SshHostTrustRecord {
         host.trim().to_ascii_lowercase()
     }
 }
+
+/// An entry in the persistent active playback queue.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ActiveQueueEntry {
+    pub position: usize,
+    pub path: String,
+    pub title: Option<String>,
+    pub duration_ms: u64,
+    pub is_current: bool,
+}

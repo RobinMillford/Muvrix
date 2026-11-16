@@ -38,6 +38,11 @@ pub use path::{
     MediaPathError,
 };
 pub use platform::{DistroInfo, PlatformInfo, SessionType};
+pub use playlist::{
+    export_m3u, export_pls, export_xspf, generate_m3u, generate_pls, generate_xspf,
+    load_playlist_file_or_url, parse_m3u, parse_playlist_auto, parse_pls, parse_xspf, M3uEntry,
+    PlaylistEntry,
+};
 pub use scanner::{ScanOptions, ScanProgress, ScanSummary, ScannerService};
 pub use search::sanitize_fts5_query;
 pub use thumbnails::{

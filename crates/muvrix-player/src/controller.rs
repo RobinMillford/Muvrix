@@ -666,6 +666,41 @@ impl PlaybackController {
         Ok(())
     }
 
+    /// Performs an intelligent, non-repeating smart shuffle on the playlist.
+    ///
+    /// Applies separation penalties to prevent consecutive tracks from the same
+    /// artist, album, or genre while ensuring all tracks are preserved in the queue.
+    pub fn playlist_smart_shuffle(
+        &mut self,
+        track_metadata: &[crate::shuffle::ShuffleTrackInfo],
+        seed: u64,
+    ) -> Result<(), MpvError> {
+        let n = self.playlist.len();
+        if n <= 2 {
+            return self.playlist_shuffle();
+        }
+
+        let engine = crate::shuffle::SmartShuffleEngine::default();
+        let target_order = engine.calculate_order(track_metadata, seed);
+
+        let mut current_positions: Vec<usize> = (0..n).collect();
+        for (desired_target_pos, &desired_item_idx) in target_order.iter().enumerate() {
+            if let Some(curr_pos) = current_positions
+                .iter()
+                .position(|&idx| idx == desired_item_idx)
+            {
+                if curr_pos != desired_target_pos {
+                    self.handle.playlist_move(curr_pos, desired_target_pos)?;
+                    let item = current_positions.remove(curr_pos);
+                    current_positions.insert(desired_target_pos, item);
+                }
+            }
+        }
+
+        self.refresh_playlist();
+        Ok(())
+    }
+
     /// Returns whether native gapless audio transitions are currently active in mpv.
     pub fn gapless_audio(&self) -> bool {
         self.handle

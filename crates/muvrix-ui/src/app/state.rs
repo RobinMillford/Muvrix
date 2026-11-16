@@ -323,4 +323,16 @@ pub struct MuvrixApp {
     pub(crate) export_playlist_path_input: String,
     pub(crate) export_playlist_status: Option<String>,
     pub(crate) export_playlist_target_id: Option<i64>,
+    pub(crate) export_playlist_format: PlaylistExportFormat,
+    pub(crate) playlist_drag_source_idx: Option<usize>,
+    pub(crate) playlist_drag_target_idx: Option<usize>,
+    pub(crate) playlist_use_smart_shuffle: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlaylistExportFormat {
+    #[default]
+    M3u8,
+    Pls,
+    Xspf,
 }

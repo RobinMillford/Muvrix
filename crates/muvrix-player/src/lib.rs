@@ -15,6 +15,7 @@ pub mod property;
 pub mod render;
 pub mod settings;
 pub mod shader;
+pub mod shuffle;
 pub mod stream;
 pub mod thumbnail;
 pub mod track;
@@ -54,6 +55,7 @@ pub use shader::{
     ShaderManager, ShaderProfile, ShaderQuality, TargetPrimaries, TargetTrc, ToneMappingAlgorithm,
     VideoAdjustmentSettings,
 };
+pub use shuffle::{ShuffleTrackInfo, SmartShuffleEngine};
 pub use stream::{
     HttpRangeStream, IoSeekableStream, MemoryStream, MpvStreamBridge, ReadAheadStream,
     RecoverableStream, RecoveryState, SeekableStream, SftpSeekableStream, SmbSeekableStream,

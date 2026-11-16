@@ -7,7 +7,10 @@ use std::time::Instant;
 fn test_fts5_schema_migration_and_integrity() {
     let db = DatabaseManager::open_in_memory().expect("open DB");
     assert!(db.check_integrity().expect("integrity check"));
-    assert_eq!(db.get_schema_version().expect("version"), 6);
+    assert_eq!(
+        db.get_schema_version().expect("version"),
+        LATEST_SCHEMA_VERSION
+    );
 }
 
 #[test]

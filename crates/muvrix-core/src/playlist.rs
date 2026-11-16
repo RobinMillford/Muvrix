@@ -26,6 +26,9 @@ pub struct M3uEntry {
     pub group: Option<String>,
 }
 
+/// Generic alias for multi-format playlist entries.
+pub type PlaylistEntry = M3uEntry;
+
 /// Parses M3U text, resolving relative paths against `source`.
 pub fn parse_m3u(content: &str, source: &str) -> M3uResult<Vec<M3uEntry>> {
     let mut entries = Vec::new();
@@ -96,6 +99,23 @@ pub fn load_m3u(source: &str) -> M3uResult<Vec<M3uEntry>> {
     }
 }
 
+/// Loads any supported playlist format (M3U, M3U8, PLS, XSPF) from local file or HTTP(S) URL.
+pub fn load_playlist_file_or_url(source: &str) -> M3uResult<Vec<M3uEntry>> {
+    let source = source.trim();
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let response = ureq::get(source)
+            .call()
+            .map_err(|e| M3uError::Http(e.to_string()))?;
+        let body = response
+            .into_string()
+            .map_err(|e| M3uError::Http(e.to_string()))?;
+        parse_playlist_auto(&body, source)
+    } else {
+        let content = std::fs::read_to_string(source)?;
+        parse_playlist_auto(&content, source)
+    }
+}
+
 /// Generates M3U8 playlist text from a list of entries.
 ///
 /// Produces an extended M3U8 file with `#EXTM3U` header, `#EXTINF` lines for
@@ -123,6 +143,234 @@ pub fn export_m3u(entries: &[M3uEntry], dest: &str) -> M3uResult<()> {
     let content = generate_m3u(entries);
     std::fs::write(dest, content.as_bytes())?;
     Ok(())
+}
+
+/// Parses PLS playlist format, resolving relative paths against `source`.
+pub fn parse_pls(content: &str, source: &str) -> M3uResult<Vec<M3uEntry>> {
+    let mut files: HashMap<usize, String> = HashMap::new();
+    let mut titles: HashMap<usize, String> = HashMap::new();
+    let mut lengths: HashMap<usize, i64> = HashMap::new();
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some((key, val)) = line.split_once('=') {
+            let key = key.trim();
+            let val = val.trim();
+            if let Some(idx_str) = key
+                .strip_prefix("File")
+                .or_else(|| key.strip_prefix("file"))
+            {
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    files.insert(idx, val.to_string());
+                }
+            } else if let Some(idx_str) = key
+                .strip_prefix("Title")
+                .or_else(|| key.strip_prefix("title"))
+            {
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    titles.insert(idx, val.to_string());
+                }
+            } else if let Some(idx_str) = key
+                .strip_prefix("Length")
+                .or_else(|| key.strip_prefix("length"))
+            {
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    if let Ok(len) = val.parse::<i64>() {
+                        lengths.insert(idx, len);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut indices: Vec<usize> = files.keys().copied().collect();
+    indices.sort_unstable();
+
+    let mut entries = Vec::with_capacity(indices.len());
+    for idx in indices {
+        if let Some(raw_path) = files.get(&idx) {
+            let path = resolve_entry(source, raw_path)?;
+            let title = titles.get(&idx).cloned().filter(|t| !t.is_empty());
+            let duration_ms = match lengths.get(&idx).copied() {
+                Some(len) if len > 0 => (len as u64) * 1000,
+                _ => 0,
+            };
+            entries.push(M3uEntry {
+                path,
+                title,
+                duration_ms,
+                logo: None,
+                group: None,
+            });
+        }
+    }
+
+    Ok(entries)
+}
+
+/// Generates standard PLS playlist string.
+pub fn generate_pls(entries: &[M3uEntry]) -> String {
+    let mut out = String::from("[playlist]\n");
+    out.push_str(&format!("NumberOfEntries={}\n", entries.len()));
+    for (i, entry) in entries.iter().enumerate() {
+        let idx = i + 1;
+        out.push_str(&format!("File{}={}\n", idx, entry.path));
+        if let Some(ref title) = entry.title {
+            out.push_str(&format!("Title{}={}\n", idx, title));
+        }
+        let length_sec = if entry.duration_ms > 0 {
+            (entry.duration_ms / 1000) as i64
+        } else {
+            -1
+        };
+        out.push_str(&format!("Length{}={}\n", idx, length_sec));
+    }
+    out.push_str("Version=2\n");
+    out
+}
+
+/// Exports playlist to PLS format at destination path.
+pub fn export_pls(entries: &[M3uEntry], dest: &str) -> M3uResult<()> {
+    let content = generate_pls(entries);
+    std::fs::write(dest, content.as_bytes())?;
+    Ok(())
+}
+
+/// Parses XSPF (XML Shareable Playlist Format) XML string, resolving paths against `source`.
+pub fn parse_xspf(content: &str, source: &str) -> M3uResult<Vec<M3uEntry>> {
+    let mut entries = Vec::new();
+    let mut cursor = content;
+
+    while let Some(track_start) = cursor.find("<track>") {
+        let after_start = &cursor[track_start + 7..];
+        let Some(track_end) = after_start.find("</track>") else {
+            break;
+        };
+        let track_xml = &after_start[..track_end];
+        cursor = &after_start[track_end + 8..];
+
+        let location = extract_xml_tag(track_xml, "location");
+        if let Some(raw_loc) = location {
+            let clean_loc = if let Some(stripped) = raw_loc.strip_prefix("file://") {
+                stripped.to_string()
+            } else {
+                raw_loc
+            };
+            let path = resolve_entry(source, &clean_loc)?;
+            let title = extract_xml_tag(track_xml, "title");
+            let duration_ms = extract_xml_tag(track_xml, "duration")
+                .and_then(|d| d.parse::<u64>().ok())
+                .unwrap_or(0);
+            let logo = extract_xml_tag(track_xml, "image");
+
+            entries.push(M3uEntry {
+                path,
+                title,
+                duration_ms,
+                logo,
+                group: None,
+            });
+        }
+    }
+
+    Ok(entries)
+}
+
+/// Generates XSPF XML playlist format.
+pub fn generate_xspf(title: &str, entries: &[M3uEntry]) -> String {
+    let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    out.push_str("<playlist version=\"1\" xmlns=\"http://xspf.org/ns/0/\">\n");
+    out.push_str(&format!("  <title>{}</title>\n", xml_escape(title)));
+    out.push_str("  <trackList>\n");
+    for entry in entries {
+        out.push_str("    <track>\n");
+        let loc = if entry.path.starts_with("http://") || entry.path.starts_with("https://") {
+            entry.path.clone()
+        } else if entry.path.starts_with('/') {
+            format!("file://{}", entry.path)
+        } else {
+            entry.path.clone()
+        };
+        out.push_str(&format!(
+            "      <location>{}</location>\n",
+            xml_escape(&loc)
+        ));
+        if let Some(ref t) = entry.title {
+            out.push_str(&format!("      <title>{}</title>\n", xml_escape(t)));
+        }
+        if entry.duration_ms > 0 {
+            out.push_str(&format!(
+                "      <duration>{}</duration>\n",
+                entry.duration_ms
+            ));
+        }
+        if let Some(ref logo) = entry.logo {
+            out.push_str(&format!("      <image>{}</image>\n", xml_escape(logo)));
+        }
+        out.push_str("    </track>\n");
+    }
+    out.push_str("  </trackList>\n");
+    out.push_str("</playlist>\n");
+    out
+}
+
+/// Exports playlist to XSPF format at destination path.
+pub fn export_xspf(title: &str, entries: &[M3uEntry], dest: &str) -> M3uResult<()> {
+    let content = generate_xspf(title, entries);
+    std::fs::write(dest, content.as_bytes())?;
+    Ok(())
+}
+
+/// Automatically detects format (M3U, PLS, XSPF) and parses playlist entries.
+pub fn parse_playlist_auto(content: &str, source: &str) -> M3uResult<Vec<M3uEntry>> {
+    let lower_source = source.to_lowercase();
+    let trimmed = content.trim_start_matches('\u{feff}').trim_start();
+
+    if lower_source.ends_with(".pls")
+        || trimmed.starts_with("[playlist]")
+        || content.contains("[playlist]")
+    {
+        parse_pls(content, source)
+    } else if lower_source.ends_with(".xspf")
+        || (trimmed.starts_with("<?xml") && content.contains("<playlist"))
+        || content.contains("<trackList>")
+    {
+        parse_xspf(content, source)
+    } else {
+        parse_m3u(content, source)
+    }
+}
+
+fn xml_escape(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
+    let open_tag = format!("<{tag}>");
+    let close_tag = format!("</{tag}>");
+    let start = xml.find(&open_tag)? + open_tag.len();
+    let end = start + xml[start..].find(&close_tag)?;
+    let content = xml[start..end].trim();
+    if content.is_empty() {
+        None
+    } else {
+        Some(
+            content
+                .replace("&amp;", "&")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace("&apos;", "'"),
+        )
+    }
 }
 
 fn parse_extinf(rest: &str) -> (HashMap<String, String>, String, f64) {

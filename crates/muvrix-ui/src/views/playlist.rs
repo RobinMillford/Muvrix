@@ -33,42 +33,51 @@ impl MuvrixApp {
                     }
                 }
                 ui.separator();
-                if ui.button("Import .m3u/.m3u8...").clicked() {
+                if ui
+                    .button("Import Playlist...")
+                    .on_hover_text("Import M3U, M3U8, PLS, or XSPF playlist")
+                    .clicked()
+                {
                     if let Some(file) = rfd::FileDialog::new()
-                        .add_filter("M3U Playlist", &["m3u", "m3u8"])
+                        .add_filter("Playlist Formats", &["m3u", "m3u8", "pls", "xspf"])
                         .pick_file()
                     {
-                        self.import_m3u(&file.to_string_lossy());
+                        self.import_playlist(&file.to_string_lossy());
                     }
                 }
-                // Phase C4: M3U8 Export
+                // Phase D6: Multi-Format Playlist Export
                 if let Some(id) = self.selected_persistent_playlist {
                     if ui
-                        .button("Export .m3u8...")
-                        .on_hover_text("Export active playlist to M3U8 file")
+                        .button("Export Playlist...")
+                        .on_hover_text("Export active playlist to M3U8, PLS, or XSPF file")
                         .clicked()
                     {
                         self.show_export_playlist_modal = true;
                         self.export_playlist_target_id = Some(id);
+                        let ext = match self.export_playlist_format {
+                            crate::app::PlaylistExportFormat::M3u8 => "m3u8",
+                            crate::app::PlaylistExportFormat::Pls => "pls",
+                            crate::app::PlaylistExportFormat::Xspf => "xspf",
+                        };
                         let default_name = playlists
                             .iter()
                             .find(|p| p.id == id)
-                            .map(|p| format!("{}.m3u8", p.name.replace(' ', "_")))
-                            .unwrap_or_else(|| format!("playlist_{id}.m3u8"));
+                            .map(|p| format!("{}.{}", p.name.replace(' ', "_"), ext))
+                            .unwrap_or_else(|| format!("playlist_{id}.{ext}"));
                         self.export_playlist_path_input = default_name;
                         self.export_playlist_status = None;
                     }
                 }
                 ui.add(
                     egui::TextEdit::singleline(&mut self.playlist_import_input)
-                        .hint_text("M3U URL")
+                        .hint_text("Playlist URL / Path")
                         .desired_width(200.0),
                 );
                 if ui.button("Import URL").clicked()
                     && !self.playlist_import_input.trim().is_empty()
                 {
                     let source = self.playlist_import_input.trim().to_string();
-                    self.import_m3u(&source);
+                    self.import_playlist(&source);
                 }
             });
 
@@ -305,7 +314,7 @@ impl MuvrixApp {
                 }
             }
 
-            // Phase C4: Export Playlist Dialog (active queue or saved playlist)
+            // Phase D6: Multi-Format Export Playlist Dialog (active queue or saved playlist)
             if self.show_export_playlist_modal {
                 let mut close_dialog = false;
                 let mut is_open = true;
@@ -317,25 +326,71 @@ impl MuvrixApp {
                 egui::Window::new(title)
                     .collapsible(false)
                     .resizable(false)
-                    .default_width(380.0)
+                    .default_width(420.0)
                     .open(&mut is_open)
                     .show(ui.ctx(), |ui| {
                         ui.label(
-                            RichText::new("Export Playlist to File (.m3u / .m3u8):")
+                            RichText::new("Export Playlist to File:")
                                 .strong()
                                 .color(BrandPalette::PRIMARY_TEXT),
                         );
+                        ui.add_space(4.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Format:").size(12.0));
+                            let prev = self.export_playlist_format;
+                            ui.radio_value(
+                                &mut self.export_playlist_format,
+                                crate::app::PlaylistExportFormat::M3u8,
+                                "M3U8 (.m3u8)",
+                            );
+                            ui.radio_value(
+                                &mut self.export_playlist_format,
+                                crate::app::PlaylistExportFormat::Pls,
+                                "PLS (.pls)",
+                            );
+                            ui.radio_value(
+                                &mut self.export_playlist_format,
+                                crate::app::PlaylistExportFormat::Xspf,
+                                "XSPF (.xspf)",
+                            );
+                            if prev != self.export_playlist_format {
+                                let new_ext = match self.export_playlist_format {
+                                    crate::app::PlaylistExportFormat::M3u8 => "m3u8",
+                                    crate::app::PlaylistExportFormat::Pls => "pls",
+                                    crate::app::PlaylistExportFormat::Xspf => "xspf",
+                                };
+                                let stem = std::path::Path::new(&self.export_playlist_path_input)
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("playlist");
+                                self.export_playlist_path_input = format!("{stem}.{new_ext}");
+                            }
+                        });
                         ui.add_space(6.0);
+
                         ui.horizontal(|ui| {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.export_playlist_path_input)
-                                    .hint_text("Path to output .m3u or .m3u8 file")
-                                    .desired_width(260.0),
+                                    .hint_text("Path to output playlist file")
+                                    .desired_width(280.0),
                             );
                             if ui.button("Browse...").clicked() {
+                                let (filter_name, filter_exts): (&str, &[&str]) =
+                                    match self.export_playlist_format {
+                                        crate::app::PlaylistExportFormat::M3u8 => {
+                                            ("M3U8 Playlist", &["m3u8", "m3u"])
+                                        }
+                                        crate::app::PlaylistExportFormat::Pls => {
+                                            ("PLS Playlist", &["pls"])
+                                        }
+                                        crate::app::PlaylistExportFormat::Xspf => {
+                                            ("XSPF Playlist", &["xspf"])
+                                        }
+                                    };
                                 if let Some(file) = rfd::FileDialog::new()
                                     .set_title("Export Playlist Destination")
-                                    .add_filter("M3U8 Playlist", &["m3u8", "m3u"])
+                                    .add_filter(filter_name, filter_exts)
                                     .save_file()
                                 {
                                     self.export_playlist_path_input =
@@ -363,7 +418,7 @@ impl MuvrixApp {
                             {
                                 let dest = self.export_playlist_path_input.trim();
                                 if !dest.is_empty() {
-                                    let m3u_entries: Vec<muvrix_core::playlist::M3uEntry> =
+                                    let entries: Vec<muvrix_core::playlist::M3uEntry> =
                                         if let Some(id) = self.export_playlist_target_id {
                                             self.db
                                                 .list_playlist_entries(id)
@@ -390,11 +445,26 @@ impl MuvrixApp {
                                                 })
                                                 .collect()
                                         };
-                                    match muvrix_core::playlist::export_m3u(&m3u_entries, dest) {
+                                    let result = match self.export_playlist_format {
+                                        crate::app::PlaylistExportFormat::M3u8 => {
+                                            muvrix_core::playlist::export_m3u(&entries, dest)
+                                        }
+                                        crate::app::PlaylistExportFormat::Pls => {
+                                            muvrix_core::playlist::export_pls(&entries, dest)
+                                        }
+                                        crate::app::PlaylistExportFormat::Xspf => {
+                                            muvrix_core::playlist::export_xspf(
+                                                "Muvrix Playlist",
+                                                &entries,
+                                                dest,
+                                            )
+                                        }
+                                    };
+                                    match result {
                                         Ok(()) => {
                                             self.export_playlist_status = Some(format!(
                                                 "Successfully exported {} entries to {}",
-                                                m3u_entries.len(),
+                                                entries.len(),
                                                 dest
                                             ));
                                             self.playlist_status =
@@ -420,7 +490,7 @@ impl MuvrixApp {
         ui.add_space(6.0);
     }
 
-    fn import_m3u(&mut self, source: &str) {
+    pub fn import_playlist(&mut self, source: &str) {
         let playlist_id = match self.selected_persistent_playlist {
             Some(id) => id,
             None => {
@@ -442,8 +512,9 @@ impl MuvrixApp {
                 }
             }
         };
-        match muvrix_core::playlist::load_m3u(source) {
+        match muvrix_core::playlist::load_playlist_file_or_url(source) {
             Ok(entries) => {
+                let count = entries.len();
                 for entry in entries {
                     let _ = self.db.add_playlist_entry(
                         playlist_id,
@@ -452,10 +523,14 @@ impl MuvrixApp {
                         entry.duration_ms,
                     );
                 }
-                self.playlist_status = Some(format!("Imported playlist from {source}"));
+                self.playlist_status = Some(format!("Imported {count} items from {source}"));
             }
             Err(e) => self.playlist_status = Some(format!("Import failed: {e}")),
         }
+    }
+
+    pub fn import_m3u(&mut self, source: &str) {
+        self.import_playlist(source);
     }
 
     pub fn render_playlist_view(&mut self, ctx: &egui::Context) {
@@ -478,6 +553,55 @@ impl MuvrixApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if icons::icon_text_button(
                         ui,
+                        Icon::Close,
+                        "Clear Queue",
+                        "Remove all queued items",
+                    )
+                    .clicked()
+                    {
+                        let _ = self.controller.playlist_clear();
+                        self.clear_active_queue_in_db();
+                    }
+
+                    if icons::icon_text_button(
+                        ui,
+                        Icon::Playlist,
+                        "Export Queue...",
+                        "Export active playback queue to M3U8, PLS, or XSPF playlist file",
+                    )
+                    .clicked()
+                    {
+                        self.show_export_playlist_modal = true;
+                        self.export_playlist_target_id = None;
+                        let ext = match self.export_playlist_format {
+                            crate::app::PlaylistExportFormat::M3u8 => "m3u8",
+                            crate::app::PlaylistExportFormat::Pls => "pls",
+                            crate::app::PlaylistExportFormat::Xspf => "xspf",
+                        };
+                        self.export_playlist_path_input = format!("active_queue.{ext}");
+                        self.export_playlist_status = None;
+                    }
+
+                    ui.checkbox(&mut self.playlist_use_smart_shuffle, "Smart Shuffle")
+                        .on_hover_text("Smart shuffle penalizes consecutive tracks from the same artist, album, or genre");
+
+                    if icons::icon_text_button(
+                        ui,
+                        Icon::Shuffle,
+                        if self.playlist_use_smart_shuffle { "Smart Shuffle" } else { "Shuffle" },
+                        if self.playlist_use_smart_shuffle {
+                            "Smart shuffle with artist & album separation"
+                        } else {
+                            "Randomize playback queue order"
+                        },
+                    )
+                    .clicked()
+                    {
+                        self.execute_shuffle();
+                    }
+
+                    if icons::icon_text_button(
+                        ui,
                         Icon::FolderOpen,
                         "Add Files...",
                         "Pick media files to append to queue",
@@ -492,43 +616,8 @@ impl MuvrixApp {
                                 let path_str = f.to_string_lossy().to_string();
                                 let _ = self.controller.playlist_append(&path_str);
                             }
+                            self.sync_active_queue_to_db();
                         }
-                    }
-
-                    if icons::icon_text_button(
-                        ui,
-                        Icon::Shuffle,
-                        "Shuffle",
-                        "Randomize playback queue order",
-                    )
-                    .clicked()
-                    {
-                        let _ = self.controller.playlist_shuffle();
-                    }
-
-                    if icons::icon_text_button(
-                        ui,
-                        Icon::Playlist,
-                        "Export Queue...",
-                        "Export active playback queue to M3U / M3U8 playlist file",
-                    )
-                    .clicked()
-                    {
-                        self.show_export_playlist_modal = true;
-                        self.export_playlist_target_id = None;
-                        self.export_playlist_path_input = "active_queue.m3u8".to_string();
-                        self.export_playlist_status = None;
-                    }
-
-                    if icons::icon_text_button(
-                        ui,
-                        Icon::Close,
-                        "Clear Queue",
-                        "Remove all queued items",
-                    )
-                    .clicked()
-                    {
-                        let _ = self.controller.playlist_clear();
                     }
                 });
             });
@@ -557,34 +646,63 @@ impl MuvrixApp {
             let mut remove_idx: Option<usize> = None;
             let mut move_up_idx: Option<usize> = None;
             let mut move_down_idx: Option<usize> = None;
+            let mut play_next_idx: Option<usize> = None;
+            let mut move_to_end_idx: Option<usize> = None;
 
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     for (idx, item) in playlist_items.iter().enumerate() {
                         let is_active = current_pos == Some(idx) || item.is_playing || item.is_current;
+                        let is_drag_source = self.playlist_drag_source_idx == Some(idx);
+                        let is_drag_target = self.playlist_drag_target_idx == Some(idx);
 
                         let frame_color = if is_active {
                             BrandPalette::CARD_SURFACE
+                        } else if is_drag_source {
+                            Color32::from_rgba_premultiplied(45, 65, 85, 200)
                         } else if idx % 2 == 0 {
                             Color32::from_rgba_premultiplied(24, 35, 44, 180)
                         } else {
                             Color32::from_rgba_premultiplied(17, 26, 34, 180)
                         };
 
-                        let border_stroke = if is_active {
+                        let border_stroke = if is_drag_target {
+                            Stroke::new(2.0_f32, BrandPalette::ELECTRIC_LIME)
+                        } else if is_active {
                             Stroke::new(1.0_f32, BrandPalette::ELECTRIC_LIME)
                         } else {
                             Stroke::NONE
                         };
 
-                        egui::Frame::NONE
+                        let row_resp = egui::Frame::NONE
                             .fill(frame_color)
                             .stroke(border_stroke)
                             .corner_radius(4.0)
                             .inner_margin(egui::Margin::symmetric(10, 6))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
+                                    // Visual Drag Handle
+                                    let handle_resp = ui.add(
+                                        egui::Label::new(
+                                            RichText::new("≡")
+                                                .strong()
+                                                .size(16.0)
+                                                .color(if is_drag_source {
+                                                    BrandPalette::ELECTRIC_LIME
+                                                } else {
+                                                    Color32::from_gray(160)
+                                                }),
+                                        )
+                                        .sense(egui::Sense::click_and_drag()),
+                                    )
+                                    .on_hover_text("Drag to reorder in queue")
+                                    .on_hover_cursor(egui::CursorIcon::Grab);
+
+                                    if handle_resp.drag_started() {
+                                        self.playlist_drag_source_idx = Some(idx);
+                                    }
+
                                     // Index and Play Indicator
                                     if is_active {
                                         icons::icon_label(
@@ -656,6 +774,22 @@ impl MuvrixApp {
                                                 move_up_idx = Some(idx);
                                             }
 
+                                            if ui
+                                                .small_button("End")
+                                                .on_hover_text("Move to end of queue")
+                                                .clicked()
+                                            {
+                                                move_to_end_idx = Some(idx);
+                                            }
+
+                                            if ui
+                                                .small_button("Next")
+                                                .on_hover_text("Play next (insert after current track)")
+                                                .clicked()
+                                            {
+                                                play_next_idx = Some(idx);
+                                            }
+
                                             if !is_active
                                                 && icons::icon_text_button(
                                                     ui,
@@ -670,23 +804,62 @@ impl MuvrixApp {
                                         },
                                     );
                                 });
-                            });
+                            })
+                            .response;
+
+                        if self.playlist_drag_source_idx.is_some() && row_resp.hovered() {
+                            self.playlist_drag_target_idx = Some(idx);
+                        }
+
                         ui.add_space(2.0);
                     }
                 });
 
+            if ui.input(|i| i.pointer.any_released()) {
+                if let (Some(src), Some(tgt)) = (
+                    self.playlist_drag_source_idx.take(),
+                    self.playlist_drag_target_idx.take(),
+                ) {
+                    if src != tgt {
+                        let target_pos = if tgt > src { tgt + 1 } else { tgt };
+                        let _ = self.controller.playlist_move(src, target_pos);
+                        self.sync_active_queue_to_db();
+                        self.playlist_status = Some(format!(
+                            "Reordered item #{} to #{}",
+                            src + 1,
+                            tgt + 1
+                        ));
+                    }
+                }
+            }
+
+            if let Some(idx) = play_next_idx {
+                let cur = current_pos.unwrap_or(0);
+                let target = (cur + 1).min(playlist_count);
+                let target_pos = if target > idx { target + 1 } else { target };
+                let _ = self.controller.playlist_move(idx, target_pos);
+                self.sync_active_queue_to_db();
+            }
+            if let Some(idx) = move_to_end_idx {
+                let _ = self.controller.playlist_move(idx, playlist_count);
+                self.sync_active_queue_to_db();
+            }
             if let Some(idx) = play_idx {
                 let _ = self.controller.playlist_play_index(idx);
+                self.sync_active_queue_to_db();
                 self.current_view = AppView::Player;
             }
             if let Some(idx) = remove_idx {
                 let _ = self.controller.playlist_remove(idx);
+                self.sync_active_queue_to_db();
             }
             if let Some(idx) = move_up_idx {
                 let _ = self.controller.playlist_move(idx, idx - 1);
+                self.sync_active_queue_to_db();
             }
             if let Some(idx) = move_down_idx {
                 let _ = self.controller.playlist_move(idx, idx + 2);
+                self.sync_active_queue_to_db();
             }
         });
     }
@@ -718,7 +891,7 @@ impl MuvrixApp {
                             self.show_playlist_drawer = false;
                         }
                         if icons::icon_button(ui, Icon::Shuffle, "Shuffle queue").clicked() {
-                            let _ = self.controller.playlist_shuffle();
+                            self.execute_shuffle();
                         }
                     });
                 });
@@ -746,6 +919,7 @@ impl MuvrixApp {
                 let playlist_items = self.controller.playlist().to_vec();
                 let mut play_idx: Option<usize> = None;
                 let mut remove_idx: Option<usize> = None;
+                let mut play_next_idx: Option<usize> = None;
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -753,19 +927,51 @@ impl MuvrixApp {
                         for (idx, item) in playlist_items.iter().enumerate() {
                             let is_active =
                                 current_pos == Some(idx) || item.is_playing || item.is_current;
+                            let is_drag_source = self.playlist_drag_source_idx == Some(idx);
+                            let is_drag_target = self.playlist_drag_target_idx == Some(idx);
 
                             let bg_color = if is_active {
                                 Color32::from_rgba_premultiplied(30, 60, 110, 240)
+                            } else if is_drag_source {
+                                Color32::from_rgba_premultiplied(45, 65, 85, 200)
                             } else {
                                 Color32::from_rgba_premultiplied(22, 25, 32, 180)
                             };
 
-                            egui::Frame::NONE
+                            let border_stroke = if is_drag_target {
+                                Stroke::new(2.0_f32, BrandPalette::ELECTRIC_LIME)
+                            } else {
+                                Stroke::NONE
+                            };
+
+                            let row_resp = egui::Frame::NONE
                                 .fill(bg_color)
+                                .stroke(border_stroke)
                                 .corner_radius(3.0)
                                 .inner_margin(egui::Margin::symmetric(6, 4))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
+                                        // Visual Drag Handle
+                                        let handle_resp = ui
+                                            .add(
+                                                egui::Label::new(
+                                                    RichText::new("≡").strong().size(14.0).color(
+                                                        if is_drag_source {
+                                                            BrandPalette::ELECTRIC_LIME
+                                                        } else {
+                                                            Color32::from_gray(150)
+                                                        },
+                                                    ),
+                                                )
+                                                .sense(egui::Sense::click_and_drag()),
+                                            )
+                                            .on_hover_text("Drag to reorder in queue")
+                                            .on_hover_cursor(egui::CursorIcon::Grab);
+
+                                        if handle_resp.drag_started() {
+                                            self.playlist_drag_source_idx = Some(idx);
+                                        }
+
                                         if is_active {
                                             icons::icon_label(
                                                 ui,
@@ -813,19 +1019,55 @@ impl MuvrixApp {
                                                 {
                                                     remove_idx = Some(idx);
                                                 }
+
+                                                if ui
+                                                    .small_button("Next")
+                                                    .on_hover_text("Play next")
+                                                    .clicked()
+                                                {
+                                                    play_next_idx = Some(idx);
+                                                }
                                             },
                                         );
                                     });
-                                });
+                                })
+                                .response;
+
+                            if self.playlist_drag_source_idx.is_some() && row_resp.hovered() {
+                                self.playlist_drag_target_idx = Some(idx);
+                            }
+
                             ui.add_space(2.0);
                         }
                     });
 
+                if ui.input(|i| i.pointer.any_released()) {
+                    if let (Some(src), Some(tgt)) = (
+                        self.playlist_drag_source_idx.take(),
+                        self.playlist_drag_target_idx.take(),
+                    ) {
+                        if src != tgt {
+                            let target_pos = if tgt > src { tgt + 1 } else { tgt };
+                            let _ = self.controller.playlist_move(src, target_pos);
+                            self.sync_active_queue_to_db();
+                        }
+                    }
+                }
+
+                if let Some(idx) = play_next_idx {
+                    let cur = current_pos.unwrap_or(0);
+                    let target = (cur + 1).min(playlist_count);
+                    let target_pos = if target > idx { target + 1 } else { target };
+                    let _ = self.controller.playlist_move(idx, target_pos);
+                    self.sync_active_queue_to_db();
+                }
                 if let Some(idx) = play_idx {
                     let _ = self.controller.playlist_play_index(idx);
+                    self.sync_active_queue_to_db();
                 }
                 if let Some(idx) = remove_idx {
                     let _ = self.controller.playlist_remove(idx);
+                    self.sync_active_queue_to_db();
                 }
             });
     }

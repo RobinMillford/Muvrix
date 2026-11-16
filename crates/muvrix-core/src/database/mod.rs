@@ -494,4 +494,19 @@ impl DatabaseManager {
         let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
         Repository::list_ssh_host_trust(&conn).map_err(DatabaseError::Sqlite)
     }
+
+    pub fn save_active_queue(&self, items: &[ActiveQueueEntry]) -> DbResult<()> {
+        let mut conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::save_active_queue(&mut conn, items).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn load_active_queue(&self) -> DbResult<Vec<ActiveQueueEntry>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::load_active_queue(&conn).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn clear_active_queue(&self) -> DbResult<()> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::clear_active_queue(&conn).map_err(DatabaseError::Sqlite)
+    }
 }

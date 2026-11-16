@@ -15,7 +15,7 @@ pub use formatting::{
 };
 pub use state::{
     mini_player_window_state, sleep_deadline_for, LibrarySelection, MuvrixApp, PlaybackStats,
-    SleepTimer,
+    PlaylistExportFormat, SleepTimer,
 };
 
 use std::time::Duration;
@@ -281,6 +281,7 @@ impl MuvrixApp {
         log::info!("Initiating safe teardown of MuvrixApp");
         self.cancel_library_scan();
         self.cancel_library_enrichment();
+        self.sync_active_queue_to_db();
         self.sleep_inhibitor.set_inhibited(false);
         self.sleep_inhibited = false;
 

@@ -3,7 +3,7 @@
 use rusqlite::{Connection, Result, Transaction};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const LATEST_SCHEMA_VERSION: u32 = 6;
+pub const LATEST_SCHEMA_VERSION: u32 = 7;
 
 /// Apply all pending database migrations within a transaction.
 pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
@@ -64,6 +64,13 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
         let tx = conn.transaction()?;
         migration_006_fts5_search(&tx)?;
         record_migration(&tx, 6, "FTS5 full-text search virtual table and triggers")?;
+        tx.commit()?;
+    }
+
+    if current_version < 7 {
+        let tx = conn.transaction()?;
+        migration_007_active_queue(&tx)?;
+        record_migration(&tx, 7, "Persistent active playback queue table")?;
         tx.commit()?;
     }
 
@@ -412,6 +419,23 @@ fn migration_006_fts5_search(tx: &Transaction) -> Result<()> {
                 genre = COALESCE(new.genre, '')
             WHERE rowid = new.media_id;
         END;
+        ",
+    )?;
+    Ok(())
+}
+
+fn migration_007_active_queue(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS active_playback_queue (
+            position INTEGER PRIMARY KEY,
+            path TEXT NOT NULL,
+            title TEXT,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            is_current INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_active_queue_pos ON active_playback_queue(position ASC);
         ",
     )?;
     Ok(())

@@ -382,6 +382,9 @@ impl MuvrixApp {
             playlist_name_input: String::new(),
             playlist_import_input: String::new(),
             playlist_status: None,
+            playlist_drag_source_idx: None,
+            playlist_drag_target_idx: None,
+            playlist_use_smart_shuffle: true,
             media_session: MediaSession::start(),
             sleep_inhibitor: SleepInhibitor::new(),
             sleep_inhibited: false,
@@ -608,6 +611,7 @@ impl MuvrixApp {
             export_playlist_path_input: String::new(),
             export_playlist_status: None,
             export_playlist_target_id: None,
+            export_playlist_format: crate::app::PlaylistExportFormat::default(),
         };
 
         app.refresh_library();
@@ -681,6 +685,23 @@ impl MuvrixApp {
             for item in seed_queue.split(';') {
                 if !item.trim().is_empty() {
                     let _ = app.controller.playlist_append(item.trim());
+                }
+            }
+        } else if app.controller.playlist_count() == 0
+            && std::env::var("MUVRIX_NO_RESUME_QUEUE").is_err()
+        {
+            if let Ok(active_entries) = app.db.load_active_queue() {
+                if !active_entries.is_empty() {
+                    let mut resume_cursor = 0;
+                    for (i, entry) in active_entries.iter().enumerate() {
+                        let _ = app.controller.playlist_append(&entry.path);
+                        if entry.is_current {
+                            resume_cursor = i;
+                        }
+                    }
+                    if resume_cursor > 0 {
+                        let _ = app.controller.playlist_play_index(resume_cursor);
+                    }
                 }
             }
         }
@@ -994,6 +1015,21 @@ impl MuvrixApp {
             app.show_export_playlist_modal = true;
             app.export_playlist_path_input = "exported_queue.m3u8".to_string();
             app.export_playlist_status = Some("Ready to export".to_string());
+        }
+        if let Ok(src_str) = std::env::var("MUVRIX_PLAYLIST_DRAG_SOURCE") {
+            if let Ok(src) = src_str.parse::<usize>() {
+                app.playlist_drag_source_idx = Some(src);
+            }
+        }
+        if let Ok(tgt_str) = std::env::var("MUVRIX_PLAYLIST_DRAG_TARGET") {
+            if let Ok(tgt) = tgt_str.parse::<usize>() {
+                app.playlist_drag_target_idx = Some(tgt);
+            }
+        }
+        if std::env::var("MUVRIX_SMART_SHUFFLE").is_ok() {
+            app.playlist_use_smart_shuffle = true;
+            app.playlist_status =
+                Some("Smart shuffled queue with artist & album separation".to_string());
         }
         if let Ok(offset_str) = std::env::var("MUVRIX_CAROUSEL_OFFSET") {
             if let Ok(offset) = offset_str.parse::<f32>() {
