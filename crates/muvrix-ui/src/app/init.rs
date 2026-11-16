@@ -337,7 +337,7 @@ impl MuvrixApp {
             path_input: String::new(),
             is_fullscreen: false,
             show_shortcuts: false,
-            show_diagnostics: false,
+            show_diagnostics: std::env::var("MUVRIX_SHOW_DIAGNOSTICS").is_ok(),
             screenshot_requested: false,
             screenshot_frames: 0,
             update_count: 0,
@@ -1067,6 +1067,55 @@ impl MuvrixApp {
                 .total_bytes_read
                 .store(48_920_412, std::sync::atomic::Ordering::Relaxed);
             app.controller.set_stream_telemetry(Some(telemetry));
+        }
+
+        // Phase E1 resilience simulation hooks for visual QA
+        if let Ok(status) = std::env::var("MUVRIX_SIMULATE_AUDIO_HOTPLUG") {
+            match status.as_str() {
+                "lost" => {
+                    let _ = app
+                        .controller
+                        .set_audio_device("USB DAC Studio Monitor Pro");
+                    let _ = app
+                        .controller
+                        .audio()
+                        .on_device_list_changed(app.controller.handle());
+                    app.status_message =
+                        "Audio device 'USB DAC Studio Monitor Pro' disconnected; rerouted to system default"
+                            .to_string();
+                }
+                "recovered" => {
+                    app.status_message =
+                        "Preferred audio device 'USB DAC Studio Monitor Pro' reconnected; restored route"
+                            .to_string();
+                }
+                _ => {}
+            }
+        }
+        if let Ok(mode) = std::env::var("MUVRIX_SIMULATE_WATCHDOG_STATUS") {
+            match mode.as_str() {
+                "fallback" => {
+                    let reason = muvrix_player::DecoderFallbackReason::StallDetected {
+                        stall_duration_secs: 3.2,
+                        dropped_frames: 12,
+                    };
+                    let _ = app
+                        .controller
+                        .video()
+                        .trigger_decoder_fallback(app.controller.handle(), reason);
+                }
+                "exhausted" => {
+                    let _ = app.controller.video().trigger_decoder_fallback(
+                        app.controller.handle(),
+                        muvrix_player::DecoderFallbackReason::PersistentErrors { error_count: 5 },
+                    );
+                    let _ = app.controller.video().trigger_decoder_fallback(
+                        app.controller.handle(),
+                        muvrix_player::DecoderFallbackReason::PersistentErrors { error_count: 5 },
+                    );
+                }
+                _ => {}
+            }
         }
 
         Ok(app)

@@ -60,6 +60,49 @@ impl MuvrixApp {
                             .monospace()
                             .color(Color32::from_rgb(120, 200, 255)),
                         );
+
+                        let watchdog_status = self.controller.video().watchdog_status();
+                        match watchdog_status {
+                            muvrix_player::WatchdogStatus::FallenBack {
+                                active_mode,
+                                reason,
+                                ..
+                            } => {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Watchdog: Fallback to {active_mode} ({})",
+                                        reason.describe()
+                                    ))
+                                    .monospace()
+                                    .color(Color32::from_rgb(255, 120, 100)),
+                                );
+                            }
+                            muvrix_player::WatchdogStatus::StallWarning {
+                                elapsed_secs,
+                                drop_count,
+                            } => {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Watchdog: Stall Warning ({elapsed_secs:.1}s, {drop_count} drops)"
+                                    ))
+                                    .monospace()
+                                    .color(Color32::from_rgb(255, 200, 50)),
+                                );
+                            }
+                            muvrix_player::WatchdogStatus::Exhausted {
+                                active_mode,
+                                reason,
+                            } => {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Watchdog Exhausted: {active_mode} ({reason})"
+                                    ))
+                                    .monospace()
+                                    .color(Color32::from_rgb(255, 80, 80)),
+                                );
+                            }
+                            _ => {}
+                        }
                         if let Some(hdr) = &self.hdr_state {
                             if hdr.source.is_hdr() {
                                 ui.label(

@@ -17,6 +17,7 @@ pub mod settings;
 pub mod shader;
 pub mod shuffle;
 pub mod stream;
+pub mod subsystems;
 pub mod thumbnail;
 pub mod track;
 pub mod version;
@@ -60,6 +61,10 @@ pub use stream::{
     classify_io_error, HttpRangeStream, IoSeekableStream, MemoryStream, MpvStreamBridge,
     ReadAheadStream, RecoverableStream, RecoveryState, SeekableStream, SftpSeekableStream,
     SmbSeekableStream, StreamErrorKind, StreamRegistry, StreamRetryPolicy, StreamTelemetry,
+};
+pub use subsystems::{
+    AudioDeviceChangeEvent, AudioRecoveryStatus, AudioSubsystem, DecoderFallbackReason,
+    DecoderWatchdog, TrackSubsystem, VideoSubsystem, WatchdogStatus,
 };
 pub use thumbnail::MpvThumbnailExtractor;
 pub use track::{

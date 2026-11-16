@@ -1,7 +1,5 @@
 use eframe::egui::{self, Color32, RichText, Sense, StrokeKind};
-use muvrix_player::equalizer::{
-    Bs2bPreset, EqualizerManager, EqualizerPreset, EqualizerSettings, EQ_FREQUENCIES,
-};
+use muvrix_player::equalizer::{Bs2bPreset, EqualizerPreset, EqualizerSettings, EQ_FREQUENCIES};
 use muvrix_player::AudioChannelsSetting;
 
 use crate::app::MuvrixApp;
@@ -895,10 +893,9 @@ impl MuvrixApp {
                                 .clicked()
                             {
                                 self.selected_audio_device = dev.name.clone();
-                                let _ = EqualizerManager::set_audio_device_with_fallback(
-                                    self.controller.handle(),
-                                    &dev.name,
-                                );
+                                let _ = self
+                                    .controller
+                                    .set_audio_device_with_fallback(&dev.name);
                             }
                         }
                     });
@@ -907,6 +904,46 @@ impl MuvrixApp {
                     self.refresh_audio_devices();
                 }
             });
+
+            // Display hotplug recovery notification status if active
+            let recovery_status = self.controller.audio().recovery_status();
+            match recovery_status {
+                muvrix_player::AudioRecoveryStatus::DeviceLost {
+                    device_name,
+                    fallback_device,
+                } => {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "Notice: Preferred device '{device_name}' disconnected; rerouted to '{fallback_device}'"
+                        ))
+                        .size(11.5)
+                        .color(Color32::from_rgb(251, 146, 60)),
+                    );
+                }
+                muvrix_player::AudioRecoveryStatus::Recovered {
+                    active_device,
+                    was_device,
+                } => {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "Restored: Reconnected to '{active_device}' (rerouted from '{was_device}')"
+                        ))
+                        .size(11.5)
+                        .color(Color32::from_rgb(74, 222, 128)),
+                    );
+                }
+                muvrix_player::AudioRecoveryStatus::Degraded { reason } => {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!("Warning: {reason}"))
+                            .size(11.5)
+                            .color(Color32::from_rgb(239, 68, 68)),
+                    );
+                }
+                _ => {}
+            }
         });
     }
 }

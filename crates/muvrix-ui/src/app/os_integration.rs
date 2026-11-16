@@ -323,6 +323,9 @@ impl MuvrixApp {
     /// Updates playback properties and polls events from mpv.
     pub(crate) fn sync_playback_state(&mut self) {
         let events = self.controller.poll_events();
+        if let Some(note) = self.controller.take_recovery_notification() {
+            self.status_message = note;
+        }
         for event in events {
             match event {
                 Event::FileLoaded => {
