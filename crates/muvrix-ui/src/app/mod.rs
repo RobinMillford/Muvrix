@@ -10,8 +10,8 @@ pub mod shortcuts;
 pub mod state;
 
 pub use formatting::{
-    calculate_progress, format_codec_name, format_speed, format_timestamp, format_track_label,
-    format_volume,
+    calculate_progress, format_codec_name, format_speed, format_timestamp, format_timestamp_ms,
+    format_track_label, format_volume,
 };
 pub use state::{
     mini_player_window_state, sleep_deadline_for, LibrarySelection, MuvrixApp, PlaybackStats,

@@ -316,6 +316,8 @@ impl MuvrixApp {
             gl_version,
             is_seeking: false,
             seek_target: 0.0,
+            stepping_preset: muvrix_player::SteppingPreset::default(),
+            jog_drag_accumulator: 0.0,
             status_message: "Ready. Open a media file to begin playback.".to_string(),
             last_frame_instant: Instant::now(),
             frame_durations: VecDeque::with_capacity(60),
@@ -632,6 +634,36 @@ impl MuvrixApp {
         }
         if std::env::var("MUVRIX_INITIAL_PAUSE").is_ok() {
             let _ = app.controller.pause();
+        }
+        if let Ok(ab_str) = std::env::var("MUVRIX_SEED_AB_LOOP") {
+            let parts: Vec<&str> = ab_str.split(';').collect();
+            if parts.len() == 2 {
+                if let (Ok(a), Ok(b)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                    let _ = app.controller.set_ab_loop(a, b);
+                }
+            } else if parts.len() == 1 {
+                if let Ok(a) = parts[0].parse::<f64>() {
+                    let _ = app.controller.set_ab_loop_a(a);
+                }
+            }
+        }
+        if let Ok(preset_str) = std::env::var("MUVRIX_STEPPING_PRESET") {
+            app.stepping_preset = match preset_str.to_lowercase().as_str() {
+                "film24" | "24" => muvrix_player::SteppingPreset::Film24,
+                "ntsc30" | "30" => muvrix_player::SteppingPreset::Ntsc30,
+                "highrate60" | "60" => muvrix_player::SteppingPreset::HighRate60,
+                _ => muvrix_player::SteppingPreset::Frame,
+            };
+        }
+        if let Ok(sub_id) = std::env::var("MUVRIX_SELECT_SUBTITLE") {
+            if let Ok(id) = sub_id.parse::<i64>() {
+                let _ = app.controller.set_subtitle_track(Some(id));
+            }
+        }
+        if let Ok(sec_id) = std::env::var("MUVRIX_SELECT_SECONDARY_SUBTITLE") {
+            if let Ok(id) = sec_id.parse::<i64>() {
+                let _ = app.controller.set_secondary_sub_track(Some(id));
+            }
         }
         // Phase 2.9 diagnostic: test whether mpv's display-sync path changes VO
         // frame drops when it is told the actual output refresh instead of

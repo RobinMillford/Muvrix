@@ -4,7 +4,111 @@ use std::time::{Duration, Instant};
 
 use muvrix_player::{MpvHandle, PlaybackController, PlaybackState, SeekMode, TrackType};
 
+fn ensure_d2_fixtures() {
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    let _ = std::fs::create_dir_all(&base);
+
+    let sub_en = base.join("sub_en.srt");
+    if !sub_en.exists() {
+        let content = "1\n00:00:00,500 --> 00:00:03,000\nWelcome to Muvrix Desktop D2 Showcase\n\n2\n00:00:03,500 --> 00:00:06,500\nPrecision Timeline and Chapters\n\n3\n00:00:07,000 --> 00:00:09,500\nSimultaneous Bilingual Subtitles\n";
+        let _ = std::fs::write(&sub_en, content);
+    }
+
+    let sub_ja = base.join("sub_ja.srt");
+    if !sub_ja.exists() {
+        let content = "1\n00:00:00,500 --> 00:00:03,000\nMuvrix デスクトップ D2 ショーケースへようこそ\n\n2\n00:00:03,500 --> 00:00:06,500\n高精度タイムラインとチャプター\n\n3\n00:00:07,000 --> 00:00:09,500\n同時バイリンガル字幕\n";
+        let _ = std::fs::write(&sub_ja, content);
+    }
+
+    let meta = base.join("d2_meta.txt");
+    if !meta.exists() {
+        let content = ";FFMETADATA1\ntitle=Muvrix D2 Feature Showcase\n\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2500\ntitle=Chapter 1: Introduction\n\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=2500\nEND=5500\ntitle=Chapter 2: Motion Showcase\n\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=5500\nEND=8500\ntitle=Chapter 3: Climax Scene\n\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=8500\nEND=10000\ntitle=Chapter 4: Credits\n";
+        let _ = std::fs::write(&meta, content);
+    }
+
+    let mkv = base.join("d2_feature_showcase.mkv");
+    if !mkv.exists() {
+        let _ = std::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=10:size=320x240:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=44100:cl=stereo",
+                "-t",
+                "10",
+                "-i",
+                meta.to_str().unwrap(),
+                "-i",
+                sub_en.to_str().unwrap(),
+                "-i",
+                sub_ja.to_str().unwrap(),
+                "-map_metadata",
+                "2",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map",
+                "3:s",
+                "-map",
+                "4:s",
+                "-metadata:s:s:0",
+                "language=eng",
+                "-metadata:s:s:0",
+                "title=English",
+                "-metadata:s:s:1",
+                "language=jpn",
+                "-metadata:s:s:1",
+                "title=Japanese",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+                "-c:s",
+                "srt",
+                mkv.to_str().unwrap(),
+                "-y",
+            ])
+            .status();
+    }
+
+    let vfr = base.join("vfr_feature_showcase.mp4");
+    if !vfr.exists() {
+        let _ = std::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=6:size=320x240:rate=30",
+                "-vf",
+                "setpts='if(lt(N,30), PTS*0.5, if(lt(N,60), PTS*1.5, PTS*0.8))'",
+                "-fps_mode",
+                "vfr",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                vfr.to_str().unwrap(),
+                "-y",
+            ])
+            .status();
+    }
+}
+
 fn find_media_path(relative: &str) -> PathBuf {
+    if relative.contains("d2_") || relative.contains("sub_") || relative.contains("vfr_") {
+        ensure_d2_fixtures();
+    }
     let candidates = [
         PathBuf::from(relative),
         PathBuf::from("../../").join(relative),
@@ -734,4 +838,207 @@ fn test_playback_lifecycle_50_cycles_stress() {
             );
         }
     }
+}
+
+#[test]
+fn test_controller_d2_features_with_live_mkv() {
+    let path = find_media_path("tests/fixtures/d2_feature_showcase.mkv");
+    let mut controller = create_test_controller();
+    controller
+        .load_file(path.to_str().unwrap())
+        .expect("Load d2_feature_showcase.mkv succeeds");
+
+    assert!(wait_for_state(
+        &mut controller,
+        |s| matches!(s, PlaybackState::Playing),
+        Duration::from_secs(3)
+    ));
+
+    // Refresh telemetry
+    controller.refresh_metadata();
+
+    // 1. Verify Chapter Extraction from libmpv
+    let chapters = controller.chapters();
+    assert_eq!(chapters.len(), 4, "Expected 4 parsed chapters");
+    assert_eq!(chapters[0].title, "Chapter 1: Introduction");
+    assert!((chapters[0].time - 0.0).abs() < 0.01);
+    assert_eq!(chapters[1].title, "Chapter 2: Motion Showcase");
+    assert!((chapters[1].time - 2.5).abs() < 0.01);
+    assert_eq!(chapters[2].title, "Chapter 3: Climax Scene");
+    assert!((chapters[2].time - 5.5).abs() < 0.01);
+    assert_eq!(chapters[3].title, "Chapter 4: Credits");
+    assert!((chapters[3].time - 8.5).abs() < 0.01);
+
+    // Chapter jumping
+    controller.set_chapter(1).expect("Set chapter 1 succeeds");
+    controller.next_chapter().expect("Next chapter succeeds");
+    controller.prev_chapter().expect("Prev chapter succeeds");
+
+    // 2. Verify A-B Loop Controls and State Synchronization
+    assert_eq!(controller.ab_loop_state(), muvrix_player::AbLoopState::None);
+    controller
+        .set_ab_loop(1.5, 6.5)
+        .expect("Set A-B loop succeeds");
+    assert_eq!(
+        controller.ab_loop_state(),
+        muvrix_player::AbLoopState::Loop { a: 1.5, b: 6.5 }
+    );
+
+    controller.clear_ab_loop().expect("Clear A-B loop succeeds");
+    assert_eq!(controller.ab_loop_state(), muvrix_player::AbLoopState::None);
+
+    controller.set_ab_loop_a(2.0).expect("Set Point A succeeds");
+    assert_eq!(
+        controller.ab_loop_state(),
+        muvrix_player::AbLoopState::PointA(2.0)
+    );
+
+    controller.set_ab_loop_b(7.0).expect("Set Point B succeeds");
+    assert_eq!(
+        controller.ab_loop_state(),
+        muvrix_player::AbLoopState::Loop { a: 2.0, b: 7.0 }
+    );
+    controller.clear_ab_loop().expect("Clear A-B loop succeeds");
+
+    // 3. Verify Precision Frame Stepping and Presets
+    controller.frame_step().expect("frame_step succeeds");
+    assert!(*controller.state() == PlaybackState::Paused || controller.time_pos() >= 0.0);
+
+    controller
+        .frame_back_step()
+        .expect("frame_back_step succeeds");
+
+    controller
+        .step_preset_forward(muvrix_player::SteppingPreset::Film24)
+        .expect("step Film24 succeeds");
+    controller
+        .step_preset_backward(muvrix_player::SteppingPreset::Ntsc30)
+        .expect("step Ntsc30 succeeds");
+
+    // 4. Verify Dual Subtitle Streams
+    let sub_tracks = controller.tracks_by_type(muvrix_player::track::TrackType::Subtitle);
+    assert!(
+        sub_tracks.len() >= 2,
+        "Expected at least 2 subtitle tracks in showcase mkv"
+    );
+
+    let pri_id = sub_tracks[0].id;
+    let sec_id = sub_tracks[1].id;
+
+    // Enable primary
+    controller
+        .set_subtitle_track(Some(pri_id))
+        .expect("set primary sub succeeds");
+    // Enable secondary simultaneously
+    controller
+        .set_secondary_sub_track(Some(sec_id))
+        .expect("set secondary sub succeeds");
+
+    assert_eq!(controller.secondary_sub_track_id(), Some(sec_id));
+
+    // Disable secondary independently
+    controller
+        .set_secondary_sub_track(None)
+        .expect("disable secondary sub succeeds");
+    assert_eq!(controller.secondary_sub_track_id(), None);
+
+    // Disable primary
+    controller
+        .set_subtitle_track(None)
+        .expect("disable primary sub succeeds");
+
+    controller.stop().expect("Stop succeeds");
+}
+
+#[test]
+fn test_controller_d2_external_subtitles_and_vfr() {
+    let video_path = find_media_path("tests/fixtures/test_video.mp4");
+    let sub_en_path = find_media_path("tests/fixtures/sub_en.srt");
+    let sub_ja_path = find_media_path("tests/fixtures/sub_ja.srt");
+    let vfr_path = find_media_path("tests/fixtures/vfr_feature_showcase.mp4");
+
+    let mut controller = create_test_controller();
+    controller
+        .load_file(video_path.to_str().unwrap())
+        .expect("Load test_video.mp4 succeeds");
+
+    assert!(wait_for_state(
+        &mut controller,
+        |s| matches!(s, PlaybackState::Playing),
+        Duration::from_secs(3)
+    ));
+
+    // Load external subtitle 1
+    controller
+        .add_subtitle_file(sub_en_path.to_str().unwrap(), true)
+        .expect("Add external sub_en succeeds");
+
+    // Load external subtitle 2
+    controller
+        .add_subtitle_file(sub_ja_path.to_str().unwrap(), false)
+        .expect("Add external sub_ja succeeds");
+
+    // Refresh telemetry
+    controller.refresh_metadata();
+    let sub_tracks = controller.tracks_by_type(muvrix_player::track::TrackType::Subtitle);
+    assert!(
+        sub_tracks.len() >= 2,
+        "Expected at least 2 loaded external subtitle tracks"
+    );
+
+    let ext_sub1 = sub_tracks[0].id;
+    let ext_sub2 = sub_tracks[1].id;
+
+    // Select primary external sub
+    controller
+        .set_subtitle_track(Some(ext_sub1))
+        .expect("Set primary external sub succeeds");
+
+    // Select secondary external sub
+    controller
+        .set_secondary_sub_track(Some(ext_sub2))
+        .expect("Set secondary external sub succeeds");
+
+    assert_eq!(controller.secondary_sub_track_id(), Some(ext_sub2));
+
+    // Independent delay controls
+    controller
+        .set_subtitle_delay(0.5)
+        .expect("Set primary sub delay succeeds");
+    assert!((controller.sub_delay() - 0.5).abs() < 0.05);
+
+    controller
+        .set_secondary_sub_delay(-0.25)
+        .expect("Set secondary sub delay succeeds");
+
+    controller.stop().expect("Stop succeeds");
+
+    // Now verify VFR (Variable Frame Rate) video playback and precision frame stepping
+    controller
+        .load_file(vfr_path.to_str().unwrap())
+        .expect("Load vfr_feature_showcase.mp4 succeeds");
+
+    assert!(wait_for_state(
+        &mut controller,
+        |s| matches!(s, PlaybackState::Playing),
+        Duration::from_secs(3)
+    ));
+
+    // Frame stepping on VFR
+    controller.frame_step().expect("frame_step on VFR succeeds");
+    assert!(controller.is_paused() || *controller.state() == PlaybackState::Paused);
+
+    controller
+        .frame_back_step()
+        .expect("frame_back_step on VFR succeeds");
+
+    controller
+        .step_preset_forward(muvrix_player::SteppingPreset::HighRate60)
+        .expect("step HighRate60 on VFR succeeds");
+
+    controller
+        .step_preset_backward(muvrix_player::SteppingPreset::Film24)
+        .expect("step Film24 on VFR succeeds");
+
+    controller.stop().expect("Stop VFR succeeds");
 }

@@ -17,7 +17,8 @@ use muvrix_player::equalizer::{AudioDeviceInfo, EqualizerSettings};
 use muvrix_player::shader::{Anime4KPreset, ShaderQuality, VideoAdjustmentSettings};
 use muvrix_player::{
     AccentColor, AudioChannelsSetting, DecodeObservation, DecodePolicy, MediaCapabilities,
-    MpvStreamBridge, PlaybackController, PresentationState, SubtitleStyling, ThemeMode,
+    MpvStreamBridge, PlaybackController, PresentationState, SteppingPreset, SubtitleStyling,
+    ThemeMode,
 };
 
 use crate::config_editor::ConfigEditorFile;
@@ -133,6 +134,8 @@ pub struct MuvrixApp {
     // UI and interaction state
     pub(crate) is_seeking: bool,
     pub(crate) seek_target: f64,
+    pub(crate) stepping_preset: SteppingPreset,
+    pub(crate) jog_drag_accumulator: f32,
     pub(crate) status_message: String,
     pub(crate) path_input: String,
     pub(crate) is_fullscreen: bool,

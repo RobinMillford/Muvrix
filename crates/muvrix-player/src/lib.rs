@@ -28,6 +28,7 @@ pub use capability::{
 pub use command::{LoadFileMode, SeekMode};
 pub use controller::{
     parse_mpvex_command, AbLoopState, MpvexCommand, PlaybackController, PlaybackState, RepeatMode,
+    SteppingPreset,
 };
 pub use decode::{DecodeObservation, DecodePath, DecodePolicy, PlatformFamily};
 pub use equalizer::{

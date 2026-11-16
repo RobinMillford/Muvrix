@@ -2,10 +2,13 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, Vec2};
 use muvrix_player::{
-    AbLoopState, AccentColor, PlaybackState, RepeatMode, SeekMode, ThemeMode, TrackInfo, TrackType,
+    AbLoopState, AccentColor, PlaybackState, RepeatMode, SeekMode, SteppingPreset, ThemeMode,
+    TrackInfo, TrackType,
 };
 
-use crate::app::{format_timestamp, format_track_label, MuvrixApp, SleepTimer};
+use crate::app::{
+    format_timestamp, format_timestamp_ms, format_track_label, MuvrixApp, SleepTimer,
+};
 use crate::branding::{self, BrandPalette};
 use crate::icons::{self, Icon};
 
@@ -139,7 +142,7 @@ impl MuvrixApp {
                 let duration = self.controller.duration();
 
                 ui.horizontal(|ui| {
-                    let cur_str = format_timestamp(time_pos);
+                    let cur_str = format_timestamp_ms(time_pos);
                     let dur_str = format_timestamp(duration);
                     let remaining_str = format_timestamp((duration - time_pos).max(0.0));
 
@@ -166,7 +169,9 @@ impl MuvrixApp {
 
                     let response = ui.add_sized([slider_width, 18.0], slider);
 
-                    // Context-aware hover information: chapter title, bookmark pin details, or seek timestamp
+                    // Context-aware hover information: A-B loop boundaries, chapter title, bookmark pin details, or seek timestamp
+                    let mut hovered_chapter: Option<(i64, f64)> = None;
+                    let mut hovered_ab_point: Option<f64> = None;
                     let (hover_sec, custom_hover) = if let Some(mouse_pos) = response.hover_pos() {
                         if duration > 0.0 {
                             let frac = ((mouse_pos.x - response.rect.min.x)
@@ -174,34 +179,84 @@ impl MuvrixApp {
                             .clamp(0.0, 1.0);
                             let sec = (frac as f64) * duration;
                             let mut hover_detail = None;
-                            for bm in &self.active_bookmarks {
-                                let frac =
-                                    (bm.timestamp_seconds() / duration).clamp(0.0, 1.0) as f32;
-                                let x = response.rect.min.x + frac * response.rect.width();
-                                if (mouse_pos.x - x).abs() <= 7.0 {
-                                    let note_str = bm
-                                        .note
-                                        .as_deref()
-                                        .map(|n| format!(" — {}", n))
-                                        .unwrap_or_default();
-                                    hover_detail = Some(format!(
-                                        "🔖 {} ({}){}",
-                                        bm.label,
-                                        format_timestamp(bm.timestamp_seconds()),
-                                        note_str
-                                    ));
-                                    break;
+
+                            // 1. Check A-B loop boundary pins & active region
+                            match self.controller.ab_loop_state() {
+                                AbLoopState::Loop { a, b } => {
+                                    let frac_a = (a / duration).clamp(0.0, 1.0) as f32;
+                                    let frac_b = (b / duration).clamp(0.0, 1.0) as f32;
+                                    let x_a = response.rect.min.x + frac_a * response.rect.width();
+                                    let x_b = response.rect.min.x + frac_b * response.rect.width();
+                                    if (mouse_pos.x - x_a).abs() <= 7.0 {
+                                        hovered_ab_point = Some(a);
+                                        hover_detail = Some(format!(
+                                            "🔁 A-B Loop Point A: {} (click to seek)",
+                                            format_timestamp_ms(a)
+                                        ));
+                                    } else if (mouse_pos.x - x_b).abs() <= 7.0 {
+                                        hovered_ab_point = Some(b);
+                                        hover_detail = Some(format!(
+                                            "🔁 A-B Loop Point B: {} (click to seek)",
+                                            format_timestamp_ms(b)
+                                        ));
+                                    } else if mouse_pos.x >= x_a && mouse_pos.x <= x_b {
+                                        hover_detail = Some(format!(
+                                            "🔁 Active A-B Loop: {} ➔ {} (Span: {:.2}s)",
+                                            format_timestamp_ms(a),
+                                            format_timestamp_ms(b),
+                                            (b - a).max(0.0)
+                                        ));
+                                    }
+                                }
+                                AbLoopState::PointA(a) => {
+                                    let frac_a = (a / duration).clamp(0.0, 1.0) as f32;
+                                    let x_a = response.rect.min.x + frac_a * response.rect.width();
+                                    if (mouse_pos.x - x_a).abs() <= 7.0 {
+                                        hovered_ab_point = Some(a);
+                                        hover_detail = Some(format!(
+                                            "🔁 A-B Loop Point A: {} (waiting for Point B)",
+                                            format_timestamp_ms(a)
+                                        ));
+                                    }
+                                }
+                                AbLoopState::None => {}
+                            }
+
+                            // 2. Bookmarks
+                            if hover_detail.is_none() {
+                                for bm in &self.active_bookmarks {
+                                    let frac =
+                                        (bm.timestamp_seconds() / duration).clamp(0.0, 1.0) as f32;
+                                    let x = response.rect.min.x + frac * response.rect.width();
+                                    if (mouse_pos.x - x).abs() <= 7.0 {
+                                        let note_str = bm
+                                            .note
+                                            .as_deref()
+                                            .map(|n| format!(" — {}", n))
+                                            .unwrap_or_default();
+                                        hover_detail = Some(format!(
+                                            "🔖 {} ({}){}",
+                                            bm.label,
+                                            format_timestamp_ms(bm.timestamp_seconds()),
+                                            note_str
+                                        ));
+                                        break;
+                                    }
                                 }
                             }
+
+                            // 3. Chapters with exact snapping
                             if hover_detail.is_none() {
                                 for ch in self.controller.chapters() {
                                     let frac = (ch.time / duration).clamp(0.0, 1.0) as f32;
                                     let x = response.rect.min.x + frac * response.rect.width();
                                     if (mouse_pos.x - x).abs() <= 7.0 {
+                                        hovered_chapter = Some((ch.index, ch.time));
                                         hover_detail = Some(format!(
-                                            "📑 {} ({})",
+                                            "📑 Chapter {}: {} ({})",
+                                            ch.index + 1,
                                             ch.title,
-                                            format_timestamp(ch.time)
+                                            format_timestamp_ms(ch.time)
                                         ));
                                         break;
                                     }
@@ -217,21 +272,150 @@ impl MuvrixApp {
 
                     let tooltip = custom_hover.unwrap_or_else(|| {
                         if let Some(sec) = hover_sec {
-                            format!("Seek to {}", format_timestamp(sec))
+                            format!("Seek to {}", format_timestamp_ms(sec))
                         } else {
-                            format!("Seek to {}", format_timestamp(slider_val))
+                            format!("Seek to {}", format_timestamp_ms(slider_val))
                         }
                     });
                     let response = response.on_hover_text(tooltip);
+
+                    // Draw A-B loop highlighted region and boundary flags on slider track
+                    if duration > 0.0 {
+                        let painter = ui.painter();
+                        let lime_col = BrandPalette::ELECTRIC_LIME;
+                        match self.controller.ab_loop_state() {
+                            AbLoopState::Loop { a, b } => {
+                                let a_clamped = a.clamp(0.0, max_dur);
+                                let b_clamped = b.clamp(a_clamped, max_dur);
+                                let frac_a = (a_clamped / max_dur) as f32;
+                                let frac_b = (b_clamped / max_dur) as f32;
+                                let x_a = response.rect.min.x + frac_a * response.rect.width();
+                                let x_b = response.rect.min.x + frac_b * response.rect.width();
+
+                                // Highlighted filled loop range
+                                let loop_rect = Rect::from_min_max(
+                                    Pos2::new(x_a, response.rect.min.y + 1.0),
+                                    Pos2::new(x_b, response.rect.max.y - 1.0),
+                                );
+                                painter.rect_filled(
+                                    loop_rect,
+                                    2.0,
+                                    Color32::from_rgba_unmultiplied(197, 243, 106, 45),
+                                );
+                                painter.line_segment(
+                                    [
+                                        Pos2::new(x_a, response.rect.min.y + 1.0),
+                                        Pos2::new(x_b, response.rect.min.y + 1.0),
+                                    ],
+                                    Stroke::new(
+                                        1.0_f32,
+                                        Color32::from_rgba_unmultiplied(197, 243, 106, 160),
+                                    ),
+                                );
+                                painter.line_segment(
+                                    [
+                                        Pos2::new(x_a, response.rect.max.y - 1.0),
+                                        Pos2::new(x_b, response.rect.max.y - 1.0),
+                                    ],
+                                    Stroke::new(
+                                        1.0_f32,
+                                        Color32::from_rgba_unmultiplied(197, 243, 106, 160),
+                                    ),
+                                );
+
+                                // Point A marker and badge
+                                painter.line_segment(
+                                    [
+                                        Pos2::new(x_a, response.rect.min.y - 2.0),
+                                        Pos2::new(x_a, response.rect.max.y + 2.0),
+                                    ],
+                                    Stroke::new(2.0_f32, lime_col),
+                                );
+                                painter.rect_filled(
+                                    Rect::from_center_size(
+                                        Pos2::new(x_a, response.rect.min.y - 5.0),
+                                        Vec2::new(11.0, 10.0),
+                                    ),
+                                    2.0,
+                                    lime_col,
+                                );
+                                painter.text(
+                                    Pos2::new(x_a, response.rect.min.y - 5.0),
+                                    egui::Align2::CENTER_CENTER,
+                                    "A",
+                                    egui::FontId::proportional(8.5),
+                                    BrandPalette::OBSIDIAN,
+                                );
+
+                                // Point B marker and badge
+                                painter.line_segment(
+                                    [
+                                        Pos2::new(x_b, response.rect.min.y - 2.0),
+                                        Pos2::new(x_b, response.rect.max.y + 2.0),
+                                    ],
+                                    Stroke::new(2.0_f32, lime_col),
+                                );
+                                painter.rect_filled(
+                                    Rect::from_center_size(
+                                        Pos2::new(x_b, response.rect.min.y - 5.0),
+                                        Vec2::new(11.0, 10.0),
+                                    ),
+                                    2.0,
+                                    lime_col,
+                                );
+                                painter.text(
+                                    Pos2::new(x_b, response.rect.min.y - 5.0),
+                                    egui::Align2::CENTER_CENTER,
+                                    "B",
+                                    egui::FontId::proportional(8.5),
+                                    BrandPalette::OBSIDIAN,
+                                );
+                            }
+                            AbLoopState::PointA(a) => {
+                                let a_clamped = a.clamp(0.0, max_dur);
+                                let frac_a = (a_clamped / max_dur) as f32;
+                                let x_a = response.rect.min.x + frac_a * response.rect.width();
+
+                                // Point A marker and badge
+                                painter.line_segment(
+                                    [
+                                        Pos2::new(x_a, response.rect.min.y - 2.0),
+                                        Pos2::new(x_a, response.rect.max.y + 2.0),
+                                    ],
+                                    Stroke::new(2.0_f32, lime_col),
+                                );
+                                painter.rect_filled(
+                                    Rect::from_center_size(
+                                        Pos2::new(x_a, response.rect.min.y - 5.0),
+                                        Vec2::new(11.0, 10.0),
+                                    ),
+                                    2.0,
+                                    lime_col,
+                                );
+                                painter.text(
+                                    Pos2::new(x_a, response.rect.min.y - 5.0),
+                                    egui::Align2::CENTER_CENTER,
+                                    "A",
+                                    egui::FontId::proportional(8.5),
+                                    BrandPalette::OBSIDIAN,
+                                );
+                            }
+                            AbLoopState::None => {}
+                        }
+                    }
 
                     // Draw visual chapter marks on slider track echoing logo notches
                     let chapters = self.controller.chapters();
                     if duration > 0.0 && !chapters.is_empty() {
                         let painter = ui.painter();
-                        let notch_col = if self.accent_color == AccentColor::Lime {
-                            BrandPalette::ELECTRIC_LIME
-                        } else {
-                            Color32::from_rgb(56, 189, 248)
+                        let notch_col = match self.accent_color {
+                            AccentColor::Lime => BrandPalette::ELECTRIC_LIME,
+                            AccentColor::Blue => Color32::from_rgb(60, 150, 245),
+                            AccentColor::Purple => Color32::from_rgb(168, 85, 247),
+                            AccentColor::Teal => Color32::from_rgb(20, 184, 166),
+                            AccentColor::Green => Color32::from_rgb(74, 222, 128),
+                            AccentColor::Orange => Color32::from_rgb(249, 115, 22),
+                            AccentColor::Red => Color32::from_rgb(239, 68, 68),
                         };
                         for ch in chapters {
                             let frac = (ch.time / duration).clamp(0.0, 1.0) as f32;
@@ -244,7 +428,7 @@ impl MuvrixApp {
                                 Stroke::new(2.0_f32, notch_col),
                             );
                             painter.circle_filled(
-                                Pos2::new(x, response.rect.min.y - 1.0),
+                                Pos2::new(x, response.rect.min.y - 1.5),
                                 2.5,
                                 notch_col,
                             );
@@ -308,22 +492,42 @@ impl MuvrixApp {
 
                     if response.drag_started() {
                         self.is_seeking = true;
-                        self.seek_target = slider_val;
+                        self.seek_target = if let Some((_, ch_time)) = hovered_chapter {
+                            ch_time
+                        } else if let Some(ab_pt) = hovered_ab_point {
+                            ab_pt
+                        } else {
+                            slider_val
+                        };
                     }
                     if response.dragged() {
                         self.seek_target = slider_val;
                     }
                     if response.drag_stopped() {
-                        let _ = self.controller.seek(self.seek_target, SeekMode::Absolute);
+                        if let Some((ch_idx, ch_time)) = hovered_chapter {
+                            let _ = self.controller.seek(ch_time, SeekMode::Absolute);
+                            let _ = self.controller.set_chapter(ch_idx);
+                        } else if let Some(ab_pt) = hovered_ab_point {
+                            let _ = self.controller.seek(ab_pt, SeekMode::Absolute);
+                        } else {
+                            let _ = self.controller.seek(self.seek_target, SeekMode::Absolute);
+                        }
                         self.is_seeking = false;
                     }
                     if response.clicked() {
-                        let click_sec = if let Some(sec) = hover_sec {
-                            sec
+                        if let Some((ch_idx, ch_time)) = hovered_chapter {
+                            let _ = self.controller.seek(ch_time, SeekMode::Absolute);
+                            let _ = self.controller.set_chapter(ch_idx);
+                        } else if let Some(ab_pt) = hovered_ab_point {
+                            let _ = self.controller.seek(ab_pt, SeekMode::Absolute);
                         } else {
-                            slider_val
-                        };
-                        let _ = self.controller.seek(click_sec, SeekMode::Absolute);
+                            let click_sec = if let Some(sec) = hover_sec {
+                                sec
+                            } else {
+                                slider_val
+                            };
+                            let _ = self.controller.seek(click_sec, SeekMode::Absolute);
+                        }
                     }
 
                     // Duration timestamp
@@ -398,34 +602,275 @@ impl MuvrixApp {
                     }
 
                     ui.add_space(2.0);
-                    if ui
-                        .button("◀|")
-                        .on_hover_text("Previous frame (,)")
-                        .clicked()
-                    {
-                        self.frame_back_step();
-                    }
-                    if ui.button("|▶").on_hover_text("Next frame (.)").clicked() {
-                        self.frame_step();
+
+                    // Precision Stepping Preset selector
+                    let cur_preset = self.stepping_preset;
+                    let preset_tip = format!(
+                        "Stepping Preset: {}\n• Frame: 1 decoded video frame (native)\n• 1/24s: Film standard (41.7ms)\n• 1/30s: NTSC standard (33.3ms)\n• 1/60s: High-Rate (16.7ms)",
+                        cur_preset.label()
+                    );
+                    let preset_label = if deck_width < 1400.0 {
+                        match cur_preset {
+                            SteppingPreset::Frame => "Frame",
+                            SteppingPreset::Film24 => "Film",
+                            SteppingPreset::Ntsc30 => "NTSC",
+                            SteppingPreset::HighRate60 => "60fps",
+                        }
+                    } else {
+                        cur_preset.label()
+                    };
+                    egui::ComboBox::from_id_salt("stepping_preset_combo")
+                        .selected_text(preset_label)
+                        .width(if deck_width < 1400.0 { 56.0 } else { 76.0 })
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(
+                                    self.stepping_preset == SteppingPreset::Frame,
+                                    "Frame (Decoded)",
+                                )
+                                .clicked()
+                            {
+                                self.stepping_preset = SteppingPreset::Frame;
+                            }
+                            if ui
+                                .selectable_label(
+                                    self.stepping_preset == SteppingPreset::Film24,
+                                    "1/24s (Film)",
+                                )
+                                .clicked()
+                            {
+                                self.stepping_preset = SteppingPreset::Film24;
+                            }
+                            if ui
+                                .selectable_label(
+                                    self.stepping_preset == SteppingPreset::Ntsc30,
+                                    "1/30s (NTSC)",
+                                )
+                                .clicked()
+                            {
+                                self.stepping_preset = SteppingPreset::Ntsc30;
+                            }
+                            if ui
+                                .selectable_label(
+                                    self.stepping_preset == SteppingPreset::HighRate60,
+                                    "1/60s (High-Rate)",
+                                )
+                                .clicked()
+                            {
+                                self.stepping_preset = SteppingPreset::HighRate60;
+                            }
+                        })
+                        .response
+                        .on_hover_text(preset_tip);
+
+                    // Step Backward button
+                    let back_tip = format!(
+                        "Step backward [{}] (,)",
+                        self.stepping_preset.label()
+                    );
+                    if ui.button("◀|").on_hover_text(back_tip).clicked() {
+                        let _ = self
+                            .controller
+                            .step_preset_backward(self.stepping_preset);
                     }
 
-                    let ab_label = match self.controller.ab_loop_state() {
-                        AbLoopState::None => "A-B",
-                        AbLoopState::PointA(_) => "A-B•",
-                        AbLoopState::Loop { .. } => "A-B↺",
+                    // Tactile Jog-Wheel Scrub Widget
+                    let jog_size = Vec2::new(48.0, 22.0);
+                    let (jog_rect, jog_response) =
+                        ui.allocate_exact_size(jog_size, Sense::click_and_drag());
+                    if ui.is_rect_visible(jog_rect) {
+                        let painter = ui.painter();
+                        let jog_bg = if jog_response.dragged() {
+                            BrandPalette::SLATE_SURFACE
+                        } else if jog_response.hovered() {
+                            BrandPalette::SECONDARY_BG
+                        } else {
+                            BrandPalette::OBSIDIAN
+                        };
+                        painter.rect_filled(jog_rect, 3.0, jog_bg);
+                        painter.rect_stroke(
+                            jog_rect,
+                            3.0,
+                            Stroke::new(
+                                1.0_f32,
+                                if jog_response.dragged() {
+                                    BrandPalette::ELECTRIC_LIME
+                                } else {
+                                    Color32::from_gray(60)
+                                },
+                            ),
+                            StrokeKind::Inside,
+                        );
+
+                        // Horizontal dial graduation tick marks
+                        let center_x = jog_rect.center().x;
+                        let offset = self.jog_drag_accumulator % 8.0;
+                        for i in -3..=3 {
+                            let tick_x = center_x + (i as f32) * 8.0 + offset;
+                            if tick_x >= jog_rect.min.x + 3.0 && tick_x <= jog_rect.max.x - 3.0 {
+                                let alpha = (1.0
+                                    - ((tick_x - center_x).abs() / (jog_size.x * 0.5)))
+                                    .clamp(0.1, 0.8);
+                                painter.line_segment(
+                                    [
+                                        Pos2::new(tick_x, jog_rect.min.y + 4.0),
+                                        Pos2::new(tick_x, jog_rect.max.y - 4.0),
+                                    ],
+                                    Stroke::new(
+                                        1.0_f32,
+                                        Color32::from_rgba_unmultiplied(
+                                            165,
+                                            175,
+                                            185,
+                                            (alpha * 255.0) as u8,
+                                        ),
+                                    ),
+                                );
+                            }
+                        }
+
+                        // Center index needle in Electric Lime
+                        painter.line_segment(
+                            [
+                                Pos2::new(center_x, jog_rect.min.y + 2.0),
+                                Pos2::new(center_x, jog_rect.max.y - 2.0),
+                            ],
+                            Stroke::new(1.5_f32, BrandPalette::ELECTRIC_LIME),
+                        );
+                    }
+
+                    if jog_response.dragged() {
+                        let dx = jog_response.drag_delta().x;
+                        self.jog_drag_accumulator += dx;
+                        const JOG_THRESHOLD: f32 = 8.0;
+                        while self.jog_drag_accumulator >= JOG_THRESHOLD {
+                            let _ = self
+                                .controller
+                                .step_preset_forward(self.stepping_preset);
+                            self.jog_drag_accumulator -= JOG_THRESHOLD;
+                        }
+                        while self.jog_drag_accumulator <= -JOG_THRESHOLD {
+                            let _ = self
+                                .controller
+                                .step_preset_backward(self.stepping_preset);
+                            self.jog_drag_accumulator += JOG_THRESHOLD;
+                        }
+                    } else if !jog_response.hovered() {
+                        self.jog_drag_accumulator = 0.0;
+                    }
+
+                    let jog_tooltip = format!(
+                        "Precision Jog-Wheel: Drag horizontally to scrub [{}]\nTimestamp: {}",
+                        self.stepping_preset.label(),
+                        format_timestamp_ms(time_pos)
+                    );
+                    let jog_response = jog_response.on_hover_text(jog_tooltip);
+                    if jog_response.clicked() {
+                        // Single click toggles 1 frame forward
+                        let _ = self
+                            .controller
+                            .step_preset_forward(self.stepping_preset);
+                    }
+
+                    // Step Forward button
+                    let fwd_tip =
+                        format!("Step forward [{}] (.)", self.stepping_preset.label());
+                    if ui.button("|▶").on_hover_text(fwd_tip).clicked() {
+                        let _ = self
+                            .controller
+                            .step_preset_forward(self.stepping_preset);
+                    }
+
+                    ui.add_space(2.0);
+
+                    // A-B Loop Controls
+                    let ab_state = self.controller.ab_loop_state();
+                    let (ab_text, ab_tip) = match ab_state {
+                        AbLoopState::None => (
+                            RichText::new("A-B")
+                                .size(11.5)
+                                .color(BrandPalette::PRIMARY_TEXT),
+                            "Cycle A-B loop (L) • Click to set Point A at current timestamp\nRight-click for options"
+                                .to_string(),
+                        ),
+                        AbLoopState::PointA(a) => (
+                            RichText::new("A-B•")
+                                .size(11.5)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                            format!(
+                                "Point A set at {}\nClick to set Point B (L)\nRight-click for options",
+                                format_timestamp_ms(a)
+                            ),
+                        ),
+                        AbLoopState::Loop { a, b } => (
+                            RichText::new("A-B↺")
+                                .size(11.5)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                            format!(
+                                "Active Loop: {} ➔ {}\nClick to clear loop (L)\nRight-click for options",
+                                format_timestamp_ms(a),
+                                format_timestamp_ms(b)
+                            ),
+                        ),
                     };
-                    if ui
-                        .button(ab_label)
-                        .on_hover_text("Cycle A-B loop (L)")
-                        .clicked()
-                    {
+
+                    let ab_btn = ui.button(ab_text).on_hover_text(ab_tip);
+                    if ab_btn.clicked() {
                         self.cycle_ab_loop();
                     }
 
-                    let repeat_label = match self.controller.repeat_mode() {
-                        RepeatMode::Off => "Repeat: Off",
-                        RepeatMode::One => "Repeat: One",
-                        RepeatMode::All => "Repeat: All",
+                    // Context menu on right-click for explicit A-B loop management
+                    ab_btn.context_menu(|ui| {
+                        ui.label(
+                            RichText::new("A-B Loop Options")
+                                .strong()
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        ui.separator();
+                        if ui.button("Set Point A (Current Time)").clicked() {
+                            let _ = self.controller.set_ab_loop_a(time_pos);
+                            ui.close_menu();
+                        }
+                        if ui.button("Set Point B (Current Time)").clicked() {
+                            let _ = self.controller.set_ab_loop_b(time_pos);
+                            ui.close_menu();
+                        }
+                        if let AbLoopState::Loop { a, b } = ab_state {
+                            ui.separator();
+                            if ui
+                                .button(format!("Jump to Point A ({})", format_timestamp(a)))
+                                .clicked()
+                            {
+                                let _ = self.controller.seek(a, SeekMode::Absolute);
+                                ui.close_menu();
+                            }
+                            if ui
+                                .button(format!("Jump to Point B ({})", format_timestamp(b)))
+                                .clicked()
+                            {
+                                let _ = self.controller.seek(b, SeekMode::Absolute);
+                                ui.close_menu();
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Clear Loop").clicked() {
+                            let _ = self.controller.clear_ab_loop();
+                            ui.close_menu();
+                        }
+                    });
+
+                    let repeat_label = if deck_width < 1400.0 {
+                        match self.controller.repeat_mode() {
+                            RepeatMode::Off => "Rep: Off",
+                            RepeatMode::One => "Rep: 1",
+                            RepeatMode::All => "Rep: All",
+                        }
+                    } else {
+                        match self.controller.repeat_mode() {
+                            RepeatMode::Off => "Repeat: Off",
+                            RepeatMode::One => "Repeat: One",
+                            RepeatMode::All => "Repeat: All",
+                        }
                     };
                     if ui
                         .button(repeat_label)
@@ -447,42 +892,45 @@ impl MuvrixApp {
                             let _ = self.controller.next_chapter();
                         }
 
-                        let cur_ch_idx = self.controller.current_chapter().unwrap_or(0);
-                        let selected_title = chapters
-                            .iter()
-                            .find(|c| c.index == cur_ch_idx)
-                            .map(|c| {
-                                if deck_width < 960.0 {
-                                    format!("Ch {}", c.index + 1)
-                                } else {
-                                    format!("Ch {}: {}", c.index + 1, c.title)
-                                }
-                            })
-                            .unwrap_or_else(|| "Chapters".to_string());
-
-                        egui::ComboBox::from_id_salt("chapters_combo")
-                            .selected_text(selected_title)
-                            .show_ui(ui, |ui| {
-                                for ch in &chapters {
-                                    let label = format!(
-                                        "{}: {} ({})",
-                                        ch.index + 1,
-                                        ch.title,
-                                        format_timestamp(ch.time)
-                                    );
-                                    let is_selected =
-                                        Some(ch.index) == self.controller.current_chapter();
-                                    if ui.selectable_label(is_selected, label).clicked() {
-                                        let _ = self.controller.set_chapter(ch.index);
+                        if deck_width >= 1120.0 {
+                            let cur_ch_idx = self.controller.current_chapter().unwrap_or(0);
+                            let selected_title = chapters
+                                .iter()
+                                .find(|c| c.index == cur_ch_idx)
+                                .map(|c| {
+                                    if deck_width < 1400.0 {
+                                        format!("Ch {}", c.index + 1)
+                                    } else {
+                                        format!("Ch {}: {}", c.index + 1, c.title)
                                     }
-                                }
-                            });
+                                })
+                                .unwrap_or_else(|| "Chapters".to_string());
+
+                            egui::ComboBox::from_id_salt("chapters_combo")
+                                .selected_text(selected_title)
+                                .width(if deck_width < 1400.0 { 60.0 } else { 120.0 })
+                                .show_ui(ui, |ui| {
+                                    for ch in &chapters {
+                                        let label = format!(
+                                            "{}: {} ({})",
+                                            ch.index + 1,
+                                            ch.title,
+                                            format_timestamp(ch.time)
+                                        );
+                                        let is_selected =
+                                            Some(ch.index) == self.controller.current_chapter();
+                                        if ui.selectable_label(is_selected, label).clicked() {
+                                            let _ = self.controller.set_chapter(ch.index);
+                                        }
+                                    }
+                                });
+                        }
                     }
 
                     // Bookmark actions
-                    if self.controller.current_file().is_some() {
+                    if self.controller.current_file().is_some() && deck_width >= 1120.0 {
                         ui.add_space(2.0);
-                        let bm_btn_text = if deck_width < 960.0 {
+                        let bm_btn_text = if deck_width < 1400.0 {
                             "🔖"
                         } else {
                             "🔖 Bookmark"
@@ -496,7 +944,7 @@ impl MuvrixApp {
                             self.add_bookmark(&label, None);
                         }
 
-                        if !self.active_bookmarks.is_empty() {
+                        if !self.active_bookmarks.is_empty() && deck_width >= 1400.0 {
                             ui.add_space(2.0);
                             egui::ComboBox::from_id_salt("bookmarks_combo")
                                 .selected_text(format!(
@@ -545,7 +993,13 @@ impl MuvrixApp {
                     let vol_slider = egui::Slider::new(&mut vol, 0.0..=max_volume)
                         .show_value(false)
                         .text(vol_label);
-                    let vol_w = if deck_width < 960.0 { 38.0 } else { 65.0 };
+                    let vol_w = if deck_width < 1120.0 {
+                        35.0
+                    } else if deck_width < 1400.0 {
+                        45.0
+                    } else {
+                        65.0
+                    };
                     let vol_res = ui
                         .add_sized([vol_w, 18.0], vol_slider)
                         .on_hover_text(format!("Volume: {:.0}% (Up/Down Arrow)", vol));
@@ -580,7 +1034,7 @@ impl MuvrixApp {
                             }
                         });
 
-                    if deck_width >= 960.0
+                    if deck_width >= 1400.0
                         && (current_speed - 1.0).abs() > 0.01
                         && ui
                             .button("1.0x")
@@ -593,8 +1047,13 @@ impl MuvrixApp {
                     ui.add_space(3.0);
                     ui.separator();
                     ui.add_space(3.0);
+                    let sleep_label = if deck_width < 1400.0 {
+                        format!("⏰ {}", self.sleep_timer.label())
+                    } else {
+                        format!("Sleep: {}", self.sleep_timer.label())
+                    };
                     egui::ComboBox::from_id_salt("sleep_timer_combo")
-                        .selected_text(format!("Sleep: {}", self.sleep_timer.label()))
+                        .selected_text(sleep_label)
                         .show_ui(ui, |ui| {
                             for option in [
                                 SleepTimer::Off,
@@ -650,6 +1109,7 @@ impl MuvrixApp {
                             .controller
                             .selected_track(TrackType::Subtitle)
                             .map(|t| t.id);
+                        let selected_sec_id = self.controller.secondary_sub_track_id();
 
                         let audio_tracks: Vec<TrackInfo> = self
                             .controller
@@ -662,8 +1122,8 @@ impl MuvrixApp {
                             .selected_track(TrackType::Audio)
                             .map(|t| t.id);
 
-                        // If width is constrained (<760px), consolidate into a single contextual "Tracks" menu
-                        if deck_width < 760.0 {
+                        // If width is constrained (<1120px), consolidate into a single contextual "Tracks" menu
+                        if deck_width < 1120.0 {
                             egui::ComboBox::from_id_salt("tracks_combo_compact")
                                 .selected_text("Tracks")
                                 .show_ui(ui, |ui| {
@@ -691,7 +1151,7 @@ impl MuvrixApp {
 
                                     ui.separator();
                                     ui.label(
-                                        RichText::new("Subtitle Track")
+                                        RichText::new("Primary Subtitles (Bottom)")
                                             .strong()
                                             .color(Color32::from_rgb(120, 200, 255)),
                                     );
@@ -714,6 +1174,31 @@ impl MuvrixApp {
                                     }
 
                                     ui.separator();
+                                    ui.label(
+                                        RichText::new("Secondary Subtitles (Top)")
+                                            .strong()
+                                            .color(BrandPalette::ELECTRIC_LIME),
+                                    );
+                                    if ui
+                                        .selectable_label(
+                                            selected_sec_id.is_none(),
+                                            "Off (Disabled)",
+                                        )
+                                        .clicked()
+                                    {
+                                        let _ = self.controller.set_secondary_sub_track(None);
+                                    }
+                                    for track in &sub_tracks {
+                                        let label = format_track_label(track);
+                                        let is_selected = selected_sec_id == Some(track.id);
+                                        if ui.selectable_label(is_selected, label).clicked() {
+                                            let _ = self
+                                                .controller
+                                                .set_secondary_sub_track(Some(track.id));
+                                        }
+                                    }
+
+                                    ui.separator();
                                     if icons::icon_text_button(
                                         ui,
                                         Icon::FolderOpen,
@@ -726,32 +1211,62 @@ impl MuvrixApp {
                                     }
                                 });
                         } else {
-                            // Subtitle track selector
-                            let sub_summary = if let Some(id) = selected_sub_id {
-                                if let Some(t) = sub_tracks.iter().find(|t| t.id == id) {
-                                    let label = t
-                                        .lang
+                            // Subtitle track selector (Dual Subtitle support)
+                            let pri_label = selected_sub_id
+                                .and_then(|id| sub_tracks.iter().find(|t| t.id == id))
+                                .map(|t| {
+                                    t.lang
                                         .as_deref()
-                                        .unwrap_or(t.title.as_deref().unwrap_or("On"));
-                                    if deck_width < 960.0 {
-                                        format!("Sub: {label}")
+                                        .unwrap_or(t.title.as_deref().unwrap_or("On"))
+                                });
+                            let sec_label = selected_sec_id
+                                .and_then(|id| sub_tracks.iter().find(|t| t.id == id))
+                                .map(|t| {
+                                    t.lang
+                                        .as_deref()
+                                        .unwrap_or(t.title.as_deref().unwrap_or("On"))
+                                });
+
+                            let sub_summary = match (pri_label, sec_label) {
+                                (Some(p), Some(s)) => {
+                                    if deck_width < 1400.0 {
+                                        format!("Sub: {p}+{s}")
                                     } else {
-                                        format!("Subtitles: {label}")
+                                        format!("Subtitles: {p} + {s} (Dual)")
                                     }
-                                } else if deck_width < 960.0 {
-                                    "Sub: On".to_string()
-                                } else {
-                                    "Subtitles: On".to_string()
                                 }
-                            } else if deck_width < 960.0 {
-                                "Sub: Off".to_string()
-                            } else {
-                                "Subtitles: Off".to_string()
+                                (Some(p), None) => {
+                                    if deck_width < 1400.0 {
+                                        format!("Sub: {p}")
+                                    } else {
+                                        format!("Subtitles: {p}")
+                                    }
+                                }
+                                (None, Some(s)) => {
+                                    if deck_width < 1400.0 {
+                                        format!("Sub: {s} (Top)")
+                                    } else {
+                                        format!("Subtitles: {s} (Top)")
+                                    }
+                                }
+                                (None, None) => {
+                                    if deck_width < 1400.0 {
+                                        "Sub: Off".to_string()
+                                    } else {
+                                        "Subtitles: Off".to_string()
+                                    }
+                                }
                             };
 
                             egui::ComboBox::from_id_salt("sub_combo")
                                 .selected_text(sub_summary)
                                 .show_ui(ui, |ui| {
+                                    // Primary Subtitles Section
+                                    ui.label(
+                                        RichText::new("Primary Subtitles (Bottom)")
+                                            .strong()
+                                            .color(Color32::from_rgb(120, 200, 255)),
+                                    );
                                     if ui
                                         .selectable_label(
                                             selected_sub_id.is_none(),
@@ -768,18 +1283,6 @@ impl MuvrixApp {
                                             let _ =
                                                 self.controller.set_subtitle_track(Some(track.id));
                                         }
-                                    }
-
-                                    ui.separator();
-                                    if icons::icon_text_button(
-                                        ui,
-                                        Icon::FolderOpen,
-                                        "Add Subtitle File...",
-                                        "Load external subtitle file",
-                                    )
-                                    .clicked()
-                                    {
-                                        self.add_subtitle_dialog();
                                     }
 
                                     let cur_delay = self.controller.sub_delay();
@@ -801,8 +1304,72 @@ impl MuvrixApp {
                                     });
 
                                     let mut vis = self.controller.sub_visibility();
-                                    if ui.checkbox(&mut vis, "Subtitle Visible").changed() {
+                                    if ui.checkbox(&mut vis, "Primary Visible").changed() {
                                         let _ = self.controller.set_subtitle_visibility(vis);
+                                    }
+
+                                    ui.separator();
+
+                                    // Secondary Subtitles Section
+                                    ui.label(
+                                        RichText::new("Secondary Subtitles (Top - Bilingual)")
+                                            .strong()
+                                            .color(BrandPalette::ELECTRIC_LIME),
+                                    );
+                                    if ui
+                                        .selectable_label(
+                                            selected_sec_id.is_none(),
+                                            "Off (Disabled)",
+                                        )
+                                        .clicked()
+                                    {
+                                        let _ = self.controller.set_secondary_sub_track(None);
+                                    }
+                                    for track in &sub_tracks {
+                                        let label = format_track_label(track);
+                                        let is_selected = selected_sec_id == Some(track.id);
+                                        if ui.selectable_label(is_selected, label).clicked() {
+                                            let _ = self
+                                                .controller
+                                                .set_secondary_sub_track(Some(track.id));
+                                        }
+                                    }
+
+                                    ui.horizontal(|ui| {
+                                        ui.label("Sec Delay:");
+                                        if ui.button("-0.25s").clicked() {
+                                            let _ = self
+                                                .controller
+                                                .set_secondary_sub_delay(-0.25);
+                                        }
+                                        if ui.button("0s").clicked() {
+                                            let _ = self
+                                                .controller
+                                                .set_secondary_sub_delay(0.0);
+                                        }
+                                        if ui.button("+0.25s").clicked() {
+                                            let _ = self
+                                                .controller
+                                                .set_secondary_sub_delay(0.25);
+                                        }
+                                    });
+
+                                    ui.label(
+                                        RichText::new("Positioning: Primary @ Bottom • Secondary @ Top")
+                                            .size(10.5)
+                                            .color(BrandPalette::MUTED_TEXT),
+                                    );
+
+                                    ui.separator();
+                                    if icons::icon_text_button(
+                                        ui,
+                                        Icon::FolderOpen,
+                                        "Add Subtitle File...",
+                                        "Load external subtitle file",
+                                    )
+                                    .clicked()
+                                    {
+                                        self.add_subtitle_dialog();
                                     }
                                 });
 
@@ -815,17 +1382,17 @@ impl MuvrixApp {
                                         .lang
                                         .as_deref()
                                         .unwrap_or(t.title.as_deref().unwrap_or("On"));
-                                    if deck_width < 960.0 {
+                                    if deck_width < 1400.0 {
                                         format!("Aud: {label}")
                                     } else {
                                         format!("Audio: {label}")
                                     }
-                                } else if deck_width < 960.0 {
+                                } else if deck_width < 1400.0 {
                                     "Aud: On".to_string()
                                 } else {
                                     "Audio: On".to_string()
                                 }
-                            } else if deck_width < 960.0 {
+                            } else if deck_width < 1400.0 {
                                 "Aud: None".to_string()
                             } else {
                                 "Audio: None".to_string()

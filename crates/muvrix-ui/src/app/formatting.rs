@@ -16,6 +16,23 @@ pub fn format_timestamp(seconds: f64) -> String {
     }
 }
 
+/// Formats seconds into millisecond-accurate HH:MM:SS.mmm or MM:SS.mmm presentation.
+pub fn format_timestamp_ms(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return "00:00.000".to_string();
+    }
+    let total_secs = seconds.floor() as u64;
+    let millis = ((seconds.fract() * 1000.0).round() as u64).min(999);
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    if hours > 0 {
+        format!("{hours:02}:{mins:02}:{secs:02}.{millis:03}")
+    } else {
+        format!("{mins:02}:{secs:02}.{millis:03}")
+    }
+}
+
 /// Calculates normalized progress fraction clamped to [0.0, 1.0].
 pub fn calculate_progress(time_pos: f64, duration: f64) -> f32 {
     if duration <= 0.0 || time_pos <= 0.0 || time_pos.is_nan() || duration.is_nan() {

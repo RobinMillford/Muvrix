@@ -37,6 +37,8 @@ pub const PROP_MPVEX_TOGGLE_UI: u64 = 21;
 pub const PROP_MPVEX_SHOW_PANEL: u64 = 22;
 pub const PROP_MPVEX_SEEK_BY: u64 = 23;
 pub const PROP_MPVEX_SEEK_TO: u64 = 24;
+pub const PROP_AB_LOOP_A: u64 = 25;
+pub const PROP_AB_LOOP_B: u64 = 26;
 
 /// A-B loop state for the current media item.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -57,6 +59,40 @@ pub enum RepeatMode {
     Off,
     One,
     All,
+}
+
+/// Precision frame-stepping preset modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SteppingPreset {
+    /// Advance/retreat exactly one decoded video frame using native libmpv frame-step.
+    #[default]
+    Frame,
+    /// Advance/retreat by 1/24 second (~41.67ms, Film standard).
+    Film24,
+    /// Advance/retreat by 1/30 second (~33.33ms, NTSC standard).
+    Ntsc30,
+    /// Advance/retreat by 1/60 second (~16.67ms, High-Rate standard).
+    HighRate60,
+}
+
+impl SteppingPreset {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Frame => "Frame",
+            Self::Film24 => "1/24s (Film)",
+            Self::Ntsc30 => "1/30s (NTSC)",
+            Self::HighRate60 => "1/60s (High-Rate)",
+        }
+    }
+
+    pub fn delta_seconds(&self) -> Option<f64> {
+        match self {
+            Self::Frame => None,
+            Self::Film24 => Some(1.0 / 24.0),
+            Self::Ntsc30 => Some(1.0 / 30.0),
+            Self::HighRate60 => Some(1.0 / 60.0),
+        }
+    }
 }
 
 /// Command emitted by a Lua `user-data/mpvex/*` property update.
@@ -217,6 +253,8 @@ impl PlaybackController {
             "user-data/mpvex/seek_to",
             PropertyFormat::None,
         );
+        let _ = handle.observe_property(PROP_AB_LOOP_A, "ab-loop-a", PropertyFormat::None);
+        let _ = handle.observe_property(PROP_AB_LOOP_B, "ab-loop-b", PropertyFormat::None);
 
         let mut controller = Self {
             handle,
@@ -613,16 +651,100 @@ impl PlaybackController {
 
     /// Advances exactly one decoded frame and pauses.
     pub fn frame_step(&mut self) -> Result<(), MpvError> {
+        self.is_paused = true;
+        self.state = PlaybackState::Paused;
         self.handle.command(&["frame-step"])
     }
 
     /// Steps back one decoded frame and pauses.
     pub fn frame_back_step(&mut self) -> Result<(), MpvError> {
+        self.is_paused = true;
+        self.state = PlaybackState::Paused;
         self.handle.command(&["frame-back-step"])
+    }
+
+    /// Steps playback by a precise relative time delta in seconds (positive for forward,
+    /// negative for backward). Automatically pauses active playback for frame inspection.
+    pub fn step_by_seconds(&mut self, delta_seconds: f64) -> Result<(), MpvError> {
+        if !delta_seconds.is_finite() {
+            return Err(MpvError::InvalidParameter);
+        }
+        if !self.is_paused {
+            let _ = self.pause();
+        }
+        let sec_str = delta_seconds.to_string();
+        self.handle
+            .command(&["seek", &sec_str, "relative+exact"])
+            .or_else(|_| self.handle.seek(delta_seconds, SeekMode::Relative))
+    }
+
+    /// Steps playback forward by one step according to the specified preset.
+    pub fn step_preset_forward(&mut self, preset: SteppingPreset) -> Result<(), MpvError> {
+        match preset.delta_seconds() {
+            Some(delta) => self.step_by_seconds(delta),
+            None => self.frame_step(),
+        }
+    }
+
+    /// Steps playback backward by one step according to the specified preset.
+    pub fn step_preset_backward(&mut self, preset: SteppingPreset) -> Result<(), MpvError> {
+        match preset.delta_seconds() {
+            Some(delta) => self.step_by_seconds(-delta),
+            None => self.frame_back_step(),
+        }
     }
 
     pub fn ab_loop_state(&self) -> AbLoopState {
         self.ab_loop_state
+    }
+
+    /// Refreshes the internal A-B loop state from libmpv properties.
+    pub fn refresh_ab_loop(&mut self) {
+        let a_str = self
+            .handle
+            .get_property_string("ab-loop-a")
+            .unwrap_or_else(|_| "no".to_string());
+        let b_str = self
+            .handle
+            .get_property_string("ab-loop-b")
+            .unwrap_or_else(|_| "no".to_string());
+        let a = a_str.parse::<f64>().ok();
+        let b = b_str.parse::<f64>().ok();
+        self.ab_loop_state = match (a, b) {
+            (Some(a), Some(b)) if b > a => AbLoopState::Loop { a, b },
+            (Some(a), _) => AbLoopState::PointA(a),
+            _ => AbLoopState::None,
+        };
+    }
+
+    /// Sets Point A for A-B loop at the specified timestamp in seconds.
+    pub fn set_ab_loop_a(&mut self, a: f64) -> Result<(), MpvError> {
+        if !a.is_finite() || a < 0.0 {
+            return Err(MpvError::InvalidParameter);
+        }
+        self.handle
+            .set_property_string("ab-loop-a", &a.to_string())?;
+        let _ = self.handle.set_property_string("ab-loop-b", "no");
+        self.ab_loop_state = AbLoopState::PointA(a);
+        Ok(())
+    }
+
+    /// Sets Point B for A-B loop at the specified timestamp in seconds.
+    pub fn set_ab_loop_b(&mut self, b: f64) -> Result<(), MpvError> {
+        let a = match self.ab_loop_state {
+            AbLoopState::PointA(a) => a,
+            AbLoopState::Loop { a, .. } => a,
+            AbLoopState::None => 0.0,
+        };
+        if !b.is_finite() || b <= a + 0.05 {
+            return Err(MpvError::InvalidParameter);
+        }
+        self.handle
+            .set_property_string("ab-loop-a", &a.to_string())?;
+        self.handle
+            .set_property_string("ab-loop-b", &b.to_string())?;
+        self.ab_loop_state = AbLoopState::Loop { a, b };
+        Ok(())
     }
 
     /// Cycles `None -> PointA -> Loop -> None`.
@@ -746,6 +868,9 @@ impl PlaybackController {
     pub fn set_secondary_sub_track(&mut self, track_id: Option<i64>) -> Result<(), MpvError> {
         self.handle.set_secondary_sub_track(track_id)?;
         self.secondary_sub_track_id = track_id;
+        if track_id.is_some() {
+            let _ = self.handle.configure_dual_subtitle_collision_avoidance();
+        }
         Ok(())
     }
 
@@ -1121,7 +1246,7 @@ impl PlaybackController {
 
     /// Sets the secondary subtitle track by ID, or disables it if `None`.
     pub fn set_secondary_subtitle_track(&mut self, id: Option<i64>) -> Result<(), MpvError> {
-        self.handle.set_secondary_sub_track(id)
+        self.set_secondary_sub_track(id)
     }
 
     /// Sets the active audio track by ID, or disables audio if `None`.
@@ -1382,6 +1507,9 @@ impl PlaybackController {
             PROP_SECONDARY_SID => {
                 self.secondary_sub_track_id = self.handle.get_secondary_sub_track();
             }
+            PROP_AB_LOOP_A | PROP_AB_LOOP_B => {
+                self.refresh_ab_loop();
+            }
             PROP_MPVEX_SHOW_TEXT => self.update_mpvex_property("user-data/mpvex/show_text"),
             PROP_MPVEX_TOGGLE_UI => self.update_mpvex_property("user-data/mpvex/toggle_ui"),
             PROP_MPVEX_SHOW_PANEL => self.update_mpvex_property("user-data/mpvex/show_panel"),
@@ -1397,6 +1525,8 @@ impl PlaybackController {
                     self.refresh_playlist();
                 } else if name == "secondary-sid" {
                     self.secondary_sub_track_id = self.handle.get_secondary_sub_track();
+                } else if name == "ab-loop-a" || name == "ab-loop-b" {
+                    self.refresh_ab_loop();
                 }
             }
         }
@@ -1449,5 +1579,6 @@ impl PlaybackController {
         if let Ok(ch) = self.handle.get_property::<i64>("chapter") {
             self.current_chapter = if ch >= 0 { Some(ch) } else { None };
         }
+        self.refresh_ab_loop();
     }
 }
