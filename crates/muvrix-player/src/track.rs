@@ -242,15 +242,73 @@ impl MpvHandle {
             "sub-shadow-offset",
             styling.sub_shadow_offset.clamp(0.0, 10.0),
         );
+        if !styling.shadow_color.trim().is_empty() {
+            let _ = self.set_property_string("sub-shadow-color", &styling.shadow_color);
+        }
         let _ = self.set_property_string("sub-back-color", &styling.sub_back_color);
         let _ = self.set_property_string("sub-justify", styling.sub_justify.as_mpv_str());
         let _ = self.set_property_string("sub-fonts-dir", &styling.sub_fonts_dir);
+        let _ = self.set_property("sub-margin-y", styling.margin_y.clamp(0, 300));
+        let _ = self.set_property("sub-margin-x", styling.margin_x.clamp(0, 300));
         Ok(())
     }
 
     /// Resets all subtitle styling properties back to engine defaults.
     pub fn reset_subtitle_styling(&self) -> Result<(), MpvError> {
         self.apply_subtitle_styling(&SubtitleStyling::default())
+    }
+
+    /// Extracts embedded lyrics from container metadata tags if available.
+    ///
+    /// Inspects standard container metadata keys across ID3v2 (USLT / lyrics),
+    /// Vorbis comments (LYRICS / UNSYNCEDLYRICS), and MP4 atoms (©lyr).
+    pub fn get_embedded_lyrics(&self) -> Option<String> {
+        // 1. Direct query on standard metadata keys
+        const KEYS: &[&str] = &[
+            "lyrics",
+            "LYRICS",
+            "unsyncedlyrics",
+            "UNSYNCEDLYRICS",
+            "©lyr",
+            "\u{00a9}lyr",
+            "USLT",
+            "lyrics-eng",
+            "lyrics-und",
+        ];
+        for key in KEYS {
+            if let Ok(val) = self.get_property_string(&format!("metadata/by-key/{key}")) {
+                let trimmed = val.trim();
+                if !trimmed.is_empty() {
+                    return Some(val);
+                }
+            }
+        }
+
+        // 2. Scan indexed metadata list if available
+        if let Ok(count) = self.get_property::<i64>("metadata/list/count") {
+            for i in 0..count {
+                if let Ok(key) = self.get_property_string(&format!("metadata/list/{i}/key")) {
+                    let k = key.to_ascii_lowercase();
+                    if k == "lyrics"
+                        || k == "unsyncedlyrics"
+                        || k == "uslt"
+                        || k == "©lyr"
+                        || k.contains("lyric")
+                    {
+                        if let Ok(val) =
+                            self.get_property_string(&format!("metadata/list/{i}/value"))
+                        {
+                            let trimmed = val.trim();
+                            if !trimmed.is_empty() {
+                                return Some(val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -336,6 +394,12 @@ pub struct SubtitleStyling {
     pub sub_justify: SubtitleJustify,
     /// Optional custom fonts directory.
     pub sub_fonts_dir: String,
+    /// Vertical margin in pixels (0..=300, default 36).
+    pub margin_y: i64,
+    /// Horizontal margin in pixels (0..=300, default 25).
+    pub margin_x: i64,
+    /// Shadow color (hex format `#RRGGBB` or `#AARRGGBB`, default `#80000000`).
+    pub shadow_color: String,
 }
 
 impl Default for SubtitleStyling {
@@ -356,6 +420,9 @@ impl Default for SubtitleStyling {
             sub_back_color: "#00000000".to_string(),
             sub_justify: SubtitleJustify::Auto,
             sub_fonts_dir: String::new(),
+            margin_y: 36,
+            margin_x: 25,
+            shadow_color: "#80000000".to_string(),
         }
     }
 }

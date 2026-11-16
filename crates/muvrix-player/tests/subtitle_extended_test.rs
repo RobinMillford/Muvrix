@@ -16,6 +16,9 @@ fn extended_subtitle_styling_is_applied_to_libmpv() {
         sub_back_color: "#10203040".to_string(),
         sub_justify: SubtitleJustify::Center,
         sub_fonts_dir: "/tmp/muvrix-fonts".to_string(),
+        margin_y: 48,
+        margin_x: 32,
+        shadow_color: "#80123456".to_string(),
         ..SubtitleStyling::default()
     };
     controller
@@ -43,4 +46,30 @@ fn extended_subtitle_styling_is_applied_to_libmpv() {
             .expect("sub-justify"),
         "center"
     );
+    assert_eq!(
+        controller
+            .handle()
+            .get_property::<i64>("sub-margin-y")
+            .expect("sub-margin-y"),
+        48
+    );
+    assert_eq!(
+        controller
+            .handle()
+            .get_property::<i64>("sub-margin-x")
+            .expect("sub-margin-x"),
+        32
+    );
+}
+
+#[test]
+fn test_embedded_lyrics_query_on_controller() {
+    let handle = MpvHandle::new().expect("create handle");
+    handle.set_option_string("vo", "null").unwrap();
+    handle.set_option_string("ao", "null").unwrap();
+    handle.initialize().expect("initialize");
+    let controller = PlaybackController::new(Arc::new(handle)).expect("controller");
+
+    // With no media loaded, embedded lyrics return None
+    assert_eq!(controller.embedded_lyrics(), None);
 }

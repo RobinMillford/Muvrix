@@ -2,9 +2,43 @@
 
 pub mod detector;
 
-pub use detector::find_sidecar_lrc;
+pub use detector::{find_sidecar_lrc, find_sidecar_txt};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Source origin and synchronization tier for lyrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LyricSource {
+    #[default]
+    ExternalSynced,
+    EmbeddedSynced,
+    ExternalUnsynced,
+    EmbeddedUnsynced,
+}
+
+impl LyricSource {
+    pub fn is_embedded(&self) -> bool {
+        matches!(self, Self::EmbeddedSynced | Self::EmbeddedUnsynced)
+    }
+
+    pub fn is_synchronized(&self) -> bool {
+        matches!(self, Self::ExternalSynced | Self::EmbeddedSynced)
+    }
+
+    pub fn display_badge(&self) -> &'static str {
+        match self {
+            Self::ExternalSynced => "External LRC (Synchronized)",
+            Self::EmbeddedSynced => "Embedded Lyrics (Synchronized)",
+            Self::ExternalUnsynced => "External Text (Unsynchronized)",
+            Self::EmbeddedUnsynced => "Embedded Lyrics (Unsynchronized)",
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum LrcParseError {
@@ -70,7 +104,7 @@ impl LyricLine {
 }
 
 /// Structured LRC file metadata and ordered timeline lines.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LrcFile {
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -78,6 +112,25 @@ pub struct LrcFile {
     pub author: Option<String>,
     pub offset_ms: i64,
     pub lines: Vec<LyricLine>,
+    #[serde(default = "default_true")]
+    pub is_synchronized: bool,
+    #[serde(default)]
+    pub source: LyricSource,
+}
+
+impl Default for LrcFile {
+    fn default() -> Self {
+        Self {
+            title: None,
+            artist: None,
+            album: None,
+            author: None,
+            offset_ms: 0,
+            lines: Vec::new(),
+            is_synchronized: true,
+            source: LyricSource::ExternalSynced,
+        }
+    }
 }
 
 impl LrcFile {
@@ -85,6 +138,12 @@ impl LrcFile {
     pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, LrcParseError> {
         let content = std::fs::read_to_string(path).map_err(|_| LrcParseError::EmptyContent)?;
         Self::parse(&content)
+    }
+
+    /// Loads and automatically parses an LRC or plain text lyric file from the filesystem.
+    pub fn from_file_auto(path: impl AsRef<std::path::Path>) -> Result<Self, LrcParseError> {
+        let content = std::fs::read_to_string(path).map_err(|_| LrcParseError::EmptyContent)?;
+        Self::parse_auto(&content, LyricSource::ExternalSynced)
     }
 
     /// Parses an LRC document string with support for standard timestamps,
@@ -192,12 +251,69 @@ impl LrcFile {
             author,
             offset_ms,
             lines: raw_lines,
+            is_synchronized: true,
+            source: LyricSource::ExternalSynced,
         })
     }
 
+    /// Constructs an unsynchronized `LrcFile` from plain text lyrics,
+    /// preserving Unicode, paragraphs, line breaks, and indentation.
+    pub fn from_unsynced_text(content: &str, source: LyricSource) -> Result<Self, LrcParseError> {
+        let trimmed = content.trim_start_matches('\u{feff}').trim();
+        if trimmed.is_empty() {
+            return Err(LrcParseError::EmptyContent);
+        }
+
+        let mut lines = Vec::new();
+        for line in content.trim_start_matches('\u{feff}').lines() {
+            lines.push(LyricLine {
+                timestamp_ms: -1,
+                text: line.trim_end().to_string(),
+                words: Vec::new(),
+            });
+        }
+
+        Ok(Self {
+            title: None,
+            artist: None,
+            album: None,
+            author: None,
+            offset_ms: 0,
+            lines,
+            is_synchronized: false,
+            source,
+        })
+    }
+
+    /// Automatically detects whether `content` contains valid timestamps.
+    /// If valid timestamps are found, parses as synchronized lyrics;
+    /// otherwise parses as honest unsynchronized lyrics without fake timestamps.
+    pub fn parse_auto(content: &str, source_hint: LyricSource) -> Result<Self, LrcParseError> {
+        match Self::parse(content) {
+            Ok(mut lrc) if !lrc.lines.is_empty() => {
+                lrc.source = if source_hint.is_embedded() {
+                    LyricSource::EmbeddedSynced
+                } else {
+                    LyricSource::ExternalSynced
+                };
+                lrc.is_synchronized = true;
+                Ok(lrc)
+            }
+            _ => {
+                let actual_source = if source_hint.is_embedded() {
+                    LyricSource::EmbeddedUnsynced
+                } else {
+                    LyricSource::ExternalUnsynced
+                };
+                Self::from_unsynced_text(content, actual_source)
+            }
+        }
+    }
+
     /// Locates the active lyric line index for a given playback timestamp in milliseconds.
+    /// If the lyrics are unsynchronized, this returns `None` to prevent spurious highlights.
     pub fn find_active_index(&self, current_time_ms: i64) -> Option<usize> {
-        if self.lines.is_empty() {
+        if !self.is_synchronized || self.lines.is_empty() {
             return None;
         }
 
@@ -298,6 +414,75 @@ fn parse_enhanced_words(raw_text: &str) -> (String, Vec<LyricWord>) {
     } else {
         (clean_text.trim().to_string(), words)
     }
+}
+
+/// Resolves lyrics according to strict 4-level precedence:
+/// 1. External synchronized LRC (from adjacent `.lrc`)
+/// 2. Embedded synchronized lyrics (from ID3v2/Vorbis/MP4 tags with timestamps)
+/// 3. External unsynchronized text (from adjacent `.txt` or untimed `.lrc`)
+/// 4. Embedded unsynchronized text (from ID3v2/Vorbis/MP4 tags without timestamps)
+pub fn resolve_lyrics(
+    media_path: &std::path::Path,
+    embedded_lyrics_text: Option<&str>,
+) -> Option<LrcFile> {
+    // 1. Check external .lrc sidecar for synchronized lyrics
+    let mut external_lrc_content: Option<String> = None;
+    if let Some(lrc_path) = find_sidecar_lrc(media_path) {
+        if let Ok(content) = std::fs::read_to_string(&lrc_path) {
+            if let Ok(lrc) = LrcFile::parse(&content) {
+                if !lrc.lines.is_empty() {
+                    return Some(lrc); // Tier 1: External Synced LRC
+                }
+            }
+            external_lrc_content = Some(content);
+        }
+    }
+
+    // 2. Check embedded synchronized lyrics
+    if let Some(embedded) = embedded_lyrics_text {
+        let trimmed = embedded.trim_start_matches('\u{feff}').trim();
+        if !trimmed.is_empty() {
+            if let Ok(mut lrc) = LrcFile::parse(trimmed) {
+                if !lrc.lines.is_empty() {
+                    lrc.source = LyricSource::EmbeddedSynced;
+                    lrc.is_synchronized = true;
+                    return Some(lrc); // Tier 2: Embedded Synced Lyrics
+                }
+            }
+        }
+    }
+
+    // 3. Check external unsynchronized text (from untimed .lrc or adjacent .txt)
+    if let Some(content) = external_lrc_content {
+        if let Ok(lrc) = LrcFile::from_unsynced_text(&content, LyricSource::ExternalUnsynced) {
+            if !lrc.lines.is_empty() {
+                return Some(lrc); // Tier 3: External Unsynced (from .lrc)
+            }
+        }
+    }
+    if let Some(txt_path) = find_sidecar_txt(media_path) {
+        if let Ok(content) = std::fs::read_to_string(&txt_path) {
+            if let Ok(lrc) = LrcFile::from_unsynced_text(&content, LyricSource::ExternalUnsynced) {
+                if !lrc.lines.is_empty() {
+                    return Some(lrc); // Tier 3: External Unsynced (from .txt)
+                }
+            }
+        }
+    }
+
+    // 4. Check embedded unsynchronized lyrics
+    if let Some(embedded) = embedded_lyrics_text {
+        let trimmed = embedded.trim_start_matches('\u{feff}').trim();
+        if !trimmed.is_empty() {
+            if let Ok(lrc) = LrcFile::from_unsynced_text(trimmed, LyricSource::EmbeddedUnsynced) {
+                if !lrc.lines.is_empty() {
+                    return Some(lrc); // Tier 4: Embedded Unsynced Lyrics
+                }
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]

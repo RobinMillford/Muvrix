@@ -24,7 +24,10 @@ pub use error::{MuvrixError, Result};
 pub use history::{
     default_history_store_path, HistoryStore, MediaHistoryEntry, CURRENT_HISTORY_SCHEMA_VERSION,
 };
-pub use lyrics::{detector::find_sidecar_lrc, LrcFile, LrcParseError, LyricLine};
+pub use lyrics::{
+    detector::find_sidecar_lrc, detector::find_sidecar_txt, resolve_lyrics, LrcFile, LrcParseError,
+    LyricLine, LyricSource,
+};
 pub use metadata::{
     FallbackMetadataExtractor, MediaMetadataExtractor, MetadataError, MetadataResult,
 };

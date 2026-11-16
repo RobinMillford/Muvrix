@@ -1117,6 +1117,51 @@ impl MuvrixApp {
                 _ => {}
             }
         }
+        if let Ok(lyrics_mode) = std::env::var("MUVRIX_SEED_LYRICS") {
+            match lyrics_mode.as_str() {
+                "synced" => {
+                    let synced_content = r#"
+[ti:Quantum Echoes]
+[ar:Muvrix Soundlab]
+[al:Resilience & Purity]
+[00:00.00]Synthesizing harmonious soundscapes
+[00:04.50]Crystal clear frequencies across the spectrum
+[00:09.00]Zero latency timeline synchronization
+[00:14.20]Harmonics align in pristine acoustic balance
+"#;
+                    if let Ok(lrc) = muvrix_core::lyrics::LrcFile::parse(synced_content) {
+                        app.lyrics = Some(lrc);
+                    }
+                }
+                "embedded" => {
+                    let embedded_content = r#"
+[ti:Midnight Drive]
+[ar:Solar Pulse]
+[al:Embedded Tape]
+Verse 1:
+Rolling down the neon highway with nowhere to be.
+Subwoofers humming a deep low-frequency pulse.
+
+Chorus:
+Pure embedded typography without timestamps.
+Authentic acoustic performance preserved.
+Japanese translation: 星空のワルツが流れる
+"#;
+                    if let Ok(lrc) = muvrix_core::lyrics::LrcFile::from_unsynced_text(
+                        embedded_content,
+                        muvrix_core::lyrics::LyricSource::EmbeddedUnsynced,
+                    ) {
+                        app.lyrics = Some(lrc);
+                    }
+                }
+                path if std::path::Path::new(path).is_file() => {
+                    if let Ok(lrc) = muvrix_core::lyrics::LrcFile::from_file_auto(path) {
+                        app.lyrics = Some(lrc);
+                    }
+                }
+                _ => {}
+            }
+        }
 
         Ok(app)
     }

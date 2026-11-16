@@ -859,6 +859,16 @@ impl PlaybackController {
         self.track.reset_subtitle_styling(&self.handle)
     }
 
+    /// Queries the container demuxer for embedded lyrics (ID3v2 USLT, Vorbis comments, MP4 ©lyr).
+    pub fn embedded_lyrics(&self) -> Option<String> {
+        self.handle.get_embedded_lyrics()
+    }
+
+    /// Queries the currently active media title from the demuxer or fallback metadata.
+    pub fn media_title(&self) -> Option<String> {
+        self.handle.get_property_string("media-title").ok()
+    }
+
     pub fn next_chapter(&mut self) -> Result<(), MpvError> {
         self.track.next_chapter(&self.handle)
     }

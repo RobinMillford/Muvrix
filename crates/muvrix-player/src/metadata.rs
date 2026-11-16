@@ -30,6 +30,55 @@ impl MpvMetadataExtractor {
             handle: Mutex::new(handle),
         })
     }
+
+    /// Extracts embedded lyrics from a media file without blocking playback.
+    pub fn extract_embedded_lyrics(&self, path: &Path) -> MetadataResult<Option<String>> {
+        if !path.exists() {
+            return Err(MetadataError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("File not found: {}", path.display()),
+            )));
+        }
+
+        let handle = self.handle.lock().map_err(|_| {
+            MetadataError::Engine("Failed to acquire metadata engine lock".to_string())
+        })?;
+
+        let path_str = path.to_string_lossy().to_string();
+        let _ = handle.set_property("pause", true);
+        handle
+            .command(&["loadfile", &path_str, "replace"])
+            .map_err(|e| MetadataError::Engine(format!("Failed to loadfile in engine: {}", e)))?;
+
+        let start = Instant::now();
+        let timeout = std::time::Duration::from_millis(2000);
+        let mut loaded = false;
+
+        while start.elapsed() < timeout {
+            match handle.wait_event(0.05) {
+                Event::FileLoaded | Event::PlaybackRestart => {
+                    loaded = true;
+                    break;
+                }
+                Event::EndFile { .. } => {
+                    let _ = handle.command(&["stop"]);
+                    return Ok(None);
+                }
+                _ => {}
+            }
+        }
+
+        if !loaded {
+            let _ = handle.command(&["stop"]);
+            return Err(MetadataError::Timeout(
+                "Timed out waiting for file-loaded event from engine".to_string(),
+            ));
+        }
+
+        let lyrics = handle.get_embedded_lyrics();
+        let _ = handle.command(&["stop"]);
+        Ok(lyrics)
+    }
 }
 
 impl MediaMetadataExtractor for MpvMetadataExtractor {

@@ -18,6 +18,9 @@ fn theme_and_subtitle_styling_roundtrip_with_backward_compatible_defaults() {
         sub_back_color: "#000000AA".to_string(),
         sub_justify: SubtitleJustify::Right,
         sub_fonts_dir: "/media/fonts".to_string(),
+        margin_y: 42,
+        margin_x: 28,
+        shadow_color: "#80334455".to_string(),
         ..SubtitleStyling::default()
     };
     let settings = PersistedMediaSettings {

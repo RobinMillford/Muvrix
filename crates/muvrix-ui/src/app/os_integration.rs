@@ -340,6 +340,7 @@ impl MuvrixApp {
                     self.status_message =
                         format!("Playback active: {vfmt} ({w}x{h}) | HWDEC: {hw} | AO: {ao}");
                     self.refresh_active_bookmarks();
+                    self.reload_lyrics_for_current_media();
                     if let Ok(pos_str) = std::env::var("MUVRIX_INITIAL_SEEK") {
                         if let Ok(pos) = pos_str.parse::<f64>() {
                             let _ = self.controller.seek(pos, muvrix_player::SeekMode::Absolute);

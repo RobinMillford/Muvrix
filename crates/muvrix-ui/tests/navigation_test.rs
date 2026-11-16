@@ -76,6 +76,9 @@ fn test_subtitle_styling_ui_defaults() {
         muvrix_player::AssOverrideMode::Preserve
     );
     assert_eq!(styling.secondary_pos, 10);
+    assert_eq!(styling.margin_y, 36);
+    assert_eq!(styling.margin_x, 25);
+    assert_eq!(styling.shadow_color, "#80000000");
 }
 
 #[test]

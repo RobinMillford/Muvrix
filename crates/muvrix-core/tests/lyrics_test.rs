@@ -128,3 +128,81 @@ fn test_enhanced_lrc_word_karaoke_parsing() {
     assert_eq!(l1.find_active_word_index(6700), Some(1)); // "latency "
     assert_eq!(l1.find_active_word_index(7500), Some(2)); // "stream"
 }
+
+#[test]
+fn test_unsynced_plain_text_lyrics_and_honest_no_highlight() {
+    use muvrix_core::lyrics::LyricSource;
+
+    let unsynced_content = r#"
+Verse 1:
+These are plain lyrics without any timestamps.
+They flow naturally across several stanzas.
+
+Chorus:
+Pure melody without karaoke tags.
+Japanese unicode: 桜の花が咲く頃
+"#;
+
+    let lrc = LrcFile::from_unsynced_text(unsynced_content, LyricSource::EmbeddedUnsynced)
+        .expect("Parse unsynced text");
+    assert!(!lrc.is_synchronized);
+    assert_eq!(lrc.source, LyricSource::EmbeddedUnsynced);
+    assert_eq!(
+        lrc.source.display_badge(),
+        "Embedded Lyrics (Unsynchronized)"
+    );
+
+    // Active line lookup MUST return None honestly, without inventing fake timestamps
+    assert_eq!(lrc.find_active_index(0), None);
+    assert_eq!(lrc.find_active_index(5000), None);
+    assert_eq!(lrc.find_active_index(60000), None);
+    assert!(lrc.lines.iter().all(|l| l.timestamp_ms == -1));
+
+    // Unicode line preserved
+    let last_line = lrc.lines.last().expect("last line");
+    assert_eq!(last_line.text, "Japanese unicode: 桜の花が咲く頃");
+}
+
+#[test]
+fn test_lyrics_source_precedence_tier_1_to_4() {
+    use muvrix_core::lyrics::{resolve_lyrics, LyricSource};
+
+    let dir = tempdir().unwrap();
+    let media_path = dir.path().join("song.flac");
+    let lrc_path = dir.path().join("song.lrc");
+    let txt_path = dir.path().join("song.txt");
+
+    // Case 4: No external files, embedded unsynced lyrics
+    let embedded_unsynced = "Embedded unsynced line 1\nEmbedded unsynced line 2";
+    let res4 = resolve_lyrics(&media_path, Some(embedded_unsynced)).expect("Tier 4 resolved");
+    assert_eq!(res4.source, LyricSource::EmbeddedUnsynced);
+    assert!(!res4.is_synchronized);
+    assert_eq!(res4.lines.len(), 2);
+
+    // Case 3: External .txt file added -> beats embedded unsynced
+    std::fs::write(&txt_path, "External txt line 1\nExternal txt line 2").unwrap();
+    let res3 = resolve_lyrics(&media_path, Some(embedded_unsynced)).expect("Tier 3 resolved");
+    assert_eq!(res3.source, LyricSource::ExternalUnsynced);
+    assert!(!res3.is_synchronized);
+    assert_eq!(res3.lines[0].text, "External txt line 1");
+
+    // Case 2: Embedded synced lyrics provided -> beats external unsynced
+    let embedded_synced = "[00:03.00]Embedded synced line 1\n[00:07.50]Embedded synced line 2";
+    let res2 = resolve_lyrics(&media_path, Some(embedded_synced)).expect("Tier 2 resolved");
+    assert_eq!(res2.source, LyricSource::EmbeddedSynced);
+    assert!(res2.is_synchronized);
+    assert_eq!(res2.lines.len(), 2);
+    assert_eq!(res2.lines[0].timestamp_ms, 3000);
+
+    // Case 1: External synced .lrc file exists -> beats everything (Tier 1)
+    std::fs::write(
+        &lrc_path,
+        "[00:01.00]External synced line 1\n[00:05.00]External synced line 2",
+    )
+    .unwrap();
+    let res1 = resolve_lyrics(&media_path, Some(embedded_synced)).expect("Tier 1 resolved");
+    assert_eq!(res1.source, LyricSource::ExternalSynced);
+    assert!(res1.is_synchronized);
+    assert_eq!(res1.lines[0].text, "External synced line 1");
+    assert_eq!(res1.lines[0].timestamp_ms, 1000);
+}

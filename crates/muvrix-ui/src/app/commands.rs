@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Vec2};
-use muvrix_core::lyrics::{find_sidecar_lrc, LrcFile};
+use muvrix_core::lyrics::{resolve_lyrics, LrcFile, LyricSource};
 use muvrix_player::equalizer::EqualizerManager;
 use muvrix_player::shader::ShaderManager;
 use muvrix_player::{AbLoopState, MpvexCommand, PlaybackState, RepeatMode, SeekMode};
@@ -79,21 +79,8 @@ impl MuvrixApp {
                             self.pending_resume_prompt = None;
                         }
 
-                        // Auto-detect and parse sidecar LRC lyrics
-                        if let Some(lrc_path) = find_sidecar_lrc(&resolved) {
-                            match LrcFile::from_file(&lrc_path) {
-                                Ok(lrc) => {
-                                    log::info!("Auto-loaded sidecar lyrics from {:?}", lrc_path);
-                                    self.lyrics = Some(lrc);
-                                }
-                                Err(e) => {
-                                    log::warn!("Failed to parse sidecar lyrics: {e}");
-                                    self.lyrics = None;
-                                }
-                            }
-                        } else {
-                            self.lyrics = None;
-                        }
+                        // Auto-detect lyrics following 4-tier precedence (external / embedded)
+                        self.reload_lyrics_for_current_media();
 
                         // Refresh active media bookmarks
                         self.refresh_active_bookmarks();
@@ -526,21 +513,61 @@ impl MuvrixApp {
         }
     }
 
-    /// Opens a native file dialog to manually select a synchronized LRC lyrics file.
+    /// Reloads lyrics for the currently active media file using the 4-tier precedence:
+    /// 1. External synchronized LRC
+    /// 2. Embedded synchronized lyrics
+    /// 3. External unsynchronized text
+    /// 4. Embedded unsynchronized text
+    pub fn reload_lyrics_for_current_media(&mut self) {
+        let current_path = self.controller.current_file().map(std::path::PathBuf::from);
+        let embedded = self.controller.embedded_lyrics();
+        let media_title = self.controller.media_title();
+
+        if let Some(ref path) = current_path {
+            if let Some(mut lrc) = resolve_lyrics(path, embedded.as_deref()) {
+                if lrc.title.is_none() {
+                    lrc.title = media_title.clone();
+                }
+                log::info!(
+                    "Resolved lyrics for {:?}: source={:?}, synced={}",
+                    path,
+                    lrc.source,
+                    lrc.is_synchronized
+                );
+                self.lyrics = Some(lrc);
+                return;
+            }
+        } else if let Some(ref embedded_text) = embedded {
+            if let Ok(mut lrc) = LrcFile::parse_auto(embedded_text, LyricSource::EmbeddedSynced) {
+                if lrc.title.is_none() {
+                    lrc.title = media_title;
+                }
+                self.lyrics = Some(lrc);
+                return;
+            }
+        }
+
+        self.lyrics = None;
+    }
+
+    /// Opens a native file dialog to manually select a synchronized LRC or plain text lyrics file.
     pub fn load_lyrics_dialog(&mut self) {
         if let Some(file) = rfd::FileDialog::new()
-            .set_title("Open Synchronized LRC Lyrics File")
-            .add_filter("LRC Lyrics", &["lrc", "txt"])
+            .set_title("Open Synchronized or Plain Lyrics File")
+            .add_filter("Lyrics Files", &["lrc", "txt"])
             .pick_file()
         {
-            match LrcFile::from_file(&file) {
+            match LrcFile::from_file_auto(&file) {
                 Ok(lrc) => {
                     let title = lrc.title.as_deref().unwrap_or("lyrics");
-                    self.status_message = format!("Loaded synchronized lyrics for '{title}'");
+                    self.status_message = format!(
+                        "Loaded lyrics for '{title}' ({})",
+                        lrc.source.display_badge()
+                    );
                     self.lyrics = Some(lrc);
                 }
                 Err(e) => {
-                    self.status_message = format!("Failed to parse LRC lyrics: {e}");
+                    self.status_message = format!("Failed to parse lyrics: {e}");
                 }
             }
         }
@@ -684,7 +711,7 @@ impl MuvrixApp {
                 sub_border_size: self.active_styling.border_size,
                 sub_shadow_offset: self.active_styling.sub_shadow_offset,
                 sub_back_color: self.active_styling.sub_back_color.clone(),
-                sub_margin_y: 22,
+                sub_margin_y: self.active_styling.margin_y as u32,
                 sub_pos: self.active_styling.pos as u32,
                 sub_speed: self.active_styling.sub_speed,
                 sub_justify: format!("{:?}", self.active_styling.sub_justify).to_lowercase(),
