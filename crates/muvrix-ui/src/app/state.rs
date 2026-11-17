@@ -395,6 +395,20 @@ pub struct MuvrixApp {
     // Phase E5: Audio DSP Expansion, EBU R128 & 32-Band Spectrum Visualizer
     pub(crate) spectrum_visualizer: muvrix_player::SpectrumVisualizer,
     pub(crate) autoeq_status_msg: Option<(String, bool)>,
+
+    // Phase E7: Multi-Profile Support, Custom Theme Builder & Shortcut Mapper
+    pub(crate) keybindings: crate::app::shortcuts::KeyBindingMap,
+    pub(crate) recording_shortcut: Option<crate::app::shortcuts::ShortcutAction>,
+    pub(crate) active_profile: Option<muvrix_core::database::PlaybackProfile>,
+    pub(crate) available_profiles: Vec<muvrix_core::database::PlaybackProfile>,
+    pub(crate) profile_switch_elapsed: Option<Duration>,
+    pub(crate) profile_status_msg: Option<(String, bool)>,
+    pub(crate) new_profile_dialog_open: bool,
+    pub(crate) new_profile_name: String,
+    pub(crate) new_profile_desc: String,
+    pub(crate) custom_theme: crate::theme::CustomTheme,
+    pub(crate) custom_theme_json: String,
+    pub(crate) theme_status_msg: Option<(String, bool)>,
 }
 
 impl MuvrixApp {

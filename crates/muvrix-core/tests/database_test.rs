@@ -997,3 +997,180 @@ fn test_database_migration_from_phase_1_1_preserves_bookmarks_and_adds_ssh_trust
 
     let _ = std::fs::remove_file(&db_path);
 }
+
+#[test]
+fn test_playback_profiles_crud_and_active_switching() {
+    let db = DatabaseManager::open_in_memory().expect("open in-memory database");
+
+    // 1. Verify default seeded profiles from migration 009
+    let profiles = db.list_profiles().expect("list profiles");
+    assert!(profiles.len() >= 4);
+
+    let default_prof = profiles
+        .iter()
+        .find(|p| p.name == "Default")
+        .expect("Default profile");
+    assert!(default_prof.is_active);
+    assert_eq!(default_prof.volume, 100.0);
+    assert_eq!(default_prof.equalizer_preset, "Flat");
+
+    let cinema_prof = profiles
+        .iter()
+        .find(|p| p.name == "Cinema Room")
+        .expect("Cinema Room profile");
+    assert!(!cinema_prof.is_active);
+    assert_eq!(cinema_prof.shader_preset, "Anime4K High");
+    assert_eq!(cinema_prof.volume, 90.0);
+
+    let active = db
+        .get_active_profile()
+        .expect("get active")
+        .expect("active profile present");
+    assert_eq!(active.name, "Default");
+
+    // 2. Insert new user profile
+    let mut custom = muvrix_core::database::PlaybackProfile::new("Studio Monitor");
+    custom.description = Some("Nearfield flat monitor acoustics".to_string());
+    custom.volume = 82.0;
+    custom.equalizer_preset = "Studio Reference".to_string();
+    custom.equalizer_bands = "-1.0,0.0,0.0,0.0,0.5,0.5,0.0,0.0,-0.5,-1.0".to_string();
+    custom.loudness_target = Some("-16 LUFS".to_string());
+    custom.sub_font_size = 28;
+    custom.sub_color = "#00FFCC".to_string();
+    custom.sub_bold = true;
+    custom.shader_preset = "Anime4K Fast".to_string();
+
+    let id = db.insert_profile(&custom).expect("insert profile");
+    assert!(id > 0);
+
+    let fetched = db
+        .get_profile_by_name("Studio Monitor")
+        .expect("query")
+        .expect("found");
+    assert_eq!(fetched.id, id);
+    assert_eq!(fetched.volume, 82.0);
+    assert_eq!(fetched.sub_font_size, 28);
+    assert_eq!(fetched.sub_color, "#00FFCC");
+
+    // 3. Switch active profile
+    db.set_active_profile(id).expect("set active");
+    let new_active = db
+        .get_active_profile()
+        .expect("get active")
+        .expect("active present");
+    assert_eq!(new_active.id, id);
+    assert_eq!(new_active.name, "Studio Monitor");
+    assert!(new_active.is_active);
+
+    // Old default profile is no longer active
+    let old_default = db
+        .get_profile_by_name("Default")
+        .expect("query")
+        .expect("found");
+    assert!(!old_default.is_active);
+
+    // 4. Update profile
+    let mut updated = fetched;
+    updated.volume = 88.0;
+    updated.sub_font_size = 30;
+    db.update_profile(&updated).expect("update profile");
+
+    let re_fetched = db.get_profile_by_id(id).expect("query").expect("found");
+    assert_eq!(re_fetched.volume, 88.0);
+    assert_eq!(re_fetched.sub_font_size, 30);
+
+    // 5. Delete protection for Default profile
+    let default_id = old_default.id;
+    let del_default = db.delete_profile(default_id).expect("delete attempt");
+    assert!(
+        !del_default,
+        "Default profile must be protected from deletion"
+    );
+
+    // 6. Delete custom profile
+    db.set_active_profile(default_id)
+        .expect("restore default active");
+    let del_custom = db.delete_profile(id).expect("delete custom");
+    assert!(del_custom, "Custom profile must be deleted successfully");
+    assert!(db.get_profile_by_id(id).expect("query").is_none());
+}
+
+#[test]
+fn test_profile_set_active_transaction_atomicity_and_rollback() {
+    let db = DatabaseManager::open_in_memory().expect("In-memory DB should open");
+
+    // 1. Initial state: exactly one profile is active (Default)
+    let initial_active = db
+        .get_active_profile()
+        .expect("query")
+        .expect("active present");
+    assert_eq!(initial_active.name, "Default");
+
+    let all_profiles = db.list_profiles().expect("list");
+    let active_count = all_profiles.iter().filter(|p| p.is_active).count();
+    assert_eq!(active_count, 1, "Exactly one active profile initially");
+
+    // 2. Switch to Cinema Room (valid ID)
+    let cinema = db
+        .get_profile_by_name("Cinema Room")
+        .expect("query")
+        .expect("found");
+    db.set_active_profile(cinema.id).expect("switch to cinema");
+
+    let active_after_cinema = db
+        .get_active_profile()
+        .expect("query")
+        .expect("active present");
+    assert_eq!(active_after_cinema.id, cinema.id);
+    let all_profiles = db.list_profiles().expect("list");
+    let active_count = all_profiles.iter().filter(|p| p.is_active).count();
+    assert_eq!(
+        active_count, 1,
+        "Exactly one active profile after switching to Cinema Room"
+    );
+
+    // 3. Attempt to activate non-existent profile ID (failed activation / DB error)
+    let non_existent_id = 999_999_i64;
+    let res = db.set_active_profile(non_existent_id);
+    assert!(res.is_err(), "Activating non-existent profile ID must fail");
+
+    // 4. Verify transaction rollback: previous active profile MUST be preserved!
+    let active_after_fail = db
+        .get_active_profile()
+        .expect("query")
+        .expect("active present");
+    assert_eq!(
+        active_after_fail.id, cinema.id,
+        "Transaction rollback must preserve previously active profile upon failure"
+    );
+    assert_eq!(active_after_fail.name, "Cinema Room");
+
+    // Verify exactly one active profile remains in the database (not 0 and not >1)
+    let all_profiles = db.list_profiles().expect("list");
+    let active_count = all_profiles.iter().filter(|p| p.is_active).count();
+    assert_eq!(
+        active_count, 1,
+        "Exactly one active profile must exist after failed activation"
+    );
+
+    // 5. Subsequent valid switch succeeds normally
+    let headphones = db
+        .get_profile_by_name("Headphones")
+        .expect("query")
+        .expect("found");
+    db.set_active_profile(headphones.id)
+        .expect("switch to headphones");
+    let active_hp = db
+        .get_active_profile()
+        .expect("query")
+        .expect("active present");
+    assert_eq!(active_hp.id, headphones.id);
+    assert_eq!(active_hp.name, "Headphones");
+
+    let all_profiles = db.list_profiles().expect("list");
+    let active_count = all_profiles.iter().filter(|p| p.is_active).count();
+    assert_eq!(
+        active_count, 1,
+        "Exactly one active profile after valid switch"
+    );
+}

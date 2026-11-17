@@ -3,7 +3,7 @@
 use rusqlite::{Connection, Result, Transaction};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const LATEST_SCHEMA_VERSION: u32 = 8;
+pub const LATEST_SCHEMA_VERSION: u32 = 9;
 
 /// Apply all pending database migrations within a transaction.
 pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
@@ -78,6 +78,17 @@ pub fn apply_migrations(conn: &mut Connection) -> Result<u32> {
         let tx = conn.transaction()?;
         migration_008_smart_collections(&tx)?;
         record_migration(&tx, 8, "Smart collections engine and metadata expansion")?;
+        tx.commit()?;
+    }
+
+    if current_version < 9 {
+        let tx = conn.transaction()?;
+        migration_009_user_playback_profiles(&tx)?;
+        record_migration(
+            &tx,
+            9,
+            "User playback profiles and audio/subtitle/video isolation",
+        )?;
         tx.commit()?;
     }
 
@@ -469,6 +480,69 @@ fn migration_008_smart_collections(tx: &Transaction) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_smart_collections_order ON smart_collections(display_order ASC, name ASC);
         ",
     )?;
+
+    Ok(())
+}
+
+fn migration_009_user_playback_profiles(tx: &Transaction) -> Result<()> {
+    tx.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            is_active INTEGER NOT NULL DEFAULT 0,
+            volume REAL NOT NULL DEFAULT 100.0,
+            audio_delay_ms INTEGER NOT NULL DEFAULT 0,
+            equalizer_preset TEXT NOT NULL DEFAULT 'Flat',
+            equalizer_bands TEXT NOT NULL DEFAULT '0,0,0,0,0,0,0,0,0,0',
+            loudness_target TEXT,
+            sub_font_size INTEGER NOT NULL DEFAULT 22,
+            sub_color TEXT NOT NULL DEFAULT '#F4F5F0',
+            sub_bold INTEGER NOT NULL DEFAULT 1,
+            shader_preset TEXT NOT NULL DEFAULT 'None',
+            settings_json TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_profiles_name ON profiles(name);
+        CREATE INDEX IF NOT EXISTS idx_profiles_is_active ON profiles(is_active);
+        ",
+    )?;
+
+    // Seed default profiles if table is empty
+    let count: i64 = tx.query_row("SELECT COUNT(*) FROM profiles", [], |row| row.get(0))?;
+    if count == 0 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        tx.execute(
+            "INSERT INTO profiles (name, description, is_active, volume, audio_delay_ms, equalizer_preset, equalizer_bands, loudness_target, sub_font_size, sub_color, sub_bold, shader_preset, settings_json, created_at, updated_at)
+             VALUES (?1, ?2, 1, 100.0, 0, 'Flat', '0,0,0,0,0,0,0,0,0,0', NULL, 22, '#F4F5F0', 1, 'None', NULL, ?3, ?3)",
+            rusqlite::params!["Default", "Standard balanced audio & clean video presentation", now],
+        )?;
+
+        tx.execute(
+            "INSERT INTO profiles (name, description, is_active, volume, audio_delay_ms, equalizer_preset, equalizer_bands, loudness_target, sub_font_size, sub_color, sub_bold, shader_preset, settings_json, created_at, updated_at)
+             VALUES (?1, ?2, 0, 90.0, 0, 'Bass Boost', '4.5,3.5,2.0,0.5,0.0,0.0,0.5,1.5,2.5,3.0', NULL, 26, '#F1F0E8', 1, 'Anime4K High', NULL, ?3, ?3)",
+            rusqlite::params!["Cinema Room", "Immersive multi-channel acoustics with high-fidelity upscaling", now],
+        )?;
+
+        tx.execute(
+            "INSERT INTO profiles (name, description, is_active, volume, audio_delay_ms, equalizer_preset, equalizer_bands, loudness_target, sub_font_size, sub_color, sub_bold, shader_preset, settings_json, created_at, updated_at)
+             VALUES (?1, ?2, 0, 75.0, 0, 'Headphones', '1.0,0.5,-0.5,-1.0,0.0,1.0,2.0,1.5,0.5,-0.5', '-14 LUFS', 20, '#F4F5F0', 1, 'None', NULL, ?3, ?3)",
+            rusqlite::params!["Headphones", "Spatial headphone acoustics with -14 LUFS loudness compensation", now],
+        )?;
+
+        tx.execute(
+            "INSERT INTO profiles (name, description, is_active, volume, audio_delay_ms, equalizer_preset, equalizer_bands, loudness_target, sub_font_size, sub_color, sub_bold, shader_preset, settings_json, created_at, updated_at)
+             VALUES (?1, ?2, 0, 50.0, 0, 'Vocal Boost', '-6.0,-4.0,-2.0,1.0,3.0,4.0,3.0,1.5,-1.0,-3.0', '-23 LUFS', 24, '#E8B5EF', 1, 'None', NULL, ?3, ?3)",
+            rusqlite::params!["Late Night", "Night mode: reduced dynamic bass, dialogue vocal boost & subtle subtitles", now],
+        )?;
+    }
 
     Ok(())
 }

@@ -66,6 +66,8 @@ pub enum SettingsTab {
     Subtitles,
     VideoEnhancement,
     Appearance,
+    Profiles,
+    Shortcuts,
     NetworkMedia,
     ConfigEditor,
     Advanced,
@@ -81,6 +83,8 @@ impl SettingsTab {
             Self::Subtitles => "Subtitles & Fonts",
             Self::VideoEnhancement => "Video & Shaders",
             Self::Appearance => "Appearance",
+            Self::Profiles => "Playback Profiles",
+            Self::Shortcuts => "Keyboard Shortcuts",
             Self::NetworkMedia => "Network Sources",
             Self::ConfigEditor => "Config Editor",
             Self::Advanced | Self::Preferences => "Advanced & Backup",
@@ -101,7 +105,9 @@ impl SettingsTab {
             Self::VideoEnhancement => {
                 "video shader zoom pan panscan crop hdr brightness deband anime4k"
             }
-            Self::Appearance => "theme appearance accent light dark amoled color obsidian lime",
+            Self::Appearance => "theme appearance accent light dark amoled color obsidian lime palette custom",
+            Self::Profiles => "profile profiles user cinema headphones room late night presets volume switcher",
+            Self::Shortcuts => "shortcuts keyboard hotkey keybinding mapping bind rebind keys conflict",
             Self::NetworkMedia => "network webdav smb sftp remote stream",
             Self::ConfigEditor => "config mpv.conf input.conf editor file apply",
             Self::Advanced | Self::Preferences => {

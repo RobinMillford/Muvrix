@@ -2254,6 +2254,8 @@ dependencies = [
  "muvrix-player",
  "raw-window-handle",
  "rfd",
+ "serde",
+ "serde_json",
  "wayland-client",
  "wayland-protocols",
  "wayland-sys",

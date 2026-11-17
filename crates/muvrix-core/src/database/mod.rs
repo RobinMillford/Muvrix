@@ -621,4 +621,48 @@ impl DatabaseManager {
         let mut conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
         Repository::execute_catalog_cleanup(&mut conn, preview).map_err(DatabaseError::Sqlite)
     }
+
+    // -------------------------------------------------------------------------
+    // User Playback Profiles (Phase E7)
+    // -------------------------------------------------------------------------
+
+    pub fn insert_profile(&self, profile: &PlaybackProfile) -> DbResult<i64> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::insert_profile(&conn, profile).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn get_profile_by_id(&self, id: i64) -> DbResult<Option<PlaybackProfile>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::get_profile_by_id(&conn, id).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn get_profile_by_name(&self, name: &str) -> DbResult<Option<PlaybackProfile>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::get_profile_by_name(&conn, name).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn get_active_profile(&self) -> DbResult<Option<PlaybackProfile>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::get_active_profile(&conn).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn list_profiles(&self) -> DbResult<Vec<PlaybackProfile>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::list_profiles(&conn).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn set_active_profile(&self, id: i64) -> DbResult<()> {
+        let mut conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::set_active_profile(&mut conn, id).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn update_profile(&self, profile: &PlaybackProfile) -> DbResult<()> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::update_profile(&conn, profile).map_err(DatabaseError::Sqlite)
+    }
+
+    pub fn delete_profile(&self, id: i64) -> DbResult<bool> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::delete_profile(&conn, id).map_err(DatabaseError::Sqlite)
+    }
 }

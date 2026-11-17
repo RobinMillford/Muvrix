@@ -25,6 +25,7 @@ pub mod render_engine;
 #[cfg(target_os = "linux")]
 pub mod runner;
 pub mod telemetry;
+pub mod theme;
 pub mod thumbnail_cache;
 pub mod trace;
 pub mod ui_components;

@@ -402,3 +402,52 @@ pub struct ActiveQueueEntry {
     pub duration_ms: u64,
     pub is_current: bool,
 }
+
+/// A user playback profile isolating audio EQ, volume, subtitle styling, and video shaders.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackProfile {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub is_active: bool,
+    pub volume: f64,
+    pub audio_delay_ms: i32,
+    pub equalizer_preset: String,
+    pub equalizer_bands: String,
+    pub loudness_target: Option<String>,
+    pub sub_font_size: i32,
+    pub sub_color: String,
+    pub sub_bold: bool,
+    pub shader_preset: String,
+    pub settings_json: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl PlaybackProfile {
+    pub fn new(name: impl Into<String>) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        Self {
+            id: 0,
+            name: name.into(),
+            description: None,
+            is_active: false,
+            volume: 100.0,
+            audio_delay_ms: 0,
+            equalizer_preset: "Flat".to_string(),
+            equalizer_bands: "0,0,0,0,0,0,0,0,0,0".to_string(),
+            loudness_target: None,
+            sub_font_size: 22,
+            sub_color: "#F4F5F0".to_string(),
+            sub_bold: true,
+            shader_preset: "None".to_string(),
+            settings_json: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}

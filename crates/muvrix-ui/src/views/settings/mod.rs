@@ -4,6 +4,8 @@ pub mod appearance;
 pub mod audio;
 pub mod config_editor;
 pub mod network;
+pub mod profiles;
+pub mod shortcuts;
 pub mod subtitles;
 pub mod video;
 
@@ -49,6 +51,8 @@ impl MuvrixApp {
                     SettingsTab::Subtitles,
                     SettingsTab::VideoEnhancement,
                     SettingsTab::Appearance,
+                    SettingsTab::Profiles,
+                    SettingsTab::Shortcuts,
                     SettingsTab::NetworkMedia,
                     SettingsTab::ConfigEditor,
                     SettingsTab::Advanced,
@@ -89,6 +93,8 @@ impl MuvrixApp {
                     SettingsTab::Audio | SettingsTab::EqualizerAudio => {
                         self.render_settings_audio(ui)
                     }
+                    SettingsTab::Profiles => self.render_settings_profiles(ui),
+                    SettingsTab::Shortcuts => self.render_settings_shortcuts(ui),
                     SettingsTab::NetworkMedia => self.render_settings_network(ui),
                     SettingsTab::Appearance => self.render_settings_appearance(ui),
                     SettingsTab::ConfigEditor => self.render_settings_config_editor(ui),

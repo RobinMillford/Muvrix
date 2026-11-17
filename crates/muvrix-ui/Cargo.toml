@@ -9,6 +9,8 @@ description = "Desktop presentation layer for Muvrix"
 [dependencies]
 muvrix-core = { path = "../muvrix-core" }
 muvrix-player = { path = "../muvrix-player" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true }
 egui_glow = { workspace = true }

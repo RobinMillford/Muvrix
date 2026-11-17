@@ -1853,4 +1853,208 @@ impl Repository {
         tx.commit()?;
         Ok(removed)
     }
+
+    // -------------------------------------------------------------------------
+    // User Playback Profiles (Phase E7)
+    // -------------------------------------------------------------------------
+
+    pub fn insert_profile(conn: &Connection, profile: &PlaybackProfile) -> Result<i64> {
+        conn.execute(
+            "INSERT INTO profiles (
+                name, description, is_active, volume, audio_delay_ms,
+                equalizer_preset, equalizer_bands, loudness_target,
+                sub_font_size, sub_color, sub_bold, shader_preset,
+                settings_json, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            rusqlite::params![
+                profile.name,
+                profile.description,
+                if profile.is_active { 1 } else { 0 },
+                profile.volume,
+                profile.audio_delay_ms,
+                profile.equalizer_preset,
+                profile.equalizer_bands,
+                profile.loudness_target,
+                profile.sub_font_size,
+                profile.sub_color,
+                if profile.sub_bold { 1 } else { 0 },
+                profile.shader_preset,
+                profile.settings_json,
+                profile.created_at,
+                profile.updated_at,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_profile_by_id(conn: &Connection, id: i64) -> Result<Option<PlaybackProfile>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, is_active, volume, audio_delay_ms,
+                    equalizer_preset, equalizer_bands, loudness_target,
+                    sub_font_size, sub_color, sub_bold, shader_preset,
+                    settings_json, created_at, updated_at
+             FROM profiles WHERE id = ?1",
+        )?;
+
+        let mut rows = stmt.query(rusqlite::params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::row_to_profile(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_profile_by_name(conn: &Connection, name: &str) -> Result<Option<PlaybackProfile>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, is_active, volume, audio_delay_ms,
+                    equalizer_preset, equalizer_bands, loudness_target,
+                    sub_font_size, sub_color, sub_bold, shader_preset,
+                    settings_json, created_at, updated_at
+             FROM profiles WHERE name = ?1",
+        )?;
+
+        let mut rows = stmt.query(rusqlite::params![name])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::row_to_profile(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_active_profile(conn: &Connection) -> Result<Option<PlaybackProfile>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, is_active, volume, audio_delay_ms,
+                    equalizer_preset, equalizer_bands, loudness_target,
+                    sub_font_size, sub_color, sub_bold, shader_preset,
+                    settings_json, created_at, updated_at
+             FROM profiles WHERE is_active = 1
+             ORDER BY id ASC LIMIT 1",
+        )?;
+
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::row_to_profile(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_profiles(conn: &Connection) -> Result<Vec<PlaybackProfile>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, is_active, volume, audio_delay_ms,
+                    equalizer_preset, equalizer_bands, loudness_target,
+                    sub_font_size, sub_color, sub_bold, shader_preset,
+                    settings_json, created_at, updated_at
+             FROM profiles ORDER BY id ASC",
+        )?;
+
+        let profile_iter = stmt.query_map([], Self::row_to_profile)?;
+        let mut list = Vec::new();
+        for p in profile_iter {
+            list.push(p?);
+        }
+        Ok(list)
+    }
+
+    pub fn set_active_profile(conn: &mut Connection, id: i64) -> Result<()> {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM profiles WHERE id = ?1)",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        tx.execute("UPDATE profiles SET is_active = 0", [])?;
+        let affected = tx.execute(
+            "UPDATE profiles SET is_active = 1 WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+        if affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn update_profile(conn: &Connection, profile: &PlaybackProfile) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        conn.execute(
+            "UPDATE profiles SET
+                name = ?1,
+                description = ?2,
+                volume = ?3,
+                audio_delay_ms = ?4,
+                equalizer_preset = ?5,
+                equalizer_bands = ?6,
+                loudness_target = ?7,
+                sub_font_size = ?8,
+                sub_color = ?9,
+                sub_bold = ?10,
+                shader_preset = ?11,
+                settings_json = ?12,
+                updated_at = ?13
+             WHERE id = ?14",
+            rusqlite::params![
+                profile.name,
+                profile.description,
+                profile.volume,
+                profile.audio_delay_ms,
+                profile.equalizer_preset,
+                profile.equalizer_bands,
+                profile.loudness_target,
+                profile.sub_font_size,
+                profile.sub_color,
+                if profile.sub_bold { 1 } else { 0 },
+                profile.shader_preset,
+                profile.settings_json,
+                now,
+                profile.id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_profile(conn: &Connection, id: i64) -> Result<bool> {
+        let is_default: bool = conn
+            .query_row(
+                "SELECT (name = 'Default' OR id = 1) FROM profiles WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+
+        if is_default {
+            return Ok(false);
+        }
+
+        let affected = conn.execute("DELETE FROM profiles WHERE id = ?1", rusqlite::params![id])?;
+        Ok(affected > 0)
+    }
+
+    fn row_to_profile(row: &rusqlite::Row) -> Result<PlaybackProfile> {
+        Ok(PlaybackProfile {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            is_active: row.get::<_, i64>(3)? != 0,
+            volume: row.get(4)?,
+            audio_delay_ms: row.get(5)?,
+            equalizer_preset: row.get(6)?,
+            equalizer_bands: row.get(7)?,
+            loudness_target: row.get(8)?,
+            sub_font_size: row.get(9)?,
+            sub_color: row.get(10)?,
+            sub_bold: row.get::<_, i64>(11)? != 0,
+            shader_preset: row.get(12)?,
+            settings_json: row.get(13)?,
+            created_at: row.get(14)?,
+            updated_at: row.get(15)?,
+        })
+    }
 }

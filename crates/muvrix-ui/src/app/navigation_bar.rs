@@ -266,6 +266,62 @@ impl MuvrixApp {
                             ui.separator();
                         }
 
+                        // Phase E7: Profile Selector Combo Box
+                        let active_name = self
+                            .active_profile
+                            .as_ref()
+                            .map(|p| p.name.as_str())
+                            .unwrap_or("Default");
+                        let prof_label = format!("👤 {active_name} ▾");
+                        let prof_rich = RichText::new(prof_label)
+                            .strong()
+                            .color(BrandPalette::ELECTRIC_LIME);
+
+                        let combo_salt = "nav_profile_selector_combo";
+                        let button_id = ui.make_persistent_id(egui::Id::new(combo_salt));
+                        let popup_id = button_id.with("popup");
+                        if std::env::var("MUVRIX_OPEN_PROFILE_SELECTOR").is_ok() {
+                            ui.memory_mut(|mem| mem.open_popup(popup_id));
+                        }
+
+                        egui::ComboBox::from_id_salt(combo_salt)
+                            .selected_text(prof_rich)
+                            .show_ui(ui, |ui| {
+                                ui.label(
+                                    RichText::new("Playback Profiles")
+                                        .size(11.0)
+                                        .color(Color32::from_rgb(180, 160, 100)),
+                                );
+                                ui.separator();
+
+                                let profiles = self.available_profiles.clone();
+                                for p in profiles {
+                                    let is_active = self.active_profile.as_ref().map(|a| a.id) == Some(p.id);
+                                    let prefix = if is_active { "✔ " } else { "   " };
+                                    let item_label = format!("{prefix}{}", p.name);
+                                    let item_rich = if is_active {
+                                        RichText::new(item_label).strong().color(BrandPalette::OBSIDIAN)
+                                    } else {
+                                        RichText::new(item_label).color(BrandPalette::PRIMARY_TEXT)
+                                    };
+
+                                    if ui.selectable_label(is_active, item_rich).clicked() {
+                                        let _ = self.switch_profile(p.id);
+                                    }
+                                }
+
+                                ui.separator();
+                                if ui.button("+ New Profile...").clicked() {
+                                    self.new_profile_dialog_open = true;
+                                }
+                                if ui.button("⚙ Manage Profiles...").clicked() {
+                                    self.current_view = AppView::Settings;
+                                    self.settings_tab = crate::views::SettingsTab::Profiles;
+                                }
+                            });
+
+                        ui.separator();
+
                         // Developer & Test Menu
                         let dev_text = if is_wide { "Developer" } else { "Dev" };
                         egui::ComboBox::from_id_salt("dev_menu_combo")
@@ -424,6 +480,52 @@ impl MuvrixApp {
                 });
                 ui.add_space(3.0);
             });
+
+        if self.new_profile_dialog_open {
+            let mut open = true;
+            egui::Window::new("Create Playback Profile")
+                .open(&mut open)
+                .resizable(false)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_width(340.0);
+                    ui.label("Enter a name for the new profile:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_profile_name)
+                            .hint_text("e.g. Studio Monitors, Late Night..."),
+                    );
+                    ui.add_space(4.0);
+                    ui.label("Description (optional):");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_profile_desc)
+                            .hint_text("Details regarding this playback profile..."),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui_components::primary_button(ui, "Save Profile", None).clicked()
+                            && !self.new_profile_name.trim().is_empty()
+                        {
+                            let name = self.new_profile_name.clone();
+                            let desc = if self.new_profile_desc.trim().is_empty() {
+                                None
+                            } else {
+                                Some(self.new_profile_desc.clone())
+                            };
+                            let _ = self.create_profile_from_state(&name, desc.as_deref());
+                            self.new_profile_name.clear();
+                            self.new_profile_desc.clear();
+                            self.new_profile_dialog_open = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.new_profile_dialog_open = false;
+                        }
+                    });
+                });
+            if !open {
+                self.new_profile_dialog_open = false;
+            }
+        }
 
         // ---------------------------------------------------------------------
         // Active View Dispatch (Player, Library, Browser, Playlist, Lyrics, History, Settings)

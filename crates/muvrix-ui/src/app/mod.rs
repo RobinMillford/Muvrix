@@ -5,6 +5,7 @@ pub mod formatting;
 pub mod init;
 pub mod navigation_bar;
 pub mod os_integration;
+pub mod profiles;
 pub mod scanner_channel;
 pub mod shortcuts;
 pub mod state;

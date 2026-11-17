@@ -639,6 +639,8 @@ impl MuvrixApp {
                 Ok("subtitles" | "subs") => SettingsTab::Subtitles,
                 Ok("network" | "webdav") => SettingsTab::NetworkMedia,
                 Ok("appearance" | "theme") => SettingsTab::Appearance,
+                Ok("profiles" | "profile") => SettingsTab::Profiles,
+                Ok("shortcuts" | "hotkeys" | "keybindings") => SettingsTab::Shortcuts,
                 Ok("config") => SettingsTab::ConfigEditor,
                 Ok("advanced" | "preferences" | "privacy" | "window") => SettingsTab::Advanced,
                 Ok("about") => SettingsTab::About,
@@ -988,8 +990,37 @@ impl MuvrixApp {
             autoeq_status_msg: std::env::var("MUVRIX_AUTOEQ_STATUS")
                 .ok()
                 .map(|s| (s, false)),
+
+            // Phase E7: Multi-Profile Support, Custom Theme Builder & Shortcut Mapper
+            keybindings: crate::app::shortcuts::KeyBindingMap::load_from_disk(),
+            recording_shortcut: match std::env::var("MUVRIX_SHORTCUT_RECORDING").as_deref() {
+                Ok("play" | "play_pause") => Some(crate::app::shortcuts::ShortcutAction::PlayPause),
+                Ok("seek_forward") => Some(crate::app::shortcuts::ShortcutAction::SeekForward),
+                _ => None,
+            },
+            active_profile: None,
+            available_profiles: Vec::new(),
+            profile_switch_elapsed: None,
+            profile_status_msg: None,
+            new_profile_dialog_open: false,
+            new_profile_name: String::new(),
+            new_profile_desc: String::new(),
+            custom_theme: crate::theme::CustomTheme::load_from_disk()
+                .unwrap_or_else(crate::theme::CustomTheme::obsidian_lime),
+            custom_theme_json: crate::theme::CustomTheme::load_from_disk()
+                .unwrap_or_else(crate::theme::CustomTheme::obsidian_lime)
+                .to_json()
+                .unwrap_or_default(),
+            theme_status_msg: None,
         };
 
+        app.custom_theme.apply_to_context(&startup_ctx);
+        app.reload_profiles_from_db();
+        if let Some(active) = app.active_profile.clone() {
+            let _ = app.switch_profile(active.id);
+        } else {
+            let _ = app.controller.set_volume(persisted.volume);
+        }
         app.refresh_library();
         let _ = app
             .controller
@@ -1003,7 +1034,6 @@ impl MuvrixApp {
         let _ = app
             .controller
             .set_volume_boost(app.equalizer_settings.volume_boost);
-        let _ = app.controller.set_volume(persisted.volume);
         let _ = app.controller.configure_stream_buffering(
             (persisted.stream_buffer_mb as u64) * 1024 * 1024,
             (persisted.stream_back_buffer_mb as u64) * 1024 * 1024,
