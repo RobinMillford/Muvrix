@@ -509,6 +509,49 @@ impl MuvrixApp {
                     eq.dynaudnorm = active;
                 }
 
+                if let Ok(ebu_str) = std::env::var("MUVRIX_EBU_R128") {
+                    let active = ebu_str == "1" || ebu_str.eq_ignore_ascii_case("true");
+                    if active {
+                        eq.set_normalization_mode(muvrix_player::NormalizationMode::EbuR128);
+                    }
+                }
+
+                if let Ok(i_str) = std::env::var("MUVRIX_EBU_R128_I") {
+                    if let Ok(val) = i_str.parse::<f64>() {
+                        eq.ebu_r128.integrated_loudness = val;
+                    }
+                }
+
+                if let Ok(tp_str) = std::env::var("MUVRIX_EBU_R128_TP") {
+                    if let Ok(val) = tp_str.parse::<f64>() {
+                        eq.ebu_r128.true_peak = val;
+                    }
+                }
+
+                if let Ok(lra_str) = std::env::var("MUVRIX_EBU_R128_LRA") {
+                    if let Ok(val) = lra_str.parse::<f64>() {
+                        eq.ebu_r128.loudness_range = val;
+                    }
+                }
+
+                if let Ok(autoeq_path) = std::env::var("MUVRIX_AUTOEQ_PROFILE") {
+                    if let Ok(content) = std::fs::read_to_string(&autoeq_path) {
+                        let name = std::path::Path::new(&autoeq_path)
+                            .file_stem()
+                            .and_then(|s| s.to_str());
+                        if let Ok(profile) = muvrix_player::AutoEqProfile::parse(&content, name) {
+                            eq.apply_autoeq_profile(profile);
+                        }
+                    }
+                }
+
+                if let Ok(vis_str) = std::env::var("MUVRIX_SPECTRUM_VISUALIZER") {
+                    let active = vis_str == "1" || vis_str.eq_ignore_ascii_case("true");
+                    eq.spectrum_visualizer_enabled = active;
+                } else {
+                    eq.spectrum_visualizer_enabled = true;
+                }
+
                 eq
             },
             eq_show_q_factors: false,
@@ -917,6 +960,12 @@ impl MuvrixApp {
             player_more_overflow_open: std::env::var("MUVRIX_OPEN_PLAYER_MORE").is_ok(),
             player_empty_url_input_open: std::env::var("MUVRIX_OPEN_PLAYER_URL_INPUT").is_ok(),
             seeded_ab_loop_applied_file: None,
+
+            // Phase E5: Audio DSP Expansion, EBU R128 & 32-Band Spectrum Visualizer
+            spectrum_visualizer: muvrix_player::SpectrumVisualizer::new(),
+            autoeq_status_msg: std::env::var("MUVRIX_AUTOEQ_STATUS")
+                .ok()
+                .map(|s| (s, false)),
         };
 
         app.refresh_library();

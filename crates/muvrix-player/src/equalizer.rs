@@ -1,6 +1,7 @@
 //! 10-band parametric equalizer, audio DSP filters, headroom clipping management,
 //! and dynamic audio output device routing via native libmpv filters.
 
+use crate::autoeq::AutoEqProfile;
 use crate::error::MpvError;
 use crate::handle::MpvHandle;
 use serde::{Deserialize, Serialize};
@@ -124,6 +125,149 @@ impl EqBand {
     }
 }
 
+/// Selection policy for dynamic range and loudness normalization systems.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NormalizationMode {
+    #[default]
+    None,
+    EbuR128,
+    Dynamic,
+}
+
+impl NormalizationMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "Disabled",
+            Self::EbuR128 => "EBU R128 (Broadcast)",
+            Self::Dynamic => "Dynamic (dynaudnorm)",
+        }
+    }
+}
+
+/// Standardized presets for EBU R128 loudness normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EbuR128Preset {
+    /// EBU R128 European Broadcast Target (EBU R128 / EBU Tech 3343 / ITU-R BS.1770-4):
+    /// - Programme Loudness: -23.0 LUFS (EBU R128 §1 recommended programme level, ±0.5 LU tolerance)
+    /// - Maximum True Peak: -2.0 dBTP (EBU Tech 3343 §4.3 conservative ceiling for lossy data reduction e.g. MPEG-1 Layer II, AC-3; -1.0 dBTP for linear PCM)
+    /// - Loudness Range (LRA): 7.0 LU (MUVRIX dynamic processing window; note LRA is an assessment parameter, not a mandatory 7.0 LU requirement)
+    Broadcast,
+    /// Music Streaming Target (Aligned with AES TD1008 (2021) track-normalized music recommendation):
+    /// - Target Loudness: -16.0 LUFS (Music-oriented streaming target; note AES TD1008 recommends -18 LUFS for speech/podcasts, -16 LUFS for track-normalized music, and -14 LUFS for album loudest track)
+    /// - Maximum True Peak: -1.5 dBTP (Prevents inter-sample clipping on downstream lossy transcode)
+    /// - Loudness Range (LRA): 11.0 LU (Comfortable dynamic processing window for streaming music)
+    #[default]
+    Streaming,
+    /// Custom user-defined target thresholds
+    Custom,
+}
+
+impl EbuR128Preset {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Broadcast => "EBU R128 Broadcast (-23.0 LUFS, -2.0 dBTP, 7.0 LU)",
+            Self::Streaming => "Streaming Music Target (-16.0 LUFS, -1.5 dBTP, 11.0 LU)",
+            Self::Custom => "Custom",
+        }
+    }
+
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            Self::Broadcast => "Broadcast (-23 LUFS)",
+            Self::Streaming => "Streaming Music (-16 LUFS)",
+            Self::Custom => "Custom",
+        }
+    }
+
+    /// Returns the target (I, TP, LRA) values for this preset.
+    pub fn target_values(&self) -> Option<(f64, f64, f64)> {
+        match self {
+            Self::Broadcast => Some((-23.0, -2.0, 7.0)),
+            Self::Streaming => Some((-16.0, -1.5, 11.0)),
+            Self::Custom => None,
+        }
+    }
+}
+
+/// Configuration for EBU R128 professional audio loudness normalization (`loudnorm`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EbuR128Settings {
+    pub enabled: bool,
+    #[serde(default)]
+    pub preset: EbuR128Preset,
+    /// Integrated loudness target in LUFS (-70.0 to -5.0 dB, default -16.0).
+    pub integrated_loudness: f64,
+    /// Maximum True Peak ceiling in dBTP (-9.0 to 0.0 dB, default -1.5).
+    pub true_peak: f64,
+    /// Loudness range target in LU (1.0 to 50.0 LU, default 11.0).
+    pub loudness_range: f64,
+}
+
+impl Default for EbuR128Settings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            preset: EbuR128Preset::Streaming,
+            integrated_loudness: -16.0,
+            true_peak: -1.5,
+            loudness_range: 11.0,
+        }
+    }
+}
+
+impl EbuR128Settings {
+    /// Applies a preset profile to this configuration.
+    pub fn apply_preset(&mut self, preset: EbuR128Preset) {
+        self.preset = preset;
+        if let Some((i, tp, lra)) = preset.target_values() {
+            self.integrated_loudness = i;
+            self.true_peak = tp;
+            self.loudness_range = lra;
+        }
+    }
+
+    /// Resets targets to the formal EBU R128 European broadcast reference (-23.0 LUFS, -2.0 dBTP, 7.0 LU).
+    pub fn reset_to_broadcast_standards(&mut self) {
+        self.apply_preset(EbuR128Preset::Broadcast);
+    }
+
+    /// Resets targets to the streaming audio/podcast default (-16.0 LUFS, -1.5 dBTP, 11.0 LU).
+    pub fn reset_to_streaming_defaults(&mut self) {
+        self.apply_preset(EbuR128Preset::Streaming);
+    }
+
+    /// Validates all parameters and builds the standard FFmpeg `loudnorm` filter string.
+    ///
+    /// Formats as: `loudnorm=I={:.1}:TP={:.1}:LRA={:.1}`
+    pub fn build_filter_string(&self) -> String {
+        let i = if self.integrated_loudness.is_nan() || self.integrated_loudness.is_infinite() {
+            -16.0
+        } else {
+            self.integrated_loudness.clamp(-70.0, -5.0)
+        };
+
+        let tp = if self.true_peak.is_nan() || self.true_peak.is_infinite() {
+            -1.5
+        } else {
+            self.true_peak.clamp(-9.0, 0.0)
+        };
+
+        let lra = if self.loudness_range.is_nan() || self.loudness_range.is_infinite() {
+            11.0
+        } else {
+            self.loudness_range.clamp(1.0, 50.0)
+        };
+
+        format!("loudnorm=I={:.1}:TP={:.1}:LRA={:.1}", i, tp, lra)
+    }
+}
+
+fn default_spectrum_visualizer_enabled() -> bool {
+    false
+}
+
 /// Custom user equalizer preset with custom gains and preamp setting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CustomEqPreset {
@@ -154,6 +298,20 @@ pub struct EqualizerSettings {
     #[serde(default)]
     pub crossfeed_preset: Bs2bPreset,
 
+    // EBU R128 Loudness Normalization & Normalization Mode
+    #[serde(default)]
+    pub ebu_r128: EbuR128Settings,
+    #[serde(default)]
+    pub normalization_mode: NormalizationMode,
+
+    // AutoEq Parametric Profile
+    #[serde(default)]
+    pub autoeq_profile: Option<AutoEqProfile>,
+
+    // Real-Time 32-Band Audio Spectrum Visualizer
+    #[serde(default = "default_spectrum_visualizer_enabled")]
+    pub spectrum_visualizer_enabled: bool,
+
     // User-defined presets
     pub custom_presets: Vec<CustomEqPreset>,
 }
@@ -178,6 +336,10 @@ impl Default for EqualizerSettings {
             volume_boost: 100.0,
             crossfeed_enabled: false,
             crossfeed_preset: Bs2bPreset::Default,
+            ebu_r128: EbuR128Settings::default(),
+            normalization_mode: NormalizationMode::None,
+            autoeq_profile: None,
+            spectrum_visualizer_enabled: false,
             custom_presets: Vec::new(),
         }
     }
@@ -291,37 +453,100 @@ impl EqualizerSettings {
                 self.bands[i].enabled = true;
             }
             self.active_preset = EqualizerPreset::Custom;
+            self.autoeq_profile = None;
             true
         } else {
             false
         }
     }
 
+    /// Returns the effective normalization mode, resolving legacy `dynaudnorm`
+    /// and `ebu_r128.enabled` settings transparently.
+    pub fn effective_normalization_mode(&self) -> NormalizationMode {
+        if self.normalization_mode != NormalizationMode::None {
+            self.normalization_mode
+        } else if self.ebu_r128.enabled {
+            NormalizationMode::EbuR128
+        } else if self.dynaudnorm {
+            NormalizationMode::Dynamic
+        } else {
+            NormalizationMode::None
+        }
+    }
+
+    /// Sets the normalization mode, synchronizing legacy booleans.
+    pub fn set_normalization_mode(&mut self, mode: NormalizationMode) {
+        self.normalization_mode = mode;
+        match mode {
+            NormalizationMode::None => {
+                self.dynaudnorm = false;
+                self.ebu_r128.enabled = false;
+            }
+            NormalizationMode::EbuR128 => {
+                self.dynaudnorm = false;
+                self.ebu_r128.enabled = true;
+            }
+            NormalizationMode::Dynamic => {
+                self.dynaudnorm = true;
+                self.ebu_r128.enabled = false;
+            }
+        }
+    }
+
+    /// Applies an imported AutoEq profile, synchronizing preamp, 10-band slider hints,
+    /// enabling the equalizer, and setting preset to Custom.
+    pub fn apply_autoeq_profile(&mut self, profile: AutoEqProfile) {
+        self.preamp_db = profile.preamp_db;
+        let mapped_10 = profile.map_to_10_bands();
+        self.gains = mapped_10;
+        for (i, &gain) in mapped_10.iter().enumerate() {
+            self.bands[i].gain_db = gain;
+            self.bands[i].enabled = true;
+        }
+        self.autoeq_profile = Some(profile);
+        self.active_preset = EqualizerPreset::Custom;
+        self.is_enabled = true;
+    }
+
+    /// Clears any active AutoEq profile, reverting to the standard 10-band equalizer.
+    pub fn clear_autoeq_profile(&mut self) {
+        self.autoeq_profile = None;
+        self.preamp_db = 0.0;
+    }
+
     /// Evaluates the estimated combined frequency response of the equalizer filter cascade in dB at frequency `f_hz`.
     pub fn combined_gain_at_freq(&self, f_hz: f64) -> f64 {
-        let mut total = 0.0;
-        for (i, band) in self.bands.iter().enumerate() {
-            let gain = if band.gain_db.abs() > 0.001 {
-                band.gain_db
-            } else if i < self.gains.len() {
-                self.gains[i]
-            } else {
-                0.0
-            };
-            if !band.enabled || gain.abs() < 0.01 {
-                continue;
+        if let Some(ref autoeq) = self.autoeq_profile {
+            let mut total = 0.0;
+            for filter in &autoeq.filters {
+                total += filter.gain_at_freq(f_hz);
             }
-            let f0 = band.frequency_hz;
-            let ratio = f_hz / f0;
-            if ratio <= 0.0 {
-                continue;
+            total
+        } else {
+            let mut total = 0.0;
+            for (i, band) in self.bands.iter().enumerate() {
+                let gain = if band.gain_db.abs() > 0.001 {
+                    band.gain_db
+                } else if i < self.gains.len() {
+                    self.gains[i]
+                } else {
+                    0.0
+                };
+                if !band.enabled || gain.abs() < 0.01 {
+                    continue;
+                }
+                let f0 = band.frequency_hz;
+                let ratio = f_hz / f0;
+                if ratio <= 0.0 {
+                    continue;
+                }
+                let omega = ratio - (1.0 / ratio);
+                let q = band.q_factor.max(0.1);
+                let weight = 1.0 / (1.0 + (q * omega).powi(2));
+                total += gain * weight;
             }
-            let omega = ratio - (1.0 / ratio);
-            let q = band.q_factor.max(0.1);
-            let weight = 1.0 / (1.0 + (q * omega).powi(2));
-            total += gain * weight;
+            total
         }
-        total
     }
 
     /// Evaluates the cumulative frequency response in dB at frequency `f_hz` (including preamp gain if EQ is enabled).
@@ -454,32 +679,68 @@ impl EqualizerManager {
     ///
     /// Constructs a single-pass filter chain with:
     /// 1. Preamp gain (if non-zero)
-    /// 2. Active 10-band peaking biquad filters (`equalizer=f=...:t=q:w=...:g=...`)
-    /// 3. Dynamic audio normalizer (`dynaudnorm`)
+    /// 2. Active equalizer filters (either 10-band peaking biquads or AutoEq parametric cascade: peaking, lowshelf, highshelf)
+    /// 3. Headphone crossfeed (Bauer bs2b)
+    /// 4. Loudness normalization (EBU R128 `loudnorm` or Dynamic `dynaudnorm`)
+    /// 5. Real-time audio analysis telemetry (`astats` & `aspectralstats` for spectrum visualizer)
+    ///
+    /// When the spectrum visualizer is disabled, visualization-specific analysis filters (`@vis`, `@spec`)
+    /// are omitted from the active filter chain, while other user-configured audio DSP remains active.
     pub fn build_filter_string(settings: &EqualizerSettings) -> String {
         let mut filters = Vec::new();
 
         if settings.is_enabled {
             // Preamp gain filter to manage headroom
-            let preamp = settings.preamp_db.clamp(-12.0, 12.0);
+            let preamp = settings.preamp_db.clamp(-36.0, 36.0);
             if preamp.abs() > 0.01 {
                 filters.push(format!("volume=volume={:.1}dB", preamp));
             }
 
-            // Chain 10 peaking biquad equalizer filters
-            for (i, band) in settings.bands.iter().enumerate() {
-                if !band.enabled {
-                    continue;
+            if let Some(ref autoeq) = settings.autoeq_profile {
+                for filter in &autoeq.filters {
+                    if !filter.enabled || filter.gain_db.abs() < 0.01 {
+                        continue;
+                    }
+                    let freq = filter.frequency_hz.clamp(20.0, 20000.0);
+                    let q = filter.q_factor.clamp(0.1, 10.0);
+                    let gain = filter.gain_db.clamp(-36.0, 36.0);
+                    match filter.filter_type {
+                        crate::autoeq::AutoEqFilterType::Peaking => {
+                            filters.push(format!(
+                                "equalizer=f={:.2}:t=q:w={:.3}:g={:.1}",
+                                freq, q, gain
+                            ));
+                        }
+                        crate::autoeq::AutoEqFilterType::LowShelf => {
+                            filters.push(format!(
+                                "lowshelf=f={:.2}:t=q:w={:.3}:g={:.1}",
+                                freq, q, gain
+                            ));
+                        }
+                        crate::autoeq::AutoEqFilterType::HighShelf => {
+                            filters.push(format!(
+                                "highshelf=f={:.2}:t=q:w={:.3}:g={:.1}",
+                                freq, q, gain
+                            ));
+                        }
+                    }
                 }
-                // Use settings.gains[i] or band.gain_db
-                let gain = settings.gains[i].clamp(-12.0, 12.0);
-                if gain.abs() > 0.01 {
-                    let freq = band.frequency_hz;
-                    let q = band.q_factor.clamp(0.1, 10.0);
-                    filters.push(format!(
-                        "equalizer=f={:.2}:t=q:w={:.3}:g={:.1}",
-                        freq, q, gain
-                    ));
+            } else {
+                // Chain 10 peaking biquad equalizer filters
+                for (i, band) in settings.bands.iter().enumerate() {
+                    if !band.enabled {
+                        continue;
+                    }
+                    // Use settings.gains[i] or band.gain_db
+                    let gain = settings.gains[i].clamp(-12.0, 12.0);
+                    if gain.abs() > 0.01 {
+                        let freq = band.frequency_hz;
+                        let q = band.q_factor.clamp(0.1, 10.0);
+                        filters.push(format!(
+                            "equalizer=f={:.2}:t=q:w={:.3}:g={:.1}",
+                            freq, q, gain
+                        ));
+                    }
                 }
             }
         }
@@ -491,8 +752,19 @@ impl EqualizerManager {
             ));
         }
 
-        if settings.dynaudnorm {
-            filters.push("dynaudnorm=f=150:g=15".to_string());
+        match settings.effective_normalization_mode() {
+            NormalizationMode::EbuR128 => {
+                filters.push(settings.ebu_r128.build_filter_string());
+            }
+            NormalizationMode::Dynamic => {
+                filters.push("dynaudnorm=f=150:g=15".to_string());
+            }
+            NormalizationMode::None => {}
+        }
+
+        if settings.spectrum_visualizer_enabled {
+            filters.push("@vis:lavfi=[astats=metadata=1:reset=1]".to_string());
+            filters.push("@spec:lavfi=[aspectralstats]".to_string());
         }
 
         filters.join(",")

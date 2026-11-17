@@ -92,6 +92,7 @@ impl MuvrixApp {
         self.handle_keyboard_inputs(ctx);
         self.update_osd_autohide(ctx);
         self.sync_seeded_ab_loop();
+        self.update_spectrum_visualizer(ctx);
 
         // Handle drag and drop media files into the application
         ctx.input(|i| {
@@ -363,6 +364,23 @@ impl MuvrixApp {
             }
         } else {
             log::warn!("Unrecognized MUVRIX_SEED_AB_LOOP format: {ab_str}");
+        }
+    }
+
+    /// Queries real-time audio spectrum telemetry and updates 32-band visualizer at 60 FPS.
+    pub fn update_spectrum_visualizer(&mut self, ctx: &egui::Context) {
+        if !self.equalizer_settings.spectrum_visualizer_enabled
+            || self.current_view != crate::views::AppView::Player
+        {
+            return;
+        }
+
+        let telemetry = self.controller.spectrum_telemetry();
+        self.spectrum_visualizer.update(&telemetry);
+
+        // Continuous repaint during active audio playback for smooth 60 FPS animation
+        if telemetry.is_playing && !telemetry.is_paused {
+            ctx.request_repaint();
         }
     }
 }

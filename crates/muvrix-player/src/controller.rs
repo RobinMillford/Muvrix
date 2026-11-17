@@ -20,6 +20,7 @@ use crate::subsystems::track::TrackSubsystem;
 use crate::subsystems::video::VideoSubsystem;
 use crate::track::{ChapterInfo, SubtitleStyling, TrackInfo, TrackType};
 
+pub use crate::spectrum::SpectrumTelemetry;
 pub use crate::subsystems::audio::{
     AudioDeviceChangeEvent, AudioRecoveryStatus, DynamicsTelemetry,
 };
@@ -572,6 +573,14 @@ impl PlaybackController {
     pub fn dynamics_telemetry(&self, is_normalization_enabled: bool) -> DynamicsTelemetry {
         self.audio
             .dynamics_telemetry(&self.handle, is_normalization_enabled)
+    }
+
+    /// Queries real-time audio spectrum telemetry from the active media stream.
+    pub fn spectrum_telemetry(&self) -> SpectrumTelemetry {
+        let is_playing = *self.state() == PlaybackState::Playing;
+        let is_paused = self.is_paused();
+        self.audio
+            .spectrum_telemetry(&self.handle, is_playing, is_paused)
     }
 
     pub fn gapless_audio(&self) -> bool {

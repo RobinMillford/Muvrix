@@ -80,3 +80,4 @@ scripts/generate-phase-2.8-media.sh
 /tests/network-integration/sftp_fingerprint.txt
 /tests/network-integration/fixtures/
 docs/tests/
+docs/*.zip

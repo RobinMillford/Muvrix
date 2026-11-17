@@ -389,6 +389,10 @@ pub struct MuvrixApp {
     pub(crate) player_more_overflow_open: bool,
     pub(crate) player_empty_url_input_open: bool,
     pub(crate) seeded_ab_loop_applied_file: Option<String>,
+
+    // Phase E5: Audio DSP Expansion, EBU R128 & 32-Band Spectrum Visualizer
+    pub(crate) spectrum_visualizer: muvrix_player::SpectrumVisualizer,
+    pub(crate) autoeq_status_msg: Option<(String, bool)>,
 }
 
 impl MuvrixApp {

@@ -1,5 +1,6 @@
 //! `muvrix-player`: Safe, high-level Rust wrapper for the libmpv media engine.
 
+pub mod autoeq;
 pub mod capability;
 pub mod command;
 pub mod controller;
@@ -16,12 +17,14 @@ pub mod render;
 pub mod settings;
 pub mod shader;
 pub mod shuffle;
+pub mod spectrum;
 pub mod stream;
 pub mod subsystems;
 pub mod thumbnail;
 pub mod track;
 pub mod version;
 
+pub use autoeq::{AutoEqError, AutoEqFilter, AutoEqFilterType, AutoEqProfile};
 pub use capability::{
     EngineCapabilities, HdrPresentationMode, HwdecMemoryPath, HwdecStatus, MediaCapabilities,
     PlaybackDiagnostics,
@@ -34,8 +37,8 @@ pub use controller::{
 };
 pub use decode::{DecodeObservation, DecodePath, DecodePolicy, PlatformFamily};
 pub use equalizer::{
-    AudioDeviceInfo, AudioOutputDevice, Bs2bPreset, EqBand, EqualizerManager, EqualizerPreset,
-    EqualizerSettings, EQ_FREQUENCIES,
+    AudioDeviceInfo, AudioOutputDevice, Bs2bPreset, EbuR128Preset, EbuR128Settings, EqBand,
+    EqualizerManager, EqualizerPreset, EqualizerSettings, NormalizationMode, EQ_FREQUENCIES,
 };
 pub use error::MpvError;
 pub use event::{EndFileReason, Event};
@@ -57,6 +60,9 @@ pub use shader::{
     VideoAdjustmentSettings,
 };
 pub use shuffle::{ShuffleTrackInfo, SmartShuffleEngine};
+pub use spectrum::{
+    SpectrumTelemetry, SpectrumVisualizer, SPECTRUM_BANDS_COUNT, SPECTRUM_FREQUENCIES,
+};
 pub use stream::{
     classify_io_error, HttpRangeStream, IoSeekableStream, MemoryStream, MpvStreamBridge,
     ReadAheadStream, RecoverableStream, RecoveryState, SeekableStream, SftpSeekableStream,

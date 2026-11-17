@@ -612,12 +612,152 @@ impl MuvrixApp {
     pub fn apply_equalizer_settings(&mut self) {
         self.equalizer_settings.sync_gains_to_bands();
         let needs_pan = self.audio_channels.needs_pan_filter();
-        let mut eq = self.equalizer_settings.clone();
-        if self.volume_normalization {
-            eq.dynaudnorm = true;
-        }
+        let eq = self.equalizer_settings.clone();
         let _ = EqualizerManager::apply_unified_to_handle(self.controller.handle(), &eq, needs_pan);
+        self.volume_normalization =
+            eq.effective_normalization_mode() == muvrix_player::NormalizationMode::Dynamic;
         self.save_media_settings();
+    }
+
+    /// Opens the native file picker to select and import an AutoEq profile (.txt or .json).
+    pub fn import_autoeq_dialog(&mut self) {
+        if let Some(file) = rfd::FileDialog::new()
+            .set_title("Import AutoEq Profile")
+            .add_filter("AutoEq Presets (*.txt, *.json)", &["txt", "json"])
+            .pick_file()
+        {
+            self.load_autoeq_from_path(&file);
+        }
+    }
+
+    /// Loads, parses, validates and applies an AutoEq profile from disk.
+    pub fn load_autoeq_from_path(&mut self, path: &std::path::Path) {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                let err_msg = format!("Failed to read AutoEq file: {e}");
+                self.autoeq_status_msg = Some((err_msg.clone(), true));
+                self.status_message = err_msg;
+                return;
+            }
+        };
+
+        let file_stem = path.file_stem().and_then(|s| s.to_str());
+        match muvrix_player::AutoEqProfile::parse(&content, file_stem) {
+            Ok(profile) => {
+                let name = profile.name.clone();
+                let filter_count = profile.filters.len();
+                let preamp = profile.preamp_db;
+                self.equalizer_settings.apply_autoeq_profile(profile);
+                self.apply_equalizer_settings();
+                let success_msg = format!(
+                    "Loaded AutoEq profile '{}' ({} filters, Preamp: {:.1} dB)",
+                    name, filter_count, preamp
+                );
+                self.autoeq_status_msg = Some((success_msg.clone(), false));
+                self.status_message = success_msg;
+            }
+            Err(e) => {
+                let err_msg = format!("AutoEq parse error: {e}");
+                self.autoeq_status_msg = Some((err_msg.clone(), true));
+                self.status_message = err_msg;
+            }
+        }
+    }
+
+    /// Opens a native file picker to export the active equalizer configuration as AutoEq.
+    pub fn export_autoeq_dialog(&mut self) {
+        let default_name = self
+            .equalizer_settings
+            .autoeq_profile
+            .as_ref()
+            .map(|p| format!("{}.txt", p.name.replace(' ', "_")))
+            .unwrap_or_else(|| "muvrix-eq-profile.txt".to_string());
+
+        if let Some(file) = rfd::FileDialog::new()
+            .set_title("Export Equalizer Preset")
+            .set_file_name(&default_name)
+            .add_filter("AutoEq Text Preset (*.txt)", &["txt"])
+            .add_filter("AutoEq JSON Preset (*.json)", &["json"])
+            .save_file()
+        {
+            self.save_autoeq_to_path(&file);
+        }
+    }
+
+    /// Serializes and writes the active equalizer configuration to the target path.
+    pub fn save_autoeq_to_path(&mut self, path: &std::path::Path) {
+        let is_json = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|s| s.eq_ignore_ascii_case("json"))
+            .unwrap_or(false);
+
+        let profile = if let Some(ref p) = self.equalizer_settings.autoeq_profile {
+            p.clone()
+        } else {
+            // Build profile from 10 bands
+            let mut filters = Vec::new();
+            for band in &self.equalizer_settings.bands {
+                if let Ok(f) = muvrix_player::AutoEqFilter::new_with_enabled(
+                    muvrix_player::AutoEqFilterType::Peaking,
+                    band.frequency_hz,
+                    band.gain_db,
+                    band.q_factor,
+                    band.enabled,
+                ) {
+                    filters.push(f);
+                }
+            }
+            match muvrix_player::AutoEqProfile::new(
+                "Muvrix Custom Preset".to_string(),
+                self.equalizer_settings.preamp_db,
+                filters,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    let err = format!("Cannot export preset: {e}");
+                    self.autoeq_status_msg = Some((err.clone(), true));
+                    self.status_message = err;
+                    return;
+                }
+            }
+        };
+
+        let result = if is_json {
+            profile.export_json().map_err(|e| e.to_string())
+        } else {
+            Ok(profile.export_text())
+        };
+
+        match result {
+            Ok(text) => match std::fs::write(path, text) {
+                Ok(_) => {
+                    let msg = format!("Exported equalizer profile to {}", path.display());
+                    self.autoeq_status_msg = Some((msg.clone(), false));
+                    self.status_message = msg;
+                }
+                Err(e) => {
+                    let err = format!("Failed to write export file: {e}");
+                    self.autoeq_status_msg = Some((err.clone(), true));
+                    self.status_message = err;
+                }
+            },
+            Err(e) => {
+                let err = format!("Failed to serialize profile: {e}");
+                self.autoeq_status_msg = Some((err.clone(), true));
+                self.status_message = err;
+            }
+        }
+    }
+
+    /// Clears any active AutoEq profile, reverting to the 10-band equalizer.
+    pub fn clear_autoeq_profile(&mut self) {
+        self.equalizer_settings.clear_autoeq_profile();
+        self.autoeq_status_msg = None;
+        self.apply_equalizer_settings();
+        self.status_message =
+            "Cleared AutoEq profile; reverted to standard 10-band equalizer.".to_string();
     }
 
     pub fn save_media_settings(&self) {

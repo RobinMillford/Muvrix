@@ -1659,7 +1659,25 @@ impl MuvrixApp {
                             }
                         });
                     }
-                    _ => {}
+                    PlaybackState::Playing | PlaybackState::Paused => {
+                        let has_video = self.controller.track().tracks().iter().any(|t| {
+                            t.track_type == TrackType::Video
+                                && !matches!(
+                                    t.codec
+                                        .as_deref()
+                                        .map(|s| s.to_ascii_lowercase())
+                                        .as_deref(),
+                                    Some("mjpeg" | "png" | "jpeg" | "jpg")
+                                )
+                        });
+
+                        let force_audio_view = std::env::var("MUVRIX_AUDIO_PLAYBACK_MODE").is_ok()
+                            || std::env::var("MUVRIX_SHOW_SPECTRUM").is_ok();
+
+                        if !has_video || force_audio_view {
+                            self.render_audio_player_viewport(ui, rect);
+                        }
+                    }
                 }
             });
 
@@ -2026,6 +2044,288 @@ impl MuvrixApp {
                     );
                 });
             self.player_more_overflow_open = more_open;
+        }
+    }
+
+    /// Renders the specialized audio player experience featuring the 32-band spectrum visualizer
+    /// or the classic high-contrast audio card when the visualizer is disabled.
+    pub fn render_audio_player_viewport(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let center_pos = rect.center() - Vec2::new(0.0, 35.0);
+        let card_w = 720.0_f32.min(rect.width() - 40.0);
+        let card_h = 320.0_f32.min(rect.height() - 150.0);
+        if card_w < 200.0 || card_h < 120.0 {
+            return;
+        }
+
+        let card_rect = Rect::from_center_size(center_pos, Vec2::new(card_w, card_h));
+
+        // High contrast Obsidian card
+        ui.painter().rect(
+            card_rect,
+            10.0_f32,
+            BrandPalette::OBSIDIAN,
+            Stroke::new(1.5_f32, BrandPalette::SLATE_BORDER),
+            StrokeKind::Inside,
+        );
+
+        let mut child_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(card_rect.shrink(16.0))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+
+        // Header: Title, Artist, Mode Pill, and Toggle Button
+        child_ui.horizontal(|ui| {
+            icons::icon_label(ui, Icon::AudioTrack, 18.0, BrandPalette::ELECTRIC_LIME);
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                let title = self
+                    .controller
+                    .media_title()
+                    .or_else(|| {
+                        self.controller.current_file().map(|f| {
+                            std::path::Path::new(f)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or(f)
+                                .to_string()
+                        })
+                    })
+                    .unwrap_or_else(|| "Audio Playback".to_string());
+
+                ui.label(
+                    RichText::new(title)
+                        .strong()
+                        .size(15.0)
+                        .color(BrandPalette::IVORY_TEXT),
+                );
+
+                let audio_codec = self.controller.audio_codec();
+                let codec_desc = if audio_codec.is_empty() {
+                    "Audio Stream".to_string()
+                } else {
+                    format!("Codec: {}", audio_codec.to_uppercase())
+                };
+                ui.label(
+                    RichText::new(codec_desc)
+                        .size(11.0)
+                        .color(BrandPalette::MUTED_TEXT),
+                );
+            });
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let vis_enabled = self.equalizer_settings.spectrum_visualizer_enabled;
+                let toggle_label = if vis_enabled {
+                    "Visualizer [ON]"
+                } else {
+                    "Visualizer [OFF]"
+                };
+                let toggle_color = if vis_enabled {
+                    BrandPalette::ELECTRIC_LIME
+                } else {
+                    Color32::from_gray(160)
+                };
+
+                if ui
+                    .button(
+                        RichText::new(toggle_label)
+                            .strong()
+                            .size(11.0)
+                            .color(toggle_color),
+                    )
+                    .on_hover_text("Toggle 32-band real-time audio spectrum visualizer")
+                    .clicked()
+                {
+                    self.equalizer_settings.spectrum_visualizer_enabled = !vis_enabled;
+                    self.apply_equalizer_settings();
+                }
+
+                ui.add_space(8.0);
+                // Badge Pill: 32-Band Spectrum Analyzer
+                egui::Frame::NONE
+                    .fill(BrandPalette::SLATE_SURFACE)
+                    .stroke(Stroke::new(1.0_f32, BrandPalette::BORDER_SLATE))
+                    .corner_radius(4.0_f32)
+                    .inner_margin(egui::Margin::symmetric(6, 2))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("32-BAND SPECTRUM")
+                                .monospace()
+                                .size(9.5)
+                                .strong()
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                    });
+            });
+        });
+
+        child_ui.add_space(8.0);
+
+        if self.equalizer_settings.spectrum_visualizer_enabled {
+            // Render 32-band real-time visualizer canvas
+            let canvas_w = child_ui.available_width().max(280.0);
+            let canvas_h = (child_ui.available_height() - 32.0).clamp(100.0, 180.0);
+            let (viz_rect, _) =
+                child_ui.allocate_exact_size(egui::vec2(canvas_w, canvas_h), Sense::hover());
+            let painter = child_ui.painter_at(viz_rect);
+
+            // Obsidian Dark Canvas
+            painter.rect_filled(viz_rect, 4.0, Color32::from_rgb(8, 13, 18));
+            painter.rect_stroke(
+                viz_rect,
+                4.0,
+                Stroke::new(1.0_f32, Color32::from_rgb(24, 33, 43)),
+                StrokeKind::Inside,
+            );
+
+            let left = viz_rect.left() + 12.0;
+            let right = viz_rect.right() - 12.0;
+            let top = viz_rect.top() + 12.0;
+            let bottom = viz_rect.bottom() - 22.0; // Room for frequency axis labels
+            let plot_w = (right - left).max(10.0);
+            let plot_h = (bottom - top).max(10.0);
+
+            // Draw subtle horizontal grid lines (-12dB, -24dB, -36dB)
+            for &(rel_y, stroke_c) in &[
+                (0.25_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 12)),
+                (0.50_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 15)),
+                (0.75_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 12)),
+            ] {
+                let y = top + plot_h * rel_y;
+                painter.line_segment(
+                    [egui::pos2(left, y), egui::pos2(right, y)],
+                    Stroke::new(0.5_f32, stroke_c),
+                );
+            }
+
+            // Draw baseline line
+            painter.line_segment(
+                [egui::pos2(left, bottom), egui::pos2(right, bottom)],
+                Stroke::new(1.0_f32, Color32::from_rgb(45, 58, 70)),
+            );
+
+            // Render 32 bars
+            let num_bars = muvrix_player::SPECTRUM_BANDS_COUNT;
+            let gap = 3.0_f32.min((plot_w / 64.0).max(1.5));
+            let bar_w = ((plot_w - (num_bars as f32 - 1.0) * gap) / num_bars as f32).max(2.0);
+
+            let smoothed = self.spectrum_visualizer.smoothed_bands();
+
+            for (i, &mag_val) in smoothed.iter().enumerate().take(num_bars) {
+                let bar_x = left + i as f32 * (bar_w + gap);
+                let mag = mag_val.clamp(0.0, 1.0);
+                let bar_h = (plot_h * mag).max(1.0);
+                let bar_top = bottom - bar_h;
+
+                // Subtle inactive background bar
+                let inactive_rect =
+                    Rect::from_min_max(egui::pos2(bar_x, top), egui::pos2(bar_x + bar_w, bottom));
+                painter.rect_filled(
+                    inactive_rect,
+                    1.5,
+                    Color32::from_rgba_unmultiplied(200, 238, 117, 14),
+                );
+
+                // Active magnitude bar in Electric Lime
+                let active_rect = Rect::from_min_max(
+                    egui::pos2(bar_x, bar_top),
+                    egui::pos2(bar_x + bar_w, bottom),
+                );
+                painter.rect_filled(active_rect, 1.5, BrandPalette::ELECTRIC_LIME);
+            }
+
+            // Frequency axis labels at octave landmarks
+            let landmark_indices = [
+                (0, "20"),
+                (4, "50"),
+                (7, "100"),
+                (11, "250"),
+                (14, "500"),
+                (17, "1k"),
+                (20, "2k"),
+                (23, "4k"),
+                (26, "8k"),
+                (29, "16k"),
+                (31, "20k"),
+            ];
+
+            for (idx, label) in landmark_indices {
+                let bar_x = left + idx as f32 * (bar_w + gap) + bar_w * 0.5;
+                painter.text(
+                    egui::pos2(bar_x, bottom + 11.0),
+                    egui::Align2::CENTER_CENTER,
+                    label,
+                    egui::FontId::monospace(8.5),
+                    Color32::from_gray(130),
+                );
+            }
+
+            // Footer telemetry summary row
+            child_ui.add_space(4.0);
+            child_ui.horizontal(|ui| {
+                let norm_mode = self.equalizer_settings.effective_normalization_mode();
+                let norm_label = match norm_mode {
+                    muvrix_player::NormalizationMode::EbuR128 => {
+                        format!(
+                            "EBU R128 ({:.1} LUFS | {:.1} dBTP)",
+                            self.equalizer_settings.ebu_r128.integrated_loudness,
+                            self.equalizer_settings.ebu_r128.true_peak,
+                        )
+                    }
+                    muvrix_player::NormalizationMode::Dynamic => {
+                        "Dynamic Normalizer (dynaudnorm)".to_string()
+                    }
+                    muvrix_player::NormalizationMode::None => "Normalization: Bypassed".to_string(),
+                };
+
+                ui.label(
+                    RichText::new(format!("Mode: {norm_label}"))
+                        .size(11.0)
+                        .color(Color32::from_gray(160)),
+                );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new("60 FPS FFT Telemetry")
+                            .monospace()
+                            .size(10.0)
+                            .color(BrandPalette::ELECTRIC_LIME),
+                    );
+                });
+            });
+        } else {
+            // Fallback view when visualizer is explicitly disabled
+            child_ui.vertical_centered(|ui| {
+                ui.add_space(20.0);
+                icons::icon_label(ui, Icon::AudioTrack, 44.0, Color32::from_gray(100));
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("32-Band Spectrum Visualizer is Disabled")
+                        .strong()
+                        .size(14.0)
+                        .color(BrandPalette::MUTED_TEXT),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "Audio decoding and playback active with zero visualization overhead.",
+                    )
+                    .size(11.5)
+                    .color(Color32::from_gray(130)),
+                );
+                ui.add_space(12.0);
+                if icons::primary_icon_button_text(
+                    ui,
+                    Icon::Sliders,
+                    "Enable 32-Band Visualizer",
+                    "Engage real-time spectrum analysis",
+                )
+                .clicked()
+                {
+                    self.equalizer_settings.spectrum_visualizer_enabled = true;
+                    self.apply_equalizer_settings();
+                }
+            });
         }
     }
 }

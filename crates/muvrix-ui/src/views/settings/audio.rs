@@ -4,6 +4,7 @@ use muvrix_player::AudioChannelsSetting;
 
 use crate::app::MuvrixApp;
 use crate::branding::BrandPalette;
+use crate::icons::{self, Icon};
 
 /// Renders a spline-interpolated, mathematically calibrated frequency response curve
 /// for the 10-band peaking biquad equalizer cascade across 20 Hz to 20 kHz.
@@ -306,6 +307,7 @@ impl MuvrixApp {
                             {
                                 self.equalizer_settings.active_preset = p;
                                 self.equalizer_settings.gains = p.default_gains();
+                                self.equalizer_settings.autoeq_profile = None;
                                 if p == EqualizerPreset::Flat {
                                     self.equalizer_settings.preamp_db = 0.0;
                                 }
@@ -387,6 +389,7 @@ impl MuvrixApp {
                                 .show_value(false);
                         if ui.add_sized([24.0, 85.0], slider).changed() {
                             self.equalizer_settings.active_preset = EqualizerPreset::Custom;
+                            self.equalizer_settings.autoeq_profile = None;
                             eq_changed = true;
                         }
                         ui.label(
@@ -440,11 +443,106 @@ impl MuvrixApp {
                 self.equalizer_settings.gains = [0.0; 10];
                 self.equalizer_settings.preamp_db = 0.0;
                 self.equalizer_settings.active_preset = EqualizerPreset::Flat;
+                self.equalizer_settings.clear_autoeq_profile();
                 eq_changed = true;
             }
 
             if eq_changed {
                 self.apply_equalizer_settings();
+            }
+        });
+
+        ui.add_space(6.0);
+
+        // =====================================================================
+        // SECTION 1B: AutoEq Parametric Preset Management & Headphone Correction
+        // =====================================================================
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new("AutoEq Preset Management & Headphone Correction")
+                    .strong()
+                    .size(13.5)
+                    .color(BrandPalette::ELECTRIC_LIME),
+            );
+            ui.label(
+                RichText::new(
+                    "Import calibrated parametric equalizer profiles (JSON or EqualizerAPO text) from AutoEq, crinacle, oratory1990.",
+                )
+                .size(11.5)
+                .color(BrandPalette::MUTED_TEXT),
+            );
+            ui.add_space(6.0);
+
+            // Active profile info badge
+            let mut clear_clicked = false;
+            if let Some(ref autoeq) = self.equalizer_settings.autoeq_profile {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Active Profile:").strong().size(12.0));
+                    ui.label(
+                        RichText::new(&autoeq.name)
+                            .strong()
+                            .size(12.0)
+                            .color(BrandPalette::ELECTRIC_LIME),
+                    );
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!("{} Filter Bands", autoeq.filters.len()))
+                            .size(11.5)
+                            .color(Color32::from_rgb(147, 197, 253)),
+                    );
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!("Preamp: {:+.1} dB", autoeq.preamp_db))
+                            .monospace()
+                            .size(11.5)
+                            .color(Color32::from_gray(200)),
+                    );
+
+                    if ui.button("Clear / Revert to Standard EQ").clicked() {
+                        clear_clicked = true;
+                    }
+                });
+                ui.add_space(4.0);
+            }
+            if clear_clicked {
+                self.clear_autoeq_profile();
+            }
+
+            // Action buttons: Import AutoEq, Export Preset
+            ui.horizontal(|ui| {
+                if icons::icon_text_button(
+                    ui,
+                    Icon::FolderOpen,
+                    "Import AutoEq Profile (.txt / .json)",
+                    "Select an AutoEq JSON or EqualizerAPO text profile",
+                )
+                .clicked()
+                {
+                    self.import_autoeq_dialog();
+                }
+
+                if icons::icon_text_button(
+                    ui,
+                    Icon::Playlist,
+                    "Export Preset",
+                    "Export current equalizer settings as AutoEq text or JSON",
+                )
+                .clicked()
+                {
+                    self.export_autoeq_dialog();
+                }
+            });
+
+            // Status feedback banner
+            if let Some((ref msg, is_err)) = self.autoeq_status_msg {
+                ui.add_space(4.0);
+                let color = if is_err {
+                    Color32::from_rgb(255, 100, 100)
+                } else {
+                    BrandPalette::ELECTRIC_LIME
+                };
+                ui.label(RichText::new(msg).size(11.0).color(color));
             }
         });
 
@@ -516,153 +614,273 @@ impl MuvrixApp {
         ui.add_space(6.0);
 
         // =====================================================================
-        // SECTION 3: Dynamic Range Compression & Gain Reduction HUD
+        // SECTION 3: Loudness Normalization (EBU R128 & Dynamic Normalizer)
         // =====================================================================
         ui.group(|ui| {
             ui.set_width(ui.available_width());
             ui.label(
-                RichText::new("3. Dynamic Range Normalization & Gain Reduction HUD")
+                RichText::new("3. Audio Loudness Normalization (EBU R128 & Dynamic)")
                     .strong()
                     .size(14.0)
                     .color(BrandPalette::ELECTRIC_LIME),
             );
             ui.label(
                 RichText::new(
-                    "Real-time dynamics monitoring and telemetry for dynamic audio normalization.",
+                    "Broadcast-standard EBU R128 loudness normalization (LUFS, True Peak, LRA) and dynamic compression.",
                 )
                 .size(12.0)
                 .color(BrandPalette::MUTED_TEXT),
             );
-            ui.add_space(4.0);
+            ui.add_space(6.0);
 
-            if ui
-                .checkbox(
-                    &mut self.volume_normalization,
-                    "Volume Normalization (dynaudnorm)",
-                )
-                .on_hover_text(
-                    "Smooth out extreme volume fluctuations between loud action and quiet dialogue.",
-                )
-                .changed()
-            {
-                self.sync_audio_preferences();
-                self.save_media_settings();
-            }
+            let mut norm_changed = false;
+            let current_mode = self.equalizer_settings.effective_normalization_mode();
 
-            let is_norm_active = self.volume_normalization || self.equalizer_settings.dynaudnorm;
-            let telemetry = self.controller.dynamics_telemetry(is_norm_active);
-
-            ui.add_space(4.0);
+            // Normalization mode selection pills
             ui.horizontal(|ui| {
-                if telemetry.normalization_active {
-                    ui.label(
-                        RichText::new("● DYNAMICS ACTIVE")
-                            .strong()
-                            .size(11.0)
-                            .color(BrandPalette::ELECTRIC_LIME),
-                    );
-                } else {
-                    ui.label(
-                        RichText::new("○ DYNAMICS INACTIVE")
-                            .size(11.0)
-                            .color(Color32::from_gray(140)),
-                    );
+                ui.label(RichText::new("Normalization Mode:").strong());
+                for (mode, label) in [
+                    (muvrix_player::NormalizationMode::None, "Disabled"),
+                    (muvrix_player::NormalizationMode::EbuR128, "EBU R128 (Broadcast Standard)"),
+                    (muvrix_player::NormalizationMode::Dynamic, "Dynamic (dynaudnorm)"),
+                ] {
+                    if ui.selectable_label(current_mode == mode, label).clicked() {
+                        self.equalizer_settings.set_normalization_mode(mode);
+                        norm_changed = true;
+                    }
                 }
-
-                ui.add_space(10.0);
-                ui.label(
-                    RichText::new(&telemetry.status_message)
-                        .size(11.5)
-                        .color(Color32::from_gray(180)),
-                );
             });
 
             ui.add_space(6.0);
 
-            // Calibrated Gain Reduction Meter (0 dB down to -24 dB)
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Gain Reduction:").strong().size(11.5));
-                let gr_db = telemetry.gain_reduction_db.unwrap_or(0.0).clamp(-24.0, 0.0);
-                let meter_width = 240.0;
-                let meter_height = 14.0;
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(meter_width, meter_height),
-                    Sense::hover(),
-                );
-                let painter = ui.painter_at(rect);
-
-                // Meter background track
-                painter.rect_filled(rect, 3.0, Color32::from_rgb(16, 24, 32));
-                painter.rect_stroke(
-                    rect,
-                    3.0,
-                    egui::Stroke::new(1.0_f32, Color32::from_rgb(32, 43, 54)),
-                    StrokeKind::Inside,
-                );
-
-                if telemetry.normalization_active {
-                    let reduction_fraction = (-gr_db / 24.0).clamp(0.0, 1.0) as f32;
-                    if reduction_fraction > 0.005 {
-                        let fill_width = meter_width * reduction_fraction;
-                        let fill_rect = egui::Rect::from_min_max(
-                            egui::pos2(rect.max.x - fill_width, rect.min.y),
-                            egui::pos2(rect.max.x, rect.max.y),
-                        );
-                        let fill_color = if gr_db < -12.0 {
-                            Color32::from_rgb(239, 68, 68) // red
-                        } else if gr_db < -6.0 {
-                            Color32::from_rgb(245, 158, 11) // amber
-                        } else {
-                            BrandPalette::ELECTRIC_LIME // lime green
-                        };
-                        painter.rect_filled(fill_rect, 2.0, fill_color);
-                    }
-                }
-
-                // Numeric readout
-                if let Some(val) = telemetry.gain_reduction_db {
+            match current_mode {
+                muvrix_player::NormalizationMode::EbuR128 => {
                     ui.label(
-                        RichText::new(format!("{:.1} dB", val))
+                        RichText::new("EBU R128 Loudness Target Preset:")
                             .strong()
                             .size(11.5)
-                            .color(BrandPalette::ELECTRIC_LIME),
+                            .color(Color32::from_rgb(147, 197, 253)),
                     );
-                } else if telemetry.normalization_active {
+
+                    // Preset Selector
+                    ui.horizontal(|ui| {
+                        let cur_preset = self.equalizer_settings.ebu_r128.preset;
+                        egui::ComboBox::from_id_salt("ebu_r128_preset_combo")
+                            .selected_text(cur_preset.as_str())
+                            .show_ui(ui, |ui| {
+                                for p in [
+                                    muvrix_player::EbuR128Preset::Streaming,
+                                    muvrix_player::EbuR128Preset::Broadcast,
+                                    muvrix_player::EbuR128Preset::Custom,
+                                ] {
+                                    if ui.selectable_label(cur_preset == p, p.as_str()).clicked() {
+                                        self.equalizer_settings.ebu_r128.apply_preset(p);
+                                        norm_changed = true;
+                                    }
+                                }
+                            });
+                    });
+
+                    ui.add_space(2.0);
                     ui.label(
-                        RichText::new("0.0 dB (Filter Active)")
-                            .size(11.0)
-                            .color(BrandPalette::ELECTRIC_LIME),
+                        RichText::new(
+                            "Broadcast Target (-23.0 LUFS, -2.0 dBTP, 7.0 LU): -23.0 LUFS programme loudness (EBU R128); -1.0 dBTP linear PCM ceiling, -2.0 dBTP conservative ceiling for lossy codecs (EBU Tech 3343); 7.0 LU dynamic processing window (assessment parameter, not mandatory requirement).\nStreaming Music Target (-16.0 LUFS, -1.5 dBTP, 11.0 LU): Music-oriented streaming target aligned with AES TD1008 (2021) track-normalized music (-16 LUFS). (Note: AES TD1008 recommends -18 LUFS for speech/podcasts and -14 LUFS for album loudest tracks). Single-pass dynamic processing used for interactive playback.",
+                        )
+                        .size(10.5)
+                        .color(Color32::from_gray(150)),
                     );
-                } else {
+                    ui.add_space(4.0);
+
+                    // Integrated loudness (LUFS)
+                    ui.horizontal(|ui| {
+                        ui.label("Integrated Loudness (LUFS):");
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut self.equalizer_settings.ebu_r128.integrated_loudness,
+                                    -70.0..=-5.0,
+                                )
+                                .text("LUFS")
+                                .step_by(0.5),
+                            )
+                            .changed()
+                        {
+                            self.equalizer_settings.ebu_r128.preset = muvrix_player::EbuR128Preset::Custom;
+                            norm_changed = true;
+                        }
+                    });
+
+                    // True Peak (dBTP)
+                    ui.horizontal(|ui| {
+                        ui.label("True Peak Ceiling (dBTP):");
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut self.equalizer_settings.ebu_r128.true_peak,
+                                    -9.0..=0.0,
+                                )
+                                .text("dBTP")
+                                .step_by(0.1),
+                            )
+                            .changed()
+                        {
+                            self.equalizer_settings.ebu_r128.preset = muvrix_player::EbuR128Preset::Custom;
+                            norm_changed = true;
+                        }
+                    });
+
+                    // Loudness Range (LU)
+                    ui.horizontal(|ui| {
+                        ui.label("Loudness Range (LRA):");
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut self.equalizer_settings.ebu_r128.loudness_range,
+                                    1.0..=50.0,
+                                )
+                                .text("LU")
+                                .step_by(0.5),
+                            )
+                            .changed()
+                        {
+                            self.equalizer_settings.ebu_r128.preset = muvrix_player::EbuR128Preset::Custom;
+                            norm_changed = true;
+                        }
+                    });
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("● EBU R128 ACTIVE")
+                                .strong()
+                                .size(11.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        ui.label(
+                            RichText::new(self.equalizer_settings.ebu_r128.build_filter_string())
+                                .monospace()
+                                .size(11.0)
+                                .color(Color32::from_gray(180)),
+                        );
+
+                        if ui.button("Reset to Broadcast (-23 LUFS)").clicked() {
+                            self.equalizer_settings.ebu_r128.reset_to_broadcast_standards();
+                            norm_changed = true;
+                        }
+                        if ui.button("Reset to Streaming (-16 LUFS)").clicked() {
+                            self.equalizer_settings.ebu_r128.reset_to_streaming_defaults();
+                            norm_changed = true;
+                        }
+                    });
+                }
+                muvrix_player::NormalizationMode::Dynamic => {
+                    let telemetry = self.controller.dynamics_telemetry(true);
+
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("● DYNAMICS ACTIVE")
+                                .strong()
+                                .size(11.0)
+                                .color(BrandPalette::ELECTRIC_LIME),
+                        );
+                        ui.label(
+                            RichText::new(&telemetry.status_message)
+                                .size(11.5)
+                                .color(Color32::from_gray(180)),
+                        );
+                    });
+
+                    ui.add_space(6.0);
+
+                    // Calibrated Gain Reduction Meter (0 dB down to -24 dB)
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Gain Reduction:").strong().size(11.5));
+                        let gr_db = telemetry.gain_reduction_db.unwrap_or(0.0).clamp(-24.0, 0.0);
+                        let meter_width = 240.0;
+                        let meter_height = 14.0;
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(meter_width, meter_height),
+                            Sense::hover(),
+                        );
+                        let painter = ui.painter_at(rect);
+
+                        // Meter background track
+                        painter.rect_filled(rect, 3.0, Color32::from_rgb(16, 24, 32));
+                        painter.rect_stroke(
+                            rect,
+                            3.0,
+                            egui::Stroke::new(1.0_f32, Color32::from_rgb(32, 43, 54)),
+                            StrokeKind::Inside,
+                        );
+
+                        let reduction_fraction = (-gr_db / 24.0).clamp(0.0, 1.0) as f32;
+                        if reduction_fraction > 0.005 {
+                            let fill_width = meter_width * reduction_fraction;
+                            let fill_rect = egui::Rect::from_min_max(
+                                egui::pos2(rect.max.x - fill_width, rect.min.y),
+                                egui::pos2(rect.max.x, rect.max.y),
+                            );
+                            let fill_color = if gr_db < -12.0 {
+                                Color32::from_rgb(239, 68, 68) // red
+                            } else if gr_db < -6.0 {
+                                Color32::from_rgb(245, 158, 11) // amber
+                            } else {
+                                BrandPalette::ELECTRIC_LIME // lime green
+                            };
+                            painter.rect_filled(fill_rect, 2.0, fill_color);
+                        }
+
+                        // Numeric readout
+                        if let Some(val) = telemetry.gain_reduction_db {
+                            ui.label(
+                                RichText::new(format!("{:.1} dB", val))
+                                    .strong()
+                                    .size(11.5)
+                                    .color(BrandPalette::ELECTRIC_LIME),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new("0.0 dB (Filter Active)")
+                                    .size(11.0)
+                                    .color(BrandPalette::ELECTRIC_LIME),
+                            );
+                        }
+                    });
+
+                    // Meter scale ticks
+                    ui.horizontal(|ui| {
+                        ui.add_space(95.0);
+                        ui.label(RichText::new("-24dB").size(9.0).color(Color32::from_gray(120)));
+                        ui.add_space(34.0);
+                        ui.label(RichText::new("-18dB").size(9.0).color(Color32::from_gray(120)));
+                        ui.add_space(34.0);
+                        ui.label(RichText::new("-12dB").size(9.0).color(Color32::from_gray(120)));
+                        ui.add_space(34.0);
+                        ui.label(RichText::new("-6dB").size(9.0).color(Color32::from_gray(120)));
+                        ui.add_space(34.0);
+                        ui.label(RichText::new("0dB").size(9.0).color(Color32::from_gray(120)));
+                    });
+                }
+                muvrix_player::NormalizationMode::None => {
                     ui.label(
-                        RichText::new("0.0 dB (Bypassed)")
+                        RichText::new("○ Loudness Normalization Inactive (Bypassed)")
                             .size(11.0)
                             .color(Color32::from_gray(140)),
                     );
                 }
-            });
-
-            // Meter scale ticks
-            ui.horizontal(|ui| {
-                ui.add_space(95.0);
-                ui.label(RichText::new("-24dB").size(9.0).color(Color32::from_gray(120)));
-                ui.add_space(34.0);
-                ui.label(RichText::new("-18dB").size(9.0).color(Color32::from_gray(120)));
-                ui.add_space(34.0);
-                ui.label(RichText::new("-12dB").size(9.0).color(Color32::from_gray(120)));
-                ui.add_space(34.0);
-                ui.label(RichText::new("-6dB").size(9.0).color(Color32::from_gray(120)));
-                ui.add_space(34.0);
-                ui.label(RichText::new("0dB").size(9.0).color(Color32::from_gray(120)));
-            });
+            }
 
             ui.add_space(4.0);
             ui.label(
-                RichText::new("Architecture Note: Peak suppression and dynamic normalization are applied in real-time via FFmpeg dynaudnorm. Direct per-frame gain telemetry is monitored when exposed by the filter graph.")
+                RichText::new("Architecture Note: EBU R128 normalization utilizes FFmpeg loudnorm to maintain consistent target LUFS across diverse media sources. Direct per-frame gain telemetry is monitored when exposed by the filter graph.")
                     .italics()
                     .size(10.5)
                     .color(Color32::from_gray(140)),
             );
+
+            if norm_changed {
+                self.apply_equalizer_settings();
+            }
         });
 
         ui.add_space(6.0);
@@ -943,6 +1161,42 @@ impl MuvrixApp {
                     );
                 }
                 _ => {}
+            }
+        });
+
+        ui.add_space(6.0);
+
+        // =====================================================================
+        // SECTION 6: Real-Time 32-Band Audio Spectrum Visualizer
+        // =====================================================================
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new("6. Real-Time 32-Band Audio Spectrum Visualizer")
+                    .strong()
+                    .size(14.0)
+                    .color(BrandPalette::ELECTRIC_LIME),
+            );
+            ui.label(
+                RichText::new(
+                    "Real-time audio-derived frequency visualization responding to music playback at 60 FPS.",
+                )
+                .size(12.0)
+                .color(BrandPalette::MUTED_TEXT),
+            );
+            ui.add_space(4.0);
+
+            if ui
+                .checkbox(
+                    &mut self.equalizer_settings.spectrum_visualizer_enabled,
+                    "Enable 32-Band Spectrum Visualizer in Player View",
+                )
+                .on_hover_text(
+                    "Displays 32 logarithmic frequency bands with Electric Lime attack/decay animation during audio playback.",
+                )
+                .changed()
+            {
+                self.apply_equalizer_settings();
             }
         });
     }
