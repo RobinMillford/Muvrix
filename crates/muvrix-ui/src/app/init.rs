@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use glow::HasContext as _;
 use muvrix_core::browser::MediaBrowser;
-use muvrix_core::database::DatabaseManager;
+use muvrix_core::database::{DatabaseManager, NetworkConnection};
 use muvrix_core::history::HistoryStore;
 use muvrix_core::network::CredentialVault;
 use muvrix_core::thumbnails::ThumbnailCache;
@@ -561,38 +561,60 @@ impl MuvrixApp {
             pending_ssh_host_trust: None,
             ssh_host_trust_error: None,
             network_vault: CredentialVault::new(),
-            add_network_open: std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network")
-                || std::env::var("MUVRIX_OPEN_NETWORK_FORM").is_ok(),
-            network_name_input: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network")
-            {
+            connection_pool: Arc::new(muvrix_core::network::ConnectionPool::new()),
+            add_network_open: std::env::var("MUVRIX_OPEN_NETWORK_FORM").is_ok(),
+            network_name_input: if let Ok(name) = std::env::var("MUVRIX_NETWORK_NAME") {
+                name
+            } else if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network") {
                 "Demo WebDAV Share (Example)".to_string()
             } else {
                 String::new()
             },
-            network_host_input: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network")
-            {
+            network_host_input: if let Ok(host) = std::env::var("MUVRIX_NETWORK_HOST") {
+                host
+            } else if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network") {
                 "dav.example.com".to_string()
             } else {
                 String::new()
             },
-            network_port_input: 8443,
-            network_path_input: "/remote.php/webdav/Media/".to_string(),
-            network_user_input: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network")
-            {
+            network_port_input: if let Ok(port_str) = std::env::var("MUVRIX_NETWORK_PORT") {
+                port_str.parse().unwrap_or(8443)
+            } else {
+                8443
+            },
+            network_path_input: if let Ok(path) = std::env::var("MUVRIX_NETWORK_PATH") {
+                path
+            } else {
+                "/remote.php/webdav/Media/".to_string()
+            },
+            network_user_input: if let Ok(user) = std::env::var("MUVRIX_NETWORK_USER") {
+                user
+            } else if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network") {
                 "media_streamer".to_string()
             } else {
                 String::new()
             },
-            network_pass_input: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network")
-            {
+            network_pass_input: if let Ok(pass) = std::env::var("MUVRIX_NETWORK_PASS") {
+                pass
+            } else if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network") {
                 "VaultSuperSecretPassword123!".to_string()
             } else {
                 String::new()
             },
-            network_https_input: true,
-            network_protocol_input: "webdav".to_string(),
-            network_status_msg: if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network")
-            {
+            network_https_input: std::env::var("MUVRIX_NETWORK_HTTPS").as_deref() != Ok("0"),
+            network_protocol_input: if let Ok(proto) = std::env::var("MUVRIX_NETWORK_PROTOCOL") {
+                proto
+            } else {
+                "webdav".to_string()
+            },
+            network_nfs_version: if std::env::var("MUVRIX_NFS_VERSION").as_deref() == Ok("v3") {
+                muvrix_core::network::NfsVersion::V3
+            } else {
+                muvrix_core::network::NfsVersion::V4
+            },
+            network_status_msg: if let Ok(msg) = std::env::var("MUVRIX_NETWORK_STATUS") {
+                Some(msg)
+            } else if std::env::var("MUVRIX_SETTINGS_TAB").as_deref() == Ok("network") {
                 Some(
                     "Credentials are held in application memory for this session and are not persisted by Muvrix."
                         .to_string(),
@@ -1575,6 +1597,147 @@ Japanese translation: 星空のワルツが流れる
                 }
                 _ => {}
             }
+        }
+
+        // Phase E6 Network protocol and media server seeding hooks for visual QA
+        if std::env::var("MUVRIX_SEED_E6_NETWORK").is_ok() {
+            let nfs_conn = NetworkConnection {
+                id: 0,
+                name: "TrueNAS NFS Share (4K Cinema)".to_string(),
+                protocol: "nfs".to_string(),
+                host: "nas.home.local".to_string(),
+                port: 2049,
+                remote_path: "/volume1/video".to_string(),
+                auth_type: "anonymous".to_string(),
+                credential_ref: None,
+                is_anonymous: true,
+                auto_connect: false,
+                last_connected_at: 1700000000,
+            };
+            let jf_conn = NetworkConnection {
+                id: 0,
+                name: "Jellyfin Home Server".to_string(),
+                protocol: "jellyfin".to_string(),
+                host: "jellyfin.local".to_string(),
+                port: 8096,
+                remote_path: "/".to_string(),
+                auth_type: "token".to_string(),
+                credential_ref: Some("muvrix:jellyfin:jellyfin.local:8096:user".to_string()),
+                is_anonymous: false,
+                auto_connect: false,
+                last_connected_at: 1700001000,
+            };
+            let plex_conn = NetworkConnection {
+                id: 0,
+                name: "Plex Media Server (Remote)".to_string(),
+                protocol: "plex".to_string(),
+                host: "plex.cloud.tv".to_string(),
+                port: 32400,
+                remote_path: "/library/sections/1".to_string(),
+                auth_type: "token".to_string(),
+                credential_ref: Some("muvrix:plex:plex.cloud.tv:32400:owner".to_string()),
+                is_anonymous: false,
+                auto_connect: false,
+                last_connected_at: 1700002000,
+            };
+
+            // Deduplication guard: only insert if connection does not already exist
+            let existing_conns = app.db.list_connections().unwrap_or_default();
+            if !existing_conns
+                .iter()
+                .any(|c| c.protocol.eq_ignore_ascii_case("nfs") && c.host == nfs_conn.host)
+            {
+                let _ = app.db.insert_connection(&nfs_conn);
+            }
+            if !existing_conns
+                .iter()
+                .any(|c| c.protocol.eq_ignore_ascii_case("jellyfin") && c.host == jf_conn.host)
+            {
+                let _ = app.db.insert_connection(&jf_conn);
+            }
+            if !existing_conns
+                .iter()
+                .any(|c| c.protocol.eq_ignore_ascii_case("plex") && c.host == plex_conn.host)
+            {
+                let _ = app.db.insert_connection(&plex_conn);
+            }
+
+            if let Ok(browse_mode) = std::env::var("MUVRIX_SEED_REMOTE_BROWSER") {
+                let current_conns = app.db.list_connections().unwrap_or_default();
+                match browse_mode.as_str() {
+                    "jellyfin" => {
+                        let target_id = current_conns
+                            .iter()
+                            .find(|c| c.protocol.eq_ignore_ascii_case("jellyfin"))
+                            .map(|c| c.id);
+                        app.browsing_conn_id = target_id;
+                        app.browsing_path = "/items/jf_movies".to_string();
+                        app.browsing_entries = vec![
+                            muvrix_core::network::RemoteFileEntry {
+                                name: "Big Buck Bunny (2008).mp4".to_string(),
+                                remote_path: "/items/101".to_string(),
+                                is_dir: false,
+                                size_bytes: 158293740,
+                                modified_timestamp: 1700000000,
+                            },
+                            muvrix_core::network::RemoteFileEntry {
+                                name: "Sita Sings the Blues (2008).mkv".to_string(),
+                                remote_path: "/items/102".to_string(),
+                                is_dir: false,
+                                size_bytes: 850400000,
+                                modified_timestamp: 1700000000,
+                            },
+                            muvrix_core::network::RemoteFileEntry {
+                                name: "Animation Series".to_string(),
+                                remote_path: "/items/103".to_string(),
+                                is_dir: true,
+                                size_bytes: 0,
+                                modified_timestamp: 1700000000,
+                            },
+                        ];
+                    }
+                    "plex" => {
+                        let target_id = current_conns
+                            .iter()
+                            .find(|c| c.protocol.eq_ignore_ascii_case("plex"))
+                            .map(|c| c.id);
+                        app.browsing_conn_id = target_id;
+                        app.browsing_path = "/library/sections/1".to_string();
+                        app.browsing_entries = vec![
+                            muvrix_core::network::RemoteFileEntry {
+                                name: "Elephants Dream (2006).mkv".to_string(),
+                                remote_path: "/library/parts/4001/file.mkv".to_string(),
+                                is_dir: false,
+                                size_bytes: 367001600,
+                                modified_timestamp: 1700000000,
+                            },
+                            muvrix_core::network::RemoteFileEntry {
+                                name: "Cosmos Laundromat (2015).mp4".to_string(),
+                                remote_path: "/library/parts/4002/file.mp4".to_string(),
+                                is_dir: false,
+                                size_bytes: 720000000,
+                                modified_timestamp: 1700000000,
+                            },
+                        ];
+                    }
+                    _ => {}
+                }
+            }
+
+            // Populate connection pool telemetry with realistic WAN keep-alive stats
+            let _ = app
+                .connection_pool
+                .acquire("jellyfin", "jellyfin.local", 8096);
+            let p1 = app.connection_pool.acquire("plex", "plex.cloud.tv", 32400);
+            app.connection_pool.record_rtt(
+                "plex",
+                "plex.cloud.tv",
+                32400,
+                std::time::Duration::from_millis(224),
+            );
+            app.connection_pool.release(p1);
+            let p2 = app.connection_pool.acquire("plex", "plex.cloud.tv", 32400);
+            app.connection_pool.release(p2);
         }
 
         Ok(app)

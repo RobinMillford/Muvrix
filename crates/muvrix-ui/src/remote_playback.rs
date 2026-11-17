@@ -8,12 +8,12 @@ use std::io;
 
 use muvrix_core::database::{DatabaseManager, NetworkConnection};
 use muvrix_core::network::{
-    credential_ref_username, CredentialVault, NetworkProvider, SftpProvider, SmbProvider,
-    WebDavProvider,
+    credential_ref_username, CredentialVault, JellyfinProvider, NetworkProvider, NfsProvider,
+    NfsVersion, PlexProvider, SftpProvider, SmbProvider, WebDavProvider,
 };
 use muvrix_player::{
-    HttpRangeStream, ReadAheadStream, RecoverableStream, SeekableStream, SftpSeekableStream,
-    SmbSeekableStream, StreamRetryPolicy, StreamTelemetry,
+    HttpRangeStream, NfsSeekableStream, ReadAheadStream, RecoverableStream, SeekableStream,
+    SftpSeekableStream, SmbSeekableStream, StreamRetryPolicy, StreamTelemetry,
 };
 
 #[derive(Clone)]
@@ -156,6 +156,62 @@ impl RemoteSpec {
                 let stream = SftpSeekableStream::with_session(session, file)?;
                 Ok(Box::new(stream))
             }
+            "nfs" => {
+                let provider = NfsProvider::new(
+                    &self.host,
+                    self.port,
+                    &self.remote_path,
+                    NfsVersion::V4,
+                    self.username.clone(),
+                    self.credential_ref.clone(),
+                    self.vault.clone(),
+                );
+                let stream = NfsSeekableStream::connect_via_provider(&provider, &self.remote_path)?;
+                Ok(Box::new(stream))
+            }
+            "jellyfin" => {
+                let token = self
+                    .credential_ref
+                    .as_deref()
+                    .and_then(|cr| self.vault.get(cr));
+                let provider = JellyfinProvider::new(
+                    &self.host,
+                    self.port,
+                    self.use_https,
+                    token,
+                    self.credential_ref.clone(),
+                    None,
+                    self.vault.clone(),
+                );
+                let url = provider
+                    .resolve_stream_url(&self.remote_path)
+                    .map_err(|e| {
+                        io::Error::other(format!("Jellyfin stream URL resolution: {e}"))
+                    })?;
+                let stream = HttpRangeStream::from_url(&url, None)
+                    .map_err(|e| io::Error::other(format!("Jellyfin stream open: {e}")))?;
+                Ok(Box::new(stream))
+            }
+            "plex" => {
+                let token = self
+                    .credential_ref
+                    .as_deref()
+                    .and_then(|cr| self.vault.get(cr));
+                let provider = PlexProvider::new(
+                    &self.host,
+                    self.port,
+                    self.use_https,
+                    token,
+                    self.credential_ref.clone(),
+                    self.vault.clone(),
+                );
+                let url = provider
+                    .resolve_stream_url(&self.remote_path)
+                    .map_err(|e| io::Error::other(format!("Plex stream URL resolution: {e}")))?;
+                let stream = HttpRangeStream::from_url(&url, None)
+                    .map_err(|e| io::Error::other(format!("Plex stream open: {e}")))?;
+                Ok(Box::new(stream))
+            }
             other => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("unsupported remote protocol: {other}"),
@@ -204,6 +260,9 @@ pub fn build_remote_stream(
 
 fn default_port(protocol: &str) -> u16 {
     match protocol.to_ascii_lowercase().as_str() {
+        "nfs" => 2049,
+        "jellyfin" => 8096,
+        "plex" => 32400,
         "smb" => 445,
         "sftp" => 22,
         "https" => 443,
@@ -283,5 +342,71 @@ mod tests {
         assert_eq!(spec.share, "Private");
         assert_eq!(spec.remote_path, "/Movies/movie.mkv");
         assert_eq!(spec.username.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn remote_spec_supports_nfs_jellyfin_and_plex_protocols() {
+        let db = DatabaseManager::open_in_memory().expect("in-memory db");
+        let vault = CredentialVault::new();
+
+        // NFS Spec
+        let nfs_conn = NetworkConnection {
+            id: 10,
+            name: "NFS Share".to_string(),
+            protocol: "nfs".to_string(),
+            host: "storage.home".to_string(),
+            port: 2049,
+            remote_path: "/srv/nfs/movies".to_string(),
+            auth_type: "anonymous".to_string(),
+            credential_ref: None,
+            is_anonymous: true,
+            auto_connect: false,
+            last_connected_at: 0,
+        };
+        let nfs_spec =
+            RemoteSpec::from_connection(&nfs_conn, "/srv/nfs/movies/clip.mkv", &db, &vault)
+                .expect("nfs spec");
+        assert_eq!(nfs_spec.protocol, "nfs");
+        assert_eq!(nfs_spec.port, 2049);
+        assert_eq!(nfs_spec.remote_path, "/srv/nfs/movies/clip.mkv");
+
+        // Jellyfin Spec
+        let jf_conn = NetworkConnection {
+            id: 11,
+            name: "Jellyfin Server".to_string(),
+            protocol: "jellyfin".to_string(),
+            host: "jf.local".to_string(),
+            port: 8096,
+            remote_path: "/items/12345".to_string(),
+            auth_type: "token".to_string(),
+            credential_ref: Some("muvrix:jellyfin:jf.local:8096:user".to_string()),
+            is_anonymous: false,
+            auto_connect: false,
+            last_connected_at: 0,
+        };
+        let jf_spec =
+            RemoteSpec::from_connection(&jf_conn, "/items/12345", &db, &vault).expect("jf spec");
+        assert_eq!(jf_spec.protocol, "jellyfin");
+        assert_eq!(jf_spec.port, 8096);
+
+        // Plex Spec
+        let plex_conn = NetworkConnection {
+            id: 12,
+            name: "Plex Server".to_string(),
+            protocol: "plex".to_string(),
+            host: "plex.local".to_string(),
+            port: 32400,
+            remote_path: "/library/parts/999/file.mp4".to_string(),
+            auth_type: "token".to_string(),
+            credential_ref: Some("muvrix:plex:plex.local:32400:owner".to_string()),
+            is_anonymous: false,
+            auto_connect: false,
+            last_connected_at: 0,
+        };
+        let plex_spec =
+            RemoteSpec::from_connection(&plex_conn, "/library/parts/999/file.mp4", &db, &vault)
+                .expect("plex spec");
+        assert_eq!(plex_spec.protocol, "plex");
+        assert_eq!(plex_spec.port, 32400);
     }
 }

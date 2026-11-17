@@ -266,20 +266,55 @@ pub fn base64_encode(input: &[u8]) -> String {
     out
 }
 
-/// Redacts sensitive username and password credentials from a URL for safe logging and error reporting.
+/// Redacts sensitive username, password, and auth token credentials from a URL for safe logging and error reporting.
 pub fn redact_credentials_from_url(url: &str) -> String {
-    if let Some(scheme_idx) = url.find("://") {
-        let scheme = &url[..scheme_idx + 3];
-        let rest = &url[scheme_idx + 3..];
+    let mut result = url.to_string();
+
+    // 1. Redact username/password in URL authority (e.g. http://user:pass@host/path)
+    if let Some(scheme_idx) = result.find("://") {
+        let scheme = &result[..scheme_idx + 3];
+        let rest = &result[scheme_idx + 3..];
         let authority_end = rest.find('/').unwrap_or(rest.len());
         let authority = &rest[..authority_end];
         let path = &rest[authority_end..];
         if let Some(at_idx) = authority.rfind('@') {
             let host = &authority[at_idx + 1..];
-            return format!("{}[redacted]@{}{}", scheme, host, path);
+            result = format!("{}[redacted]@{}{}", scheme, host, path);
         }
     }
-    url.to_string()
+
+    // 2. Redact sensitive query parameters (e.g. ?api_key=..., &X-Plex-Token=..., &token=..., &password=...)
+    if let Some(query_idx) = result.find('?') {
+        let base = &result[..query_idx];
+        let query = &result[query_idx + 1..];
+        let redacted_query_parts: Vec<String> = query
+            .split('&')
+            .map(|part| {
+                if let Some((k, _)) = part.split_once('=') {
+                    let k_lower = k.to_ascii_lowercase();
+                    if k_lower == "api_key"
+                        || k_lower == "x-plex-token"
+                        || k_lower == "token"
+                        || k_lower == "auth_token"
+                        || k_lower == "access_token"
+                        || k_lower == "password"
+                        || k_lower == "pass"
+                        || k_lower == "secret"
+                        || k_lower == "key"
+                    {
+                        format!("{k}=[redacted]")
+                    } else {
+                        part.to_string()
+                    }
+                } else {
+                    part.to_string()
+                }
+            })
+            .collect();
+        result = format!("{}?{}", base, redacted_query_parts.join("&"));
+    }
+
+    result
 }
 
 /// Generates a deterministic, namespaced credential reference identifier based on non-secret connection identity.

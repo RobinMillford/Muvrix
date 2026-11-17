@@ -405,6 +405,18 @@ impl DatabaseManager {
         Repository::delete_connection(&conn, id).map_err(DatabaseError::Sqlite)
     }
 
+    pub fn find_connection_by_endpoint(
+        &self,
+        protocol: &str,
+        host: &str,
+        port: u16,
+        remote_path: &str,
+    ) -> DbResult<Option<NetworkConnection>> {
+        let conn = self.conn.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        Repository::find_connection_by_endpoint(&conn, protocol, host, port, remote_path)
+            .map_err(DatabaseError::Sqlite)
+    }
+
     pub fn query_library(
         &self,
         filter: &LibraryFilter,

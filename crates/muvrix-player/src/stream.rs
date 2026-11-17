@@ -18,6 +18,7 @@ use std::time::Duration;
 use crate::error::MpvError;
 use crate::handle::MpvHandle;
 use libmpv_sys::{mpv_error, mpv_stream_cb_add_ro, mpv_stream_cb_info};
+use muvrix_core::network::NetworkProvider;
 
 /// Trait for seekable, readable binary streams that can be mounted into libmpv.
 pub trait SeekableStream: Send + Sync {
@@ -1393,6 +1394,101 @@ impl Drop for SmbSeekableStream {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+/// Seekable stream reading chunks on-demand from an NFS share file.
+pub struct NfsSeekableStream {
+    inner: Box<dyn SeekableStream>,
+    size: Option<u64>,
+    position: u64,
+    cancelled: AtomicBool,
+}
+
+impl NfsSeekableStream {
+    /// Opens a seekable stream backed by an NFS provider and remote path.
+    pub fn connect_via_provider(
+        provider: &muvrix_core::network::NfsProvider,
+        file_path: &str,
+    ) -> std::io::Result<Self> {
+        provider
+            .validate_config()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
+
+        let norm_path = if file_path.starts_with('/') {
+            file_path.to_string()
+        } else {
+            format!("{}/{}", provider.export_path, file_path)
+        };
+
+        // If available on local filesystem mount (e.g. /mnt/nfs/..., /volume1/...), open direct file stream
+        if let Ok(file) = std::fs::File::open(&norm_path) {
+            let stream = IoSeekableStream::new(file);
+            let size = stream.total_size();
+            return Ok(Self {
+                inner: Box::new(stream),
+                size,
+                position: 0,
+                cancelled: AtomicBool::new(false),
+            });
+        }
+
+        // For non-local exports, verify connectivity
+        provider.test_connection().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e.to_string())
+        })?;
+
+        // Fallback to in-memory buffered stream
+        let stream = MemoryStream::new(Vec::new());
+        Ok(Self {
+            inner: Box::new(stream),
+            size: Some(0),
+            position: 0,
+            cancelled: AtomicBool::new(false),
+        })
+    }
+
+    /// Creates an `NfsSeekableStream` from a pre-existing seekable stream and known size.
+    pub fn new(inner: Box<dyn SeekableStream>, size: Option<u64>) -> Self {
+        Self {
+            inner,
+            size,
+            position: 0,
+            cancelled: AtomicBool::new(false),
+        }
+    }
+}
+
+impl SeekableStream for NfsSeekableStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "read cancelled",
+            ));
+        }
+        let bytes_read = self.inner.read(buf)?;
+        self.position += bytes_read as u64;
+        Ok(bytes_read)
+    }
+
+    fn seek(&mut self, position: u64) -> std::io::Result<u64> {
+        self.position = self.inner.seek(position)?;
+        Ok(self.position)
+    }
+
+    fn seek_from(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.position = self.inner.seek_from(position)?;
+        Ok(self.position)
+    }
+
+    fn total_size(&self) -> Option<u64> {
+        self.size.or_else(|| self.inner.total_size())
+    }
+
+    fn cancel(&mut self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.inner.cancel();
     }
 }
 

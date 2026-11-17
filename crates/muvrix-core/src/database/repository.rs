@@ -966,6 +966,37 @@ impl Repository {
         Ok(())
     }
 
+    pub fn find_connection_by_endpoint(
+        conn: &Connection,
+        protocol: &str,
+        host: &str,
+        port: u16,
+        remote_path: &str,
+    ) -> Result<Option<NetworkConnection>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, protocol, host, port, remote_path, auth_type, credential_ref, is_anonymous, auto_connect, last_connected_at
+             FROM network_connections
+             WHERE LOWER(protocol) = LOWER(?1) AND LOWER(host) = LOWER(?2) AND port = ?3 AND remote_path = ?4
+             LIMIT 1",
+        )?;
+        stmt.query_row(params![protocol, host, port as i64, remote_path], |row| {
+            Ok(NetworkConnection {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                protocol: row.get(2)?,
+                host: row.get(3)?,
+                port: row.get::<_, i64>(4)? as u16,
+                remote_path: row.get(5)?,
+                auth_type: row.get(6)?,
+                credential_ref: row.get(7)?,
+                is_anonymous: row.get::<_, i32>(8)? != 0,
+                auto_connect: row.get::<_, i32>(9)? != 0,
+                last_connected_at: row.get::<_, i64>(10)? as u64,
+            })
+        })
+        .optional()
+    }
+
     // -------------------------------------------------------------------------
     // Complex Library Query & Filter (Joined, Zero N+1 Queries)
     // -------------------------------------------------------------------------
@@ -1060,15 +1091,27 @@ impl Repository {
             SortDirection::Descending => "DESC",
         };
 
-        // 1. Count query
+        // 1. Count query with only necessary joins
+        let needs_mm = where_sql.contains("mm.");
+        let needs_fav = where_sql.contains("fav.");
+        let needs_ci = where_sql.contains("ci.");
+
+        let mut count_joins = String::new();
+        if needs_mm {
+            count_joins.push_str(" LEFT JOIN media_metadata mm ON mi.id = mm.media_id");
+        }
+        if needs_fav {
+            count_joins.push_str(" LEFT JOIN favourites fav ON mi.id = fav.media_id");
+        }
+        if needs_ci {
+            count_joins.push_str(" LEFT JOIN collection_items ci ON mi.id = ci.media_id");
+        }
+
         let count_sql = format!(
             "SELECT COUNT(DISTINCT mi.id)
              FROM media_items mi
-             LEFT JOIN media_metadata mm ON mi.id = mm.media_id
-             LEFT JOIN favourites fav ON mi.id = fav.media_id
-             LEFT JOIN collection_items ci ON mi.id = ci.media_id
-             {}",
-            where_sql
+             {count_joins}
+             {where_sql}"
         );
 
         let param_refs: Vec<&dyn rusqlite::ToSql> =
@@ -1083,6 +1126,13 @@ impl Repository {
         )?;
 
         // 2. Select query with pagination
+        let ci_join = if needs_ci {
+            "LEFT JOIN collection_items ci ON mi.id = ci.media_id"
+        } else {
+            ""
+        };
+        let group_by = if needs_ci { "GROUP BY mi.id" } else { "" };
+
         let select_sql = format!(
             "SELECT
                 mi.id, mi.root_id, mi.relative_path, mi.canonical_path, mi.file_name, mi.file_extension, mi.media_type, mi.file_size, mi.modified_time, mi.added_time, mi.last_scanned_at, mi.availability_state, mi.metadata_status,
@@ -1095,12 +1145,12 @@ impl Repository {
              LEFT JOIN artwork_cache ac ON mi.id = ac.media_id
              LEFT JOIN media_watch_state ws ON mi.id = ws.media_id
              LEFT JOIN favourites fav ON mi.id = fav.media_id
-             LEFT JOIN collection_items ci ON mi.id = ci.media_id
-             {}
-             GROUP BY mi.id
+             {ci_join}
+             {where_sql}
+             {group_by}
              ORDER BY {} {}
              LIMIT ? OFFSET ?",
-            where_sql, sort_column, dir_str
+            sort_column, dir_str
         );
 
         let mut final_params = query_params;

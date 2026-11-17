@@ -164,6 +164,7 @@ fn migration_001_core_schema(tx: &Transaction) -> Result<()> {
         CREATE INDEX idx_media_metadata_artist ON media_metadata(artist);
         CREATE INDEX idx_media_metadata_album ON media_metadata(album);
         CREATE INDEX idx_media_metadata_genre ON media_metadata(genre);
+        CREATE INDEX idx_media_metadata_duration ON media_metadata(duration_ms);
 
         CREATE TABLE media_tracks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

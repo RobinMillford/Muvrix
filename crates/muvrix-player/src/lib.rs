@@ -65,8 +65,9 @@ pub use spectrum::{
 };
 pub use stream::{
     classify_io_error, HttpRangeStream, IoSeekableStream, MemoryStream, MpvStreamBridge,
-    ReadAheadStream, RecoverableStream, RecoveryState, SeekableStream, SftpSeekableStream,
-    SmbSeekableStream, StreamErrorKind, StreamRegistry, StreamRetryPolicy, StreamTelemetry,
+    NfsSeekableStream, ReadAheadStream, RecoverableStream, RecoveryState, SeekableStream,
+    SftpSeekableStream, SmbSeekableStream, StreamErrorKind, StreamRegistry, StreamRetryPolicy,
+    StreamTelemetry,
 };
 pub use subsystems::{
     AudioDeviceChangeEvent, AudioRecoveryStatus, AudioSubsystem, DecoderFallbackReason,

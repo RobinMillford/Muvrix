@@ -1,7 +1,7 @@
 use eframe::egui::{self, Color32, RichText};
 use muvrix_core::network::{
-    redact_credentials_from_url, NetworkConnection, NetworkProvider, SftpProvider, SmbProvider,
-    WebDavProvider,
+    redact_credentials_from_url, JellyfinProvider, NetworkConnection, NetworkProvider, NfsProvider,
+    NfsVersion, PlexProvider, SftpProvider, SmbProvider, WebDavProvider,
 };
 
 use crate::app::{format_timestamp, MuvrixApp};
@@ -47,6 +47,9 @@ impl MuvrixApp {
                                                 "webdav" | "http" | "https" => ("[WEBDAV]", Color32::from_rgb(125, 211, 252)),
                                                 "smb" => ("[SMB2/3]", Color32::from_rgb(74, 222, 128)),
                                                 "sftp" => ("[SFTP]", Color32::from_rgb(192, 132, 252)),
+                                                "nfs" => ("[NFSv4]", Color32::from_rgb(244, 114, 182)),
+                                                "jellyfin" => ("[JELLYFIN]", Color32::from_rgb(167, 139, 250)),
+                                                "plex" => ("[PLEX]", Color32::from_rgb(251, 191, 36)),
                                                 _ => ("[REMOTE]", Color32::from_rgb(251, 191, 36)),
                                             };
 
@@ -239,7 +242,7 @@ impl MuvrixApp {
 
                         if self.add_network_open {
                             ui.add_space(6.0);
-                            ui.group(|ui| {
+                            let form_group = ui.group(|ui| {
                                 ui.label(RichText::new("New Network Remote Endpoint").strong().size(12.5));
 
                                 ui.horizontal(|ui| {
@@ -248,6 +251,9 @@ impl MuvrixApp {
                                     let proto_label = match cur_proto.as_str() {
                                         "smb" => "SMB / Samba Share (Windows / NAS)",
                                         "sftp" => "SFTP (SSH File Transfer Protocol)",
+                                        "nfs" => "NFS (Network File System v4 / Unix)",
+                                        "jellyfin" => "Jellyfin / Emby Media Server",
+                                        "plex" => "Plex Media Server",
                                         _ => "WebDAV / Nextcloud / ownCloud",
                                     };
                                     egui::ComboBox::from_id_salt("net_proto_combo")
@@ -265,6 +271,18 @@ impl MuvrixApp {
                                                 self.network_protocol_input = "sftp".to_string();
                                                 self.network_port_input = 22;
                                             }
+                                            if ui.selectable_label(self.network_protocol_input == "nfs", "NFS (Network File System v4)").clicked() {
+                                                self.network_protocol_input = "nfs".to_string();
+                                                self.network_port_input = 2049;
+                                            }
+                                            if ui.selectable_label(self.network_protocol_input == "jellyfin", "Jellyfin / Emby Media Server").clicked() {
+                                                self.network_protocol_input = "jellyfin".to_string();
+                                                self.network_port_input = if self.network_https_input { 8920 } else { 8096 };
+                                            }
+                                            if ui.selectable_label(self.network_protocol_input == "plex", "Plex Media Server").clicked() {
+                                                self.network_protocol_input = "plex".to_string();
+                                                self.network_port_input = 32400;
+                                            }
                                         });
                                 });
 
@@ -281,31 +299,44 @@ impl MuvrixApp {
                                 ui.horizontal(|ui| {
                                     ui.label("Port:       ");
                                     ui.add(egui::DragValue::new(&mut self.network_port_input).range(1..=65535));
-                                    if self.network_protocol_input == "webdav"
+                                    if (self.network_protocol_input == "webdav" || self.network_protocol_input == "jellyfin" || self.network_protocol_input == "plex")
                                         && ui
                                             .checkbox(&mut self.network_https_input, "Use HTTPS")
                                             .changed()
                                     {
-                                        if self.network_https_input && self.network_port_input == 80
-                                        {
-                                            self.network_port_input = 443;
-                                        } else if !self.network_https_input
-                                            && self.network_port_input == 443
-                                        {
-                                            self.network_port_input = 80;
+                                        if self.network_protocol_input == "webdav" {
+                                            self.network_port_input = if self.network_https_input { 443 } else { 80 };
+                                        } else if self.network_protocol_input == "jellyfin" {
+                                            self.network_port_input = if self.network_https_input { 8920 } else { 8096 };
                                         }
                                     }
                                 });
 
                                 ui.horizontal(|ui| {
-                                    ui.label("Path/Share: ");
+                                    let path_label = match self.network_protocol_input.as_str() {
+                                        "nfs" => "Export Path: ",
+                                        "jellyfin" | "plex" => "Library Path:",
+                                        _ => "Path/Share: ",
+                                    };
+                                    ui.label(path_label);
                                     let hint = match self.network_protocol_input.as_str() {
                                         "smb" => "ShareName/Movies/video.mp4",
                                         "sftp" => "/home/user/media/video.mkv",
+                                        "nfs" => "/volume1/video or /export/media",
+                                        "jellyfin" => "/ (all libraries) or /items/{id}",
+                                        "plex" => "/ (all sections) or /library/sections/{id}",
                                         _ => "/remote.php/webdav/Media/",
                                     };
                                     ui.add(egui::TextEdit::singleline(&mut self.network_path_input).hint_text(hint));
                                 });
+
+                                if self.network_protocol_input == "nfs" {
+                                    ui.horizontal(|ui| {
+                                        ui.label("NFS Version: ");
+                                        ui.radio_value(&mut self.network_nfs_version, NfsVersion::V4, "NFSv4 (Default)");
+                                        ui.radio_value(&mut self.network_nfs_version, NfsVersion::V3, "NFSv3 (Legacy)");
+                                    });
+                                }
 
                                 if self.network_protocol_input == "sftp" {
                                     ui.horizontal(|ui| {
@@ -367,12 +398,22 @@ impl MuvrixApp {
                                 }
 
                                 ui.horizontal(|ui| {
-                                    ui.label("Username:   ");
+                                    let user_label = match self.network_protocol_input.as_str() {
+                                        "jellyfin" => "User ID (opt):",
+                                        "nfs" => "Unix User:  ",
+                                        _ => "Username:   ",
+                                    };
+                                    ui.label(user_label);
                                     ui.add(egui::TextEdit::singleline(&mut self.network_user_input));
                                 });
 
                                 ui.horizontal(|ui| {
-                                    ui.label("Password:   ");
+                                    let pass_label = match self.network_protocol_input.as_str() {
+                                        "jellyfin" | "plex" => "API Token:  ",
+                                        "nfs" => "Secret (opt):",
+                                        _ => "Password:   ",
+                                    };
+                                    ui.label(pass_label);
                                     ui.add(egui::TextEdit::singleline(&mut self.network_pass_input).password(true));
                                 });
 
@@ -430,9 +471,21 @@ impl MuvrixApp {
                                             auto_connect: false,
                                             last_connected_at: 0,
                                         };
-                                        let _ = self.db.insert_connection(&conn);
-                                        self.network_status_msg = Some("Connection saved successfully".to_string());
-                                        self.add_network_open = false;
+                                        if let Ok(Some(existing)) = self.db.find_connection_by_endpoint(
+                                            &conn.protocol,
+                                            &conn.host,
+                                            conn.port,
+                                            &conn.remote_path,
+                                        ) {
+                                            self.network_status_msg = Some(format!(
+                                                "Connection already exists (ID {}: {}). Duplicate prevented.",
+                                                existing.id, existing.name
+                                            ));
+                                        } else {
+                                            let _ = self.db.insert_connection(&conn);
+                                            self.network_status_msg = Some("Connection saved successfully".to_string());
+                                            self.add_network_open = false;
+                                        }
                                     }
 
                                     if ui.button("Test Endpoint").clicked() {
@@ -507,6 +560,71 @@ impl MuvrixApp {
                                                     }
                                                 }
                                             }
+                                            "nfs" => {
+                                                let provider = NfsProvider::new(
+                                                    &self.network_host_input,
+                                                    self.network_port_input,
+                                                    if self.network_path_input.is_empty() { "/" } else { &self.network_path_input },
+                                                    self.network_nfs_version,
+                                                    if self.network_user_input.is_empty() { None } else { Some(self.network_user_input.clone()) },
+                                                    None,
+                                                    self.network_vault.clone(),
+                                                );
+                                                match provider.test_connection() {
+                                                    Ok(true) => {
+                                                        self.network_status_msg = Some(format!("Success: {} export on {}:{} verified via RPC NULL probe", self.network_nfs_version, self.network_host_input, self.network_port_input));
+                                                    }
+                                                    Ok(false) => {
+                                                        self.network_status_msg = Some("Connection test returned negative".to_string());
+                                                    }
+                                                    Err(e) => {
+                                                        self.network_status_msg = Some(format!("NFS Error: {}", e));
+                                                    }
+                                                }
+                                            }
+                                            "jellyfin" => {
+                                                let provider = JellyfinProvider::new(
+                                                    &self.network_host_input,
+                                                    self.network_port_input,
+                                                    self.network_https_input || self.network_port_input == 8920,
+                                                    if self.network_pass_input.is_empty() { None } else { Some(self.network_pass_input.clone()) },
+                                                    None,
+                                                    if self.network_user_input.is_empty() { None } else { Some(self.network_user_input.clone()) },
+                                                    self.network_vault.clone(),
+                                                );
+                                                match provider.test_connection() {
+                                                    Ok(true) => {
+                                                        self.network_status_msg = Some(format!("Success: Jellyfin server at {} verified", provider.base_url()));
+                                                    }
+                                                    Ok(false) => {
+                                                        self.network_status_msg = Some("Connection test returned negative".to_string());
+                                                    }
+                                                    Err(e) => {
+                                                        self.network_status_msg = Some(format!("Jellyfin Error: {}", e));
+                                                    }
+                                                }
+                                            }
+                                            "plex" => {
+                                                let provider = PlexProvider::new(
+                                                    &self.network_host_input,
+                                                    self.network_port_input,
+                                                    self.network_https_input || self.network_port_input == 443,
+                                                    if self.network_pass_input.is_empty() { None } else { Some(self.network_pass_input.clone()) },
+                                                    None,
+                                                    self.network_vault.clone(),
+                                                );
+                                                match provider.test_connection() {
+                                                    Ok(true) => {
+                                                        self.network_status_msg = Some(format!("Success: Plex Media Server at {} verified", provider.base_url()));
+                                                    }
+                                                    Ok(false) => {
+                                                        self.network_status_msg = Some("Connection test returned negative".to_string());
+                                                    }
+                                                    Err(e) => {
+                                                        self.network_status_msg = Some(format!("Plex Error: {}", e));
+                                                    }
+                                                }
+                                            }
                                             _ => {
                                                 let provider = WebDavProvider::new(
                                                     &self.network_host_input,
@@ -541,7 +659,11 @@ impl MuvrixApp {
                                         }
                                     }
                                 });
-                            });
+                            })
+                            .response;
+                            if std::env::var("MUVRIX_SCROLL_TO_FORM").is_ok() {
+                                form_group.scroll_to_me(Some(egui::Align::Center));
+                            }
                         }
 
                         if let Some(ref msg) = self.network_status_msg {
@@ -738,6 +860,99 @@ impl MuvrixApp {
                         ui.end_row();
                     }
                 });
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(6.0);
+
+            // Connection Pool & WAN Keep-Alive Status Card
+            let pool_card = ui
+                .group(|ui| {
+                    ui.label(
+                        RichText::new("Connection Pool & WAN Keep-Alive Monitor")
+                            .strong()
+                            .size(12.5)
+                            .color(Color32::from_rgb(140, 230, 120)),
+                    );
+
+                    let pool_telemetry = self.connection_pool.telemetry();
+
+                    egui::Grid::new("connection_pool_telemetry_grid")
+                        .num_columns(2)
+                        .spacing([20.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("Active Sockets:").color(Color32::from_gray(160)));
+                            ui.label(
+                                RichText::new(format!("{}", pool_telemetry.active_connections))
+                                    .monospace()
+                                    .color(Color32::WHITE),
+                            );
+                            ui.end_row();
+
+                            ui.label(RichText::new("Pooled Idle Sockets:").color(Color32::from_gray(160)));
+                            ui.label(
+                                RichText::new(format!("{}", pool_telemetry.idle_connections))
+                                    .monospace()
+                                    .color(Color32::from_rgb(125, 211, 252)),
+                            );
+                            ui.end_row();
+
+                            ui.label(RichText::new("Recycled Connections:").color(Color32::from_gray(160)));
+                            ui.label(
+                                RichText::new(format!("{}", pool_telemetry.recycled_count))
+                                    .monospace()
+                                    .color(Color32::WHITE),
+                            );
+                            ui.end_row();
+
+                            ui.label(RichText::new("Keep-Alive Probes Sent:").color(Color32::from_gray(160)));
+                            ui.label(
+                                RichText::new(format!(
+                                    "{}/{} successful",
+                                    pool_telemetry.probes_successful, pool_telemetry.probes_sent
+                                ))
+                                .monospace()
+                                .color(Color32::from_rgb(100, 220, 100)),
+                            );
+                            ui.end_row();
+
+                            ui.label(RichText::new("Socket Reuses:").color(Color32::from_gray(160)));
+                            ui.label(
+                                RichText::new(format!("{}", pool_telemetry.socket_reuse_count))
+                                    .monospace()
+                                    .color(BrandPalette::ELECTRIC_LIME),
+                            );
+                            ui.end_row();
+
+                            ui.label(RichText::new("Average Link Latency:").color(Color32::from_gray(160)));
+                            let latency_color = if pool_telemetry.average_rtt_ms > 200.0 {
+                                Color32::from_rgb(255, 180, 40)
+                            } else {
+                                Color32::from_rgb(100, 220, 100)
+                            };
+                            let latency_mode = if pool_telemetry.average_rtt_ms > 200.0 {
+                                " (High-Latency WAN Compensation Active)"
+                            } else if pool_telemetry.average_rtt_ms > 0.0 {
+                                " (LAN / Low-Latency)"
+                            } else {
+                                " (Idle / No Active Probe)"
+                            };
+                            ui.label(
+                                RichText::new(format!(
+                                    "{:.1} ms{}",
+                                    pool_telemetry.average_rtt_ms, latency_mode
+                                ))
+                                .monospace()
+                                .color(latency_color),
+                            );
+                            ui.end_row();
+                        });
+                })
+                .response;
+
+            if std::env::var("MUVRIX_SCROLL_TO_POOL").is_ok() {
+                pool_card.scroll_to_me(Some(egui::Align::Center));
+            }
         });
     }
 }

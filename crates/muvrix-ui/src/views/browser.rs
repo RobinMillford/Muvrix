@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use eframe::egui::{self, Color32, RichText, Stroke};
 use muvrix_core::browser::{EntryKind, MediaFilter, SortBy};
 use muvrix_core::network::{
-    NetworkConnection, NetworkProvider, SftpProvider, SmbProvider, WebDavProvider,
+    JellyfinProvider, NetworkConnection, NetworkProvider, NfsProvider, NfsVersion, PlexProvider,
+    SftpProvider, SmbProvider, WebDavProvider,
 };
 
 use crate::app::MuvrixApp;
@@ -760,6 +761,75 @@ impl MuvrixApp {
                     }
                     Err(e) => {
                         self.browsing_error = Some(format!("SMB: {e}"));
+                    }
+                }
+            }
+            "nfs" => {
+                let provider = NfsProvider::new(
+                    &conn.host,
+                    conn.port,
+                    &conn.remote_path,
+                    NfsVersion::V4,
+                    connection_username(conn),
+                    conn.credential_ref.clone(),
+                    self.network_vault.clone(),
+                );
+                match provider.list_directory(&path) {
+                    Ok(entries) => {
+                        self.browsing_entries = entries;
+                        self.browsing_error = None;
+                    }
+                    Err(e) => {
+                        self.browsing_error = Some(format!("NFS: {e}"));
+                    }
+                }
+            }
+            "jellyfin" => {
+                let token = conn
+                    .credential_ref
+                    .as_deref()
+                    .and_then(|cr| self.network_vault.get(cr));
+                let is_https = conn.port == 8920 || conn.port == 443;
+                let provider = JellyfinProvider::new(
+                    &conn.host,
+                    conn.port,
+                    is_https,
+                    token,
+                    conn.credential_ref.clone(),
+                    None,
+                    self.network_vault.clone(),
+                );
+                match provider.list_directory(&path) {
+                    Ok(entries) => {
+                        self.browsing_entries = entries;
+                        self.browsing_error = None;
+                    }
+                    Err(e) => {
+                        self.browsing_error = Some(format!("Jellyfin: {e}"));
+                    }
+                }
+            }
+            "plex" => {
+                let token = conn
+                    .credential_ref
+                    .as_deref()
+                    .and_then(|cr| self.network_vault.get(cr));
+                let is_https = conn.port == 443;
+                let provider = PlexProvider::new(
+                    &conn.host,
+                    conn.port,
+                    is_https,
+                    token,
+                    conn.credential_ref.clone(),
+                    self.network_vault.clone(),
+                );
+                match provider.list_directory(&path) {
+                    Ok(entries) => {
+                        self.browsing_entries = entries;
+                        self.browsing_error = None;
+                    }
+                    Err(e) => {
+                        self.browsing_error = Some(format!("Plex: {e}"));
                     }
                 }
             }
