@@ -1,0 +1,17 @@
+# Muvrix Debian/Ubuntu Packaging Container
+FROM docker.io/library/ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    debhelper \
+    dpkg-dev \
+    binutils \
+    tar \
+    gzip \
+    xz-utils \
+    file \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+CMD ["/workspace/packaging/build_deb.sh"]

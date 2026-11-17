@@ -1,0 +1,12 @@
+# Muvrix Flatpak Validation & Packaging Container
+FROM docker.io/library/alpine:3.20
+
+RUN apk add --no-cache \
+    bash \
+    python3 \
+    py3-yaml \
+    appstream \
+    desktop-file-utils
+
+WORKDIR /workspace
+CMD ["/workspace/packaging/build_flatpak.sh"]

@@ -24,7 +24,6 @@ finish-args:
   - --filesystem=xdg-videos:ro
   - --filesystem=xdg-music:ro
   - --filesystem=xdg-download:ro
-  - --filesystem=home:ro
 
   # Desktop integration & MPRIS v2
   - --own-name=org.mpris.MediaPlayer2.muvrix

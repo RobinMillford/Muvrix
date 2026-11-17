@@ -409,6 +409,9 @@ pub struct MuvrixApp {
     pub(crate) custom_theme: crate::theme::CustomTheme,
     pub(crate) custom_theme_json: String,
     pub(crate) theme_status_msg: Option<(String, bool)>,
+
+    // Phase E8: Multi-Platform Release & Containerized Packaging Diagnostics
+    pub(crate) packaging_info: crate::packaging::PackagingInfo,
 }
 
 impl MuvrixApp {

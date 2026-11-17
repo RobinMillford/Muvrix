@@ -1,0 +1,81 @@
+name: Multi-Platform Release Packaging (AppImage, Flatpak, DEB, RPM)
+
+on:
+  push:
+    branches: [ "phase-*", "main", "master" ]
+  pull_request:
+    branches: [ "phase-*", "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-and-package:
+    name: Package ${{ matrix.distro }} (${{ matrix.format }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: ubuntu-24.04
+            format: deb
+            container: packaging/containers/Containerfile.deb
+          - distro: fedora-40
+            format: rpm
+            container: packaging/containers/Containerfile.rpm
+          - distro: alpine-3.20
+            format: appimage
+            container: packaging/containers/Containerfile.appimage
+          - distro: alpine-3.20
+            format: flatpak
+            container: packaging/containers/Containerfile.flatpak
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install native packaging toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            desktop-file-utils appstream dpkg-dev python3-yaml
+          case "${{ matrix.format }}" in
+            rpm)
+              # Native rpmbuild runs inside the Fedora packaging container.
+              sudo apt-get install -y --no-install-recommends podman
+              ;;
+            flatpak)
+              sudo apt-get install -y --no-install-recommends flatpak
+              ;;
+          esac
+
+      - name: Compile MUVRIX release binaries
+        run: |
+          cargo build --release --locked -p muvrix-ui
+
+      - name: Build and Validate Package
+        env:
+          # The Ubuntu runner is the target ABI for the .deb payload.
+          MUVRIX_BINARY: ${{ matrix.format == 'deb' && 'target/release/muvrix-ui' || '' }}
+        run: |
+          chmod +x packaging/*.sh packaging/appimage/AppRun
+          ./packaging/build_${{ matrix.format }}.sh
+
+      - name: Upload Package Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: muvrix-package-${{ matrix.format }}
+          path: target/packages/*
+          if-no-files-found: error

@@ -15,6 +15,7 @@ pub mod mpv_state;
 pub mod native_display;
 pub mod os_integration;
 pub mod output;
+pub mod packaging;
 #[cfg(target_os = "linux")]
 pub mod platform;
 pub mod presentation;

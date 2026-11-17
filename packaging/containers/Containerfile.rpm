@@ -1,0 +1,15 @@
+# Muvrix Fedora/RHEL Packaging Container
+FROM quay.io/fedora/fedora:40
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+    rpm-build \
+    rpmdevtools \
+    tar \
+    gzip \
+    findutils \
+    file \
+    desktop-file-utils \
+    && dnf clean all
+
+WORKDIR /workspace
+CMD ["/workspace/packaging/build_rpm.sh"]

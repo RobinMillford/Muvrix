@@ -1012,6 +1012,7 @@ impl MuvrixApp {
                 .to_json()
                 .unwrap_or_default(),
             theme_status_msg: None,
+            packaging_info: crate::packaging::PackagingInfo::detect(),
         };
 
         app.custom_theme.apply_to_context(&startup_ctx);

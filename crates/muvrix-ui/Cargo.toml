@@ -21,6 +21,7 @@ bytemuck = "1.25"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = { workspace = true }
 log = { workspace = true }
+sha2 = { workspace = true }
 zbus = "5.19"
 env_logger = { workspace = true }
 winit = { version = "0.30.13", default-features = false, features = [
@@ -41,3 +42,6 @@ egui-winit = { version = "0.31.1", default-features = false, features = [
 wayland-client = { version = "0.31.15", features = ["system"] }
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 wayland-sys = { version = "0.31.11", features = ["client"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
