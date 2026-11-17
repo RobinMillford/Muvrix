@@ -91,6 +91,7 @@ impl MuvrixApp {
         self.update_frame_timing();
         self.handle_keyboard_inputs(ctx);
         self.update_osd_autohide(ctx);
+        self.sync_seeded_ab_loop();
 
         // Handle drag and drop media files into the application
         ctx.input(|i| {
@@ -117,6 +118,7 @@ impl MuvrixApp {
             if self.screenshot_frames < 25 {
                 ctx.request_repaint();
             }
+
             let media_ready = self.controller.current_file().is_none()
                 || self.controller.duration() > 0.0
                 || self.screenshot_frames >= 30;
@@ -307,6 +309,61 @@ impl MuvrixApp {
             }
         }
         log::info!("MuvrixApp teardown complete");
+    }
+
+    /// Synchronizes test-seeded A-B loop boundaries with asynchronous duration settling.
+    ///
+    /// Guarantees:
+    /// 1. Exactly one application per media file (one-time guard).
+    /// 2. Waits until demuxer reports duration > 0.0 before writing properties.
+    /// 3. Safely handles invalid environment variable strings without repeated retries.
+    /// 4. Resets when a new media file is loaded, allowing the new file to receive its seed.
+    /// 5. Zero performance or functional impact when `MUVRIX_SEED_AB_LOOP` is unset.
+    pub(crate) fn sync_seeded_ab_loop(&mut self) {
+        let Ok(ab_str) = std::env::var("MUVRIX_SEED_AB_LOOP") else {
+            return;
+        };
+
+        let current_file = self.controller.current_file();
+        let duration = self.controller.duration();
+        // Wait until a media file is loaded and duration has settled to a positive value
+        if duration <= 0.0 || current_file.is_none() {
+            return;
+        }
+
+        // One-time execution guard per media file
+        if self.seeded_ab_loop_applied_file.as_deref() == current_file {
+            return;
+        }
+
+        // Mark as processed for this media file immediately so parsing errors or invalid
+        // values do not cause endless retries on every update frame.
+        self.seeded_ab_loop_applied_file = current_file.map(|s| s.to_string());
+
+        let parts: Vec<&str> = ab_str.split(&[',', ';'][..]).map(str::trim).collect();
+        if parts.len() == 2 {
+            if let (Ok(a), Ok(b)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                if a >= 0.0 && b > a {
+                    let _ = self.controller.set_ab_loop(a, b);
+                } else {
+                    log::warn!("Invalid seeded A-B loop bounds: a={a}, b={b}");
+                }
+            } else {
+                log::warn!("Malformed numbers in MUVRIX_SEED_AB_LOOP: {ab_str}");
+            }
+        } else if parts.len() == 1 {
+            if let Ok(a) = parts[0].parse::<f64>() {
+                if a >= 0.0 {
+                    let _ = self.controller.set_ab_loop_a(a);
+                } else {
+                    log::warn!("Negative start point in MUVRIX_SEED_AB_LOOP: {a}");
+                }
+            } else {
+                log::warn!("Malformed start number in MUVRIX_SEED_AB_LOOP: {ab_str}");
+            }
+        } else {
+            log::warn!("Unrecognized MUVRIX_SEED_AB_LOOP format: {ab_str}");
+        }
     }
 }
 

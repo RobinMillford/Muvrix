@@ -832,6 +832,12 @@ impl PlaybackController {
         self.track.secondary_sub_track_id()
     }
 
+    pub fn secondary_sub_delay(&self) -> f64 {
+        self.handle
+            .get_property::<f64>("secondary-sub-delay")
+            .unwrap_or(0.0)
+    }
+
     pub fn set_secondary_sub_delay(&self, delay_seconds: f64) -> Result<(), MpvError> {
         self.track
             .set_secondary_sub_delay(&self.handle, delay_seconds)

@@ -382,6 +382,39 @@ pub struct MuvrixApp {
     pub(crate) cleanup_preview: Option<CleanupPreview>,
     pub(crate) cleanup_confirm_open: bool,
     pub(crate) integrity_status_msg: Option<String>,
+
+    // Phase E4: Adaptive Player HUD, Three-Tier Collapsible Decks & Overflow
+    pub(crate) player_secondary_deck_expanded: bool,
+    pub(crate) player_secondary_deck_collapsed_wide: bool,
+    pub(crate) player_more_overflow_open: bool,
+    pub(crate) player_empty_url_input_open: bool,
+    pub(crate) seeded_ab_loop_applied_file: Option<String>,
+}
+
+impl MuvrixApp {
+    pub const RESPONSIVE_BREAKPOINT_WIDTH: f32 = 1300.0;
+
+    /// Evaluates whether the secondary controls deck should be visible.
+    /// Wide layout (>=1300px): Visible by default unless explicitly collapsed.
+    /// Compact layout (<1300px): Collapsed by default unless explicitly expanded.
+    #[inline]
+    pub fn is_secondary_deck_visible(&self, deck_width: f32) -> bool {
+        if deck_width >= Self::RESPONSIVE_BREAKPOINT_WIDTH {
+            !self.player_secondary_deck_collapsed_wide
+        } else {
+            self.player_secondary_deck_expanded
+        }
+    }
+
+    /// Toggles secondary controls deck visibility based on current deck width.
+    #[inline]
+    pub fn toggle_secondary_deck(&mut self, deck_width: f32) {
+        if deck_width >= Self::RESPONSIVE_BREAKPOINT_WIDTH {
+            self.player_secondary_deck_collapsed_wide = !self.player_secondary_deck_collapsed_wide;
+        } else {
+            self.player_secondary_deck_expanded = !self.player_secondary_deck_expanded;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -59,13 +59,38 @@ impl MuvrixApp {
             self.toggle_fullscreen(ctx);
         }
 
-        // Escape: Exit Fullscreen or dismiss modal
+        // Escape: Exit Fullscreen or dismiss modal / popover
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.show_shortcuts {
+            if self.player_more_overflow_open {
+                self.player_more_overflow_open = false;
+            } else if self.player_empty_url_input_open {
+                self.player_empty_url_input_open = false;
+            } else if self.show_shortcuts {
                 self.show_shortcuts = false;
             } else if self.is_fullscreen {
                 self.exit_fullscreen(ctx);
             }
+        }
+
+        // Alt+M: Toggle Player More (...) Overflow Menu
+        if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::M)) {
+            self.player_more_overflow_open = !self.player_more_overflow_open;
+        }
+
+        // Ctrl+D or Alt+D: Toggle Secondary Playback Controls Deck
+        if ctx.input(|i| (i.modifiers.command || i.modifiers.alt) && i.key_pressed(egui::Key::D)) {
+            let screen_w = ctx.screen_rect().width();
+            if screen_w >= 1300.0 {
+                self.player_secondary_deck_collapsed_wide =
+                    !self.player_secondary_deck_collapsed_wide;
+            } else {
+                self.player_secondary_deck_expanded = !self.player_secondary_deck_expanded;
+            }
+        }
+
+        // Ctrl+U: Toggle URL streaming input in empty state
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::U)) {
+            self.player_empty_url_input_open = !self.player_empty_url_input_open;
         }
 
         // [ and ]: Playback speed decrease / increase (-0.25x / +0.25x)
@@ -120,13 +145,14 @@ impl MuvrixApp {
 
     /// Automatically hides on-screen playback controls during uninterrupted playback.
     pub(crate) fn update_osd_autohide(&mut self, ctx: &egui::Context) {
-        // Any open modals or drawers prevent controls from auto-hiding
+        // Any open modals, popovers, or drawers prevent controls from auto-hiding
         let modal_active = self.show_shortcuts
             || self.show_diagnostics
             || self.show_playlist_drawer
             || self.add_root_dialog_open
             || self.pending_resume_prompt.is_some()
-            || self.crash_notice.is_some();
+            || self.crash_notice.is_some()
+            || self.player_more_overflow_open;
 
         if modal_active {
             self.last_mouse_activity = Instant::now();

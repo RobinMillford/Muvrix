@@ -910,6 +910,13 @@ impl MuvrixApp {
             },
             cleanup_confirm_open: false,
             integrity_status_msg: None,
+
+            // Phase E4: Adaptive Player HUD, Three-Tier Collapsible Decks & Overflow
+            player_secondary_deck_expanded: std::env::var("MUVRIX_OPEN_PLAYER_DECK").is_ok(),
+            player_secondary_deck_collapsed_wide: false,
+            player_more_overflow_open: std::env::var("MUVRIX_OPEN_PLAYER_MORE").is_ok(),
+            player_empty_url_input_open: std::env::var("MUVRIX_OPEN_PLAYER_URL_INPUT").is_ok(),
+            seeded_ab_loop_applied_file: None,
         };
 
         app.refresh_library();
@@ -1029,7 +1036,7 @@ impl MuvrixApp {
             let _ = app.controller.pause();
         }
         if let Ok(ab_str) = std::env::var("MUVRIX_SEED_AB_LOOP") {
-            let parts: Vec<&str> = ab_str.split(';').collect();
+            let parts: Vec<&str> = ab_str.split(&[',', ';'][..]).collect();
             if parts.len() == 2 {
                 if let (Ok(a), Ok(b)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
                     let _ = app.controller.set_ab_loop(a, b);
