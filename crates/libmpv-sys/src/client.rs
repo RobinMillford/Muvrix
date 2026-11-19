@@ -200,6 +200,10 @@ extern "C" {
     pub fn mpv_client_api_version() -> c_ulong;
     pub fn mpv_error_string(error: c_int) -> *const c_char;
     pub fn mpv_free(data: *mut c_void);
+    /// Subscribes (or unsubscribes, with a null/`"no"` level) this handle to
+    /// the engine's log stream. The level is one of `no`, `fatal`, `error`,
+    /// `warn`, `info`, `v`, `debug`, `trace`.
+    pub fn mpv_request_log_messages(ctx: *mut mpv_handle, min_level: *const c_char) -> c_int;
     pub fn mpv_client_name(ctx: *mut mpv_handle) -> *const c_char;
     pub fn mpv_client_id(ctx: *mut mpv_handle) -> i64;
     pub fn mpv_create() -> *mut mpv_handle;

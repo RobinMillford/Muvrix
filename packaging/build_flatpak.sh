@@ -36,21 +36,60 @@ rm -rf "$STAGING_DIR" "$REPO_DIR"
 mkdir -p "$STAGING_DIR/export/share/applications"
 mkdir -p "$STAGING_DIR/export/share/metainfo"
 mkdir -p "$STAGING_DIR/export/share/icons/hicolor/scalable/apps"
-mkdir -p "$STAGING_DIR/files/bin"
+mkdir -p "$STAGING_DIR/files/bin" "$STAGING_DIR/files/libexec" "$STAGING_DIR/files/lib/muvrix"
 
-# 1. Application binary. A Flatpak built outside the SDK cannot use host
-#    libraries, so an explicit portable binary may be supplied.
-BIN_SOURCE="${MUVRIX_FLATPAK_BINARY:-target/release/muvrix-ui}"
+# 1. Application binary. It is compiled against the glibc 2.39 baseline (Ubuntu
+#    24.04), which the 25.08 runtime satisfies; a binary built on the Fedora
+#    development host requires GLIBC_2.43 and cannot start inside the sandbox.
+if [ -n "${MUVRIX_FLATPAK_BINARY:-}" ]; then
+    BIN_SOURCE="$MUVRIX_FLATPAK_BINARY"
+else
+    BIN_SOURCE="$(bash packaging/build_native_binary.sh deb)"
+fi
 if [ ! -f "$BIN_SOURCE" ]; then
     echo "[-] Flatpak payload binary not found: $BIN_SOURCE" >&2
     exit 1
 fi
-cp "$BIN_SOURCE" "$STAGING_DIR/files/bin/muvrix"
+cp "$BIN_SOURCE" "$STAGING_DIR/files/libexec/muvrix"
+chmod 755 "$STAGING_DIR/files/libexec/muvrix"
+
+# 1b. Private media runtime: the Flatpak runtime contains no libmpv at all.
+if [ ! -d "target/runtime/lib" ]; then
+    echo "[*] Private runtime missing; building it first..."
+    bash packaging/build_runtime_bundle.sh
+fi
+mkdir -p "$STAGING_DIR/files/lib/muvrix/lib"
+# The private runtime must not carry the Wayland client libraries. They are part
+# of the graphics stack that build_runtime_bundle.sh documents as host/runtime
+# provided, and inside Flatpak the 25.08 runtime already ships Wayland >= 1.23.
+# Shipping the builder's copies makes the launcher's LD_LIBRARY_PATH shadow the
+# runtime's newer libwayland-client/libwayland-egl, which makes glvnd load no
+# EGL vendor at all and eglGetPlatformDisplay(Wayland) fail with
+# EGL_BAD_PARAMETER (verified inside the sandbox).
+EXCLUDED_WAYLAND=0
+for lib in target/runtime/lib/*; do
+    base="$(basename "$lib")"
+    case "$base" in
+        libwayland-*)
+            EXCLUDED_WAYLAND=$((EXCLUDED_WAYLAND + 1))
+            continue
+            ;;
+    esac
+    cp -a "$lib" "$STAGING_DIR/files/lib/muvrix/lib/$base"
+done
+echo "[*] Left $EXCLUDED_WAYLAND Wayland client libraries to the Flatpak runtime"
+cp -a target/runtime/share/licenses "$STAGING_DIR/files/lib/muvrix/licenses"
+cp target/runtime/runtime-manifest.json "$STAGING_DIR/files/lib/muvrix/runtime-manifest.json"
+
+# Launcher (sets LD_LIBRARY_PATH to the bundled runtime, then execs the binary).
+sed -e 's|@LIBDIR@|/app/lib/muvrix/lib|' -e 's|@BINARY@|/app/libexec/muvrix|' \
+    packaging/launcher/muvrix-launcher.sh > "$STAGING_DIR/files/bin/muvrix"
 chmod 755 "$STAGING_DIR/files/bin/muvrix"
 
 # 2. Export desktop entry, icons, and metainfo
 sed -e 's|^Exec=.*|Exec=muvrix %U|' \
     -e 's|^Icon=.*|Icon=org.muvrix.Muvrix|' \
+    -e 's|^StartupWMClass=.*|StartupWMClass=org.muvrix.Muvrix|' \
     packaging/appimage/muvrix.desktop > "$STAGING_DIR/export/share/applications/${APP_ID}.desktop"
 chmod 644 "$STAGING_DIR/export/share/applications/${APP_ID}.desktop"
 
@@ -85,6 +124,7 @@ sdk = manifest["sdk"]
 command = manifest["command"]
 
 shared, sockets, devices, filesystems = [], [], [], []
+env_vars = []
 bus_policy = []
 
 for arg in manifest.get("finish-args", []):
@@ -96,6 +136,9 @@ for arg in manifest.get("finish-args", []):
         devices.append(arg.split("=", 1)[1])
     elif arg.startswith("--filesystem="):
         filesystems.append(arg.split("=", 1)[1])
+    elif arg.startswith("--env="):
+        # Metadata cannot express --env directly; it becomes [Environment].
+        env_vars.append(arg.split("=", 1)[1])
     elif arg.startswith("--own-name="):
         bus_policy.append((arg.split("=", 1)[1], "own"))
     elif arg.startswith("--talk-name="):
@@ -126,6 +169,14 @@ if devices:
 if filesystems:
     lines.append("filesystems=" + ";".join(filesystems) + ";")
 lines.append("")
+if env_vars:
+    lines.append("[Environment]")
+    for item in env_vars:
+        if "=" not in item:
+            raise SystemExit(f"Malformed --env finish-arg: {item}")
+        key, value = item.split("=", 1)
+        lines.append(f"{key}={value}")
+    lines.append("")
 lines.append("[Session Bus Policy]")
 for name, policy in bus_policy:
     lines.append(f"{name}={policy}")
@@ -149,8 +200,27 @@ run_flatpak() {
     fi
 }
 
-echo "[*] Exporting application tree into OSTree archive repository..."
-run_flatpak build-export --disable-sandbox "$REPO_DIR" "$STAGING_DIR" stable
+# OSTree commits carry a creation timestamp, which would otherwise make every
+# bundle unique. Pin it the same way the deb/rpm/AppImage builds do so that two
+# builds of an unchanged tree produce identical bundles.
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+    SOURCE_DATE_EPOCH="$(git -C "$REPO_ROOT" log -1 --format=%ct 2>/dev/null || date +%s)"
+fi
+export SOURCE_DATE_EPOCH
+
+# flatpak/ostree parse --timestamp as an ISO-8601 instant, not a raw epoch.
+COMMIT_TIMESTAMP="$(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y-%m-%dT%H:%M:%SZ)"
+
+echo "[*] Exporting application tree into OSTree archive repository (timestamp $COMMIT_TIMESTAMP)..."
+run_flatpak build-export --disable-sandbox --timestamp="$COMMIT_TIMESTAMP" \
+    "$REPO_DIR" "$STAGING_DIR" stable
+
+# The sandbox must actually carry the media runtime, otherwise the app cannot
+# start inside Flatpak (the runtime provides no libmpv).
+if [ ! -f "$STAGING_DIR/files/lib/muvrix/lib/libmpv.so.2" ]; then
+    echo "[-] Flatpak tree is missing the bundled libmpv runtime" >&2
+    exit 1
+fi
 
 if [ ! -d "$REPO_DIR/objects" ] || [ ! -d "$REPO_DIR/refs" ]; then
     echo "[-] OSTree repository was not created at $REPO_DIR" >&2
@@ -183,7 +253,7 @@ Branch=stable
 Title=Muvrix Media Player
 Comment=Modern native desktop media player with advanced video shaders and pro audio DSP
 Description=Muvrix is a fast, beautiful, and extensible native media player built in Rust and powered by libmpv.
-Icon=https://raw.githubusercontent.com/muvrix/muvrix-desktop/main/assets/branding/muvrix-logo.png
+Icon=https://raw.githubusercontent.com/RobinMillford/Muvrix/main/assets/branding/muvrix-logo.png
 Url=https://repo.muvrix.org/flatpak/
 RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
 IsRuntime=false

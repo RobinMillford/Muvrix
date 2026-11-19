@@ -72,6 +72,16 @@ impl MuvrixApp {
             (vendor, renderer, version)
         };
 
+        // 1b. VA-API capability, measured before the engine exists.
+        //
+        // The decoder's own failure used to be invisible: libavcodec initialises
+        // VA-API internally and reports nothing to the caller, so the only
+        // symptom was "hardware requested, software selected". Probing here —
+        // same client library, same driver discovery, same environment the
+        // decoder will inherit — makes the resolved libva and driver a logged
+        // fact, and gives a fallback an actual reason instead of a guess.
+        let vaapi = muvrix_player::vaapi::prepare(&gpu_renderer);
+
         // 2. Initialize libmpv handle with required options
         let mpv = Arc::new(MpvHandle::new()?);
         let stream_bridge = Arc::new(MpvStreamBridge::new());
@@ -330,6 +340,7 @@ impl MuvrixApp {
             decode_observation: None,
             hdr_state: None,
             native_display_kind,
+            vaapi,
             output: output.clone(),
             telemetry_path: std::env::var("MUVRIX_TELEMETRY").ok(),
             last_telemetry: Instant::now(),
@@ -987,6 +998,7 @@ impl MuvrixApp {
 
             // Phase E5: Audio DSP Expansion, EBU R128 & 32-Band Spectrum Visualizer
             spectrum_visualizer: muvrix_player::SpectrumVisualizer::new(),
+            slow_metrics: crate::app::slow_metrics::SlowMetrics::default(),
             autoeq_status_msg: std::env::var("MUVRIX_AUTOEQ_STATUS")
                 .ok()
                 .map(|s| (s, false)),

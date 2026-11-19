@@ -1,10 +1,14 @@
-//! Native presentation runner (Wayland).
+//! Native presentation runner (Wayland and X11).
 //!
 //! Ownership split, chosen in `docs/phase-2.0/02-presentation-architecture-decision.md`:
 //!
-//! * winit owns the window, the `wl_display` connection and the event loop. It is
-//!   the only reader of the socket, which keeps input, IME, clipboard, HiDPI and
+//! * winit owns the window, the socket connection and the event loop. It is the
+//!   only reader of the socket, which keeps input, IME, clipboard, HiDPI and
 //!   fullscreen working without reimplementation.
+//! * Wayland is preferred whenever a *reachable* compositor exists; X11 is used
+//!   otherwise. The choice is made before the event loop is built because winit
+//!   picks Wayland from `WAYLAND_DISPLAY` alone and would abort on a stale or
+//!   unlinked socket rather than falling back (see `choose_backend`).
 //! * Muvrix owns the EGL config, context, window surface, swap interval and the
 //!   colour description, because those are exactly the parts eframe did not let
 //!   us control (it always asks for an 8-bit config and never tags the surface).
@@ -20,6 +24,8 @@ use glow::HasContext as _;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::platform::wayland::{EventLoopBuilderExtWayland, WindowAttributesExtWayland};
+use winit::platform::x11::EventLoopBuilderExtX11;
 use winit::raw_window_handle::{
     HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
 };
@@ -40,6 +46,10 @@ use crate::wake::WakeHandle;
 
 /// Reference white used when mapping SDR UI onto a PQ surface (BT.2408).
 const UI_WHITE_NITS: f32 = 203.0;
+
+/// Window class / app id used by the deb, rpm and AppImage packages, whose
+/// desktop entry and icons are installed under `org.muvrix.Muvrix`.
+const DEFAULT_APP_ID: &str = "org.muvrix.Muvrix";
 
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
@@ -923,10 +933,21 @@ impl Shell {
         cfg: &RunnerConfig,
     ) -> Result<Self, String> {
         crate::causal_trace::init_from_env();
+        // The application id is what makes the desktop entry apply to the
+        // window: Wayland exports it as `app_id`, X11 as WM_CLASS, and both read
+        // the same winit field. Without it GNOME cannot match the window to a
+        // .desktop file and shows a generic entry with no icon. The Flatpak
+        // declares its reverse-DNS id through the launcher environment; the
+        // distribution packages keep the historical desktop-file id.
+        let app_id = std::env::var("MUVRIX_APP_ID")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_APP_ID.to_string());
         let mut attributes = Window::default_attributes()
             .with_title(cfg.title.clone())
             .with_inner_size(winit::dpi::PhysicalSize::new(cfg.width, cfg.height))
-            .with_min_inner_size(winit::dpi::PhysicalSize::new(640, 360));
+            .with_min_inner_size(winit::dpi::PhysicalSize::new(640, 360))
+            .with_name(app_id, "muvrix");
         if let Some(icon) = crate::branding::winit_window_icon() {
             attributes = attributes.with_window_icon(Some(icon));
         }
@@ -936,15 +957,28 @@ impl Shell {
                 .map_err(|e| format!("create_window failed: {e}"))?,
         );
 
-        let (display_ptr, surface_ptr) = wayland_handles(&window)?;
+        let handles = native_handles(&window)?;
         let size = window.inner_size();
         let (width, height) = (size.width.max(1), size.height.max(1));
+        log::info!("window backend: {}", handles.target().as_str());
 
-        // 1. Presenter: config + context + surface, interval 0. If this fails we
-        //    cannot present at all, so it is a hard error rather than a fallback.
-        let presenter =
-            unsafe { Presenter::new(display_ptr, surface_ptr, width, height, cfg.want_hdr) }
-                .map_err(|e| format!("EGL presentation unavailable: {e}"))?;
+        // 1. Presenter: config + context + surface. If this fails we cannot
+        //    present at all, so it is a hard error rather than a fallback. The
+        //    surface is created on whichever native window winit actually gave
+        //    us, so a forced X11 backend cannot end up in the Wayland path.
+        let presenter = unsafe {
+            match handles {
+                NativeHandles::Wayland { display, surface } => {
+                    Presenter::new(display, surface, width, height, cfg.want_hdr)
+                }
+                NativeHandles::X11 { window } => {
+                    Presenter::new_x11_window(window, width, height, cfg.want_hdr)
+                }
+            }
+        }
+        .map_err(|e| format!("EGL presentation unavailable: {e}"))?;
+        let display_ptr = presenter.display_ptr();
+        let surface_ptr = presenter.surface_ptr();
 
         let gl = unsafe {
             glow::Context::from_loader_function(|name| presenter::get_proc_address(name))
@@ -996,12 +1030,27 @@ impl Shell {
 
         // Attach the shared foreign-display manager on every Wayland path, not
         // only the HDR path: wp_presentation is needed for the production
-        // acknowledgement even when the output is SDR.
-        let mut color_manager = match unsafe { ColorManager::attach(display_ptr) } {
-            Ok(cm) => Some(cm),
-            Err(e) => {
+        // acknowledgement even when the output is SDR. Both protocols are
+        // Wayland protocols, so an X11 session has no colour description and no
+        // compositor feedback; it presents through the swap path alone.
+        let mut color_manager = match presenter.target() {
+            presenter::SurfaceTarget::Wayland => match unsafe { ColorManager::attach(display_ptr) }
+            {
+                Ok(cm) => Some(cm),
+                Err(e) => {
+                    if refusal.is_none() {
+                        refusal = Some(format!("wp_color_manager_v1 unavailable: {e}"));
+                    }
+                    None
+                }
+            },
+            presenter::SurfaceTarget::X11 => {
                 if refusal.is_none() {
-                    refusal = Some(format!("wp_color_manager_v1 unavailable: {e}"));
+                    refusal = Some(
+                        "X11 presentation: wp_color_manager_v1 is a Wayland protocol, \
+                         so HDR output stays on the Wayland path"
+                            .to_string(),
+                    );
                 }
                 None
             }
@@ -1103,7 +1152,7 @@ impl Shell {
             gl.clone(),
             egui_ctx.clone(),
             Some(loader_ref),
-            Some(muvrix_player::NativeDisplay::Wayland(display_ptr)),
+            native_display_for(presenter.target(), display_ptr),
             output.clone(),
         )
         .map_err(|e| format!("MuvrixApp init failed: {e}"))?;
@@ -1402,11 +1451,25 @@ impl Shell {
         }
 
         let raw_input = self.egui_state.take_egui_input(&self.window);
+        let app_update_started = Instant::now();
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             self.app.frame_update(ctx);
         });
+        // The per-frame application work (engine property reads, state polling,
+        // UI construction) is on the critical path of every presented frame, so
+        // its cost is measured separately from tessellation and GL painting.
+        crate::causal_trace::record(
+            crate::causal_trace::Kind::AppUpdate,
+            draw_seq,
+            app_update_started.elapsed().as_micros() as i64,
+            0,
+            0,
+            "frame_update",
+        );
         self.egui_state
             .handle_platform_output(&self.window, full_output.platform_output);
+
+        let ui_paint_started = Instant::now();
 
         let ppp = full_output.pixels_per_point;
         let viewport_output = full_output.viewport_output.clone();
@@ -1429,6 +1492,14 @@ impl Shell {
             ppp,
             &clipped,
             &full_output.textures_delta,
+        );
+        crate::causal_trace::record(
+            crate::causal_trace::Kind::UiPaint,
+            draw_seq,
+            ui_paint_started.elapsed().as_micros() as i64,
+            width as i64,
+            height as i64,
+            "ui_layer",
         );
 
         // The egui paint callback has now executed the engine's `paint()`. A
@@ -1791,21 +1862,161 @@ impl Drop for Shell {
     }
 }
 
-fn wayland_handles(
-    window: &Window,
-) -> Result<(*mut std::ffi::c_void, *mut std::ffi::c_void), String> {
+/// The native window objects the presenter needs, one variant per backend.
+#[derive(Debug, Clone, Copy)]
+enum NativeHandles {
+    Wayland {
+        display: *mut std::ffi::c_void,
+        surface: *mut std::ffi::c_void,
+    },
+    /// The window is all the presenter needs: EGL's X11 platform requires an
+    /// Xlib `Display*`, which winit does not have (its backend is XCB-based), so
+    /// the presenter opens its own connection to address this XID.
+    X11 { window: u64 },
+}
+
+impl NativeHandles {
+    fn target(&self) -> presenter::SurfaceTarget {
+        match self {
+            Self::Wayland { .. } => presenter::SurfaceTarget::Wayland,
+            Self::X11 { .. } => presenter::SurfaceTarget::X11,
+        }
+    }
+}
+
+fn native_handles(window: &Window) -> Result<NativeHandles, String> {
     let display = window
         .display_handle()
         .map_err(|e| format!("no display handle: {e}"))?;
     let surface = window
         .window_handle()
         .map_err(|e| format!("no window handle: {e}"))?;
-    match (display.as_raw(), surface.as_raw()) {
-        (RawDisplayHandle::Wayland(d), RawWindowHandle::Wayland(s)) => {
-            Ok((d.display.as_ptr(), s.surface.as_ptr()))
-        }
-        _ => Err("runner requires a Wayland session (WL_ or X11 session detected)".to_string()),
+    classify_handles(display.as_raw(), surface.as_raw())
+}
+
+/// Maps winit's raw handles onto the two backends the presenter supports.
+///
+/// Split out from `native_handles` so the mapping is unit-testable without a
+/// compositor: a wrong arm here is what rejected every X11 session with
+/// "runner requires a Wayland session".
+// `c_ulong` is 64-bit on LP64 and 32-bit elsewhere, so the widening cast is
+// required for portability even though it is a no-op on this target.
+#[allow(clippy::unnecessary_cast)]
+fn classify_handles(
+    display: RawDisplayHandle,
+    window: RawWindowHandle,
+) -> Result<NativeHandles, String> {
+    match (display, window) {
+        (RawDisplayHandle::Wayland(d), RawWindowHandle::Wayland(s)) => Ok(NativeHandles::Wayland {
+            display: d.display.as_ptr(),
+            surface: s.surface.as_ptr(),
+        }),
+        (RawDisplayHandle::Xlib(_), RawWindowHandle::Xlib(w)) => Ok(NativeHandles::X11 {
+            window: w.window as u64,
+        }),
+        (RawDisplayHandle::Xcb(_), RawWindowHandle::Xcb(w)) => Ok(NativeHandles::X11 {
+            window: w.window.get() as u64,
+        }),
+        (d, w) => Err(format!(
+            "presentation requires a Wayland or X11 surface (got display {d:?}, window {w:?})"
+        )),
     }
+}
+
+/// The engine handle for direct hardware-surface import.
+///
+/// Wayland: the live `wl_display*`. X11: **none**, because mpv's
+/// `MPV_RENDER_PARAM_X11_DISPLAY` requires an Xlib `Display*` and winit's X11
+/// backend is XCB-based; inventing a second Xlib connection would violate the
+/// "same connection that owns the window" rule. The engine then keeps its
+/// copy-back import path, which is a performance property, not a correctness one.
+fn native_display_for(
+    target: presenter::SurfaceTarget,
+    display_ptr: *mut std::ffi::c_void,
+) -> Option<muvrix_player::NativeDisplay> {
+    match target {
+        presenter::SurfaceTarget::Wayland => {
+            Some(muvrix_player::NativeDisplay::Wayland(display_ptr))
+        }
+        presenter::SurfaceTarget::X11 => None,
+    }
+}
+
+/// Which backend the event loop must be built for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendChoice {
+    Wayland,
+    X11,
+    /// No preference: let winit decide, and let it report the missing session.
+    Auto,
+}
+
+/// Decides the backend from what is actually usable, not merely advertised.
+///
+/// winit selects Wayland whenever `WAYLAND_DISPLAY` is non-empty, without
+/// connecting first. A compositor whose socket was removed leaves the variable
+/// set, so winit aborts with libwayland's "Could not find wayland compositor"
+/// even though a working X11 display exists. `wayland_ready` therefore means
+/// "the socket answered a connect probe".
+fn choose_backend(forced: Option<&str>, wayland_ready: bool, x11_available: bool) -> BackendChoice {
+    match forced.map(|v| v.trim().to_ascii_lowercase()) {
+        Some(ref v) if v == "wayland" || v == "wl" => return BackendChoice::Wayland,
+        Some(ref v) if v == "x11" || v == "xcb" || v == "xlib" => return BackendChoice::X11,
+        Some(ref v) if !v.is_empty() && v != "auto" => {
+            log::warn!("ignoring MUVRIX_WINDOW_BACKEND={v} (expected wayland|x11|auto)");
+        }
+        _ => {}
+    }
+    if wayland_ready {
+        BackendChoice::Wayland
+    } else if x11_available {
+        BackendChoice::X11
+    } else {
+        BackendChoice::Auto
+    }
+}
+
+/// Probes the Wayland socket, if one is advertised at all.
+fn wayland_ready() -> bool {
+    use std::os::unix::net::UnixStream;
+
+    if std::env::var_os("WAYLAND_SOCKET").is_some() {
+        return true;
+    }
+    let Some(name) = std::env::var("WAYLAND_DISPLAY")
+        .ok()
+        .filter(|n| !n.is_empty())
+    else {
+        return false;
+    };
+    let path = if name.starts_with('/') {
+        std::path::PathBuf::from(&name)
+    } else {
+        let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") else {
+            return false;
+        };
+        std::path::PathBuf::from(runtime).join(&name)
+    };
+    match UnixStream::connect(&path) {
+        Ok(_) => {
+            log::info!(
+                "wayland socket {} accepted a probe connection",
+                path.display()
+            );
+            true
+        }
+        Err(e) => {
+            log::warn!(
+                "wayland socket {} is advertised but unusable ({e}); considering X11",
+                path.display()
+            );
+            false
+        }
+    }
+}
+
+fn env_available(name: &str) -> bool {
+    std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false)
 }
 
 /// Expected frame interval for this run, used for the exceedance buckets.
@@ -2165,9 +2376,21 @@ impl ApplicationHandler<RunnerEvent> for Runner {
 
 /// Entry point used by `main`.
 pub fn run(cfg: RunnerConfig) -> Result<(), String> {
-    let event_loop = EventLoop::<RunnerEvent>::with_user_event()
-        .build()
-        .map_err(|e| format!("event loop: {e}"))?;
+    let forced = std::env::var("MUVRIX_WINDOW_BACKEND").ok();
+    let choice = choose_backend(forced.as_deref(), wayland_ready(), env_available("DISPLAY"));
+    log::info!("presentation backend: {choice:?}");
+
+    let mut builder = EventLoop::<RunnerEvent>::with_user_event();
+    match choice {
+        BackendChoice::Wayland => {
+            builder.with_wayland();
+        }
+        BackendChoice::X11 => {
+            builder.with_x11();
+        }
+        BackendChoice::Auto => {}
+    }
+    let event_loop = builder.build().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut runner = Runner {
         cfg: Some(cfg),
@@ -2182,6 +2405,110 @@ pub fn run(cfg: RunnerConfig) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: the runner used to reject every non-Wayland handle with
+    /// "runner requires a Wayland session", so an X11 session that had already
+    /// initialized successfully inside winit was thrown away afterwards.
+    #[test]
+    fn x11_xcb_handles_are_accepted() {
+        use std::num::NonZeroU32;
+        use winit::raw_window_handle::{XcbDisplayHandle, XcbWindowHandle};
+
+        let display = RawDisplayHandle::Xcb(XcbDisplayHandle::new(
+            Some(std::ptr::NonNull::dangling()),
+            0,
+        ));
+        let window = RawWindowHandle::Xcb(XcbWindowHandle::new(
+            NonZeroU32::new(0x2a).expect("non-zero"),
+        ));
+
+        match classify_handles(display, window) {
+            Ok(NativeHandles::X11 { window }) => assert_eq!(window, 0x2a),
+            other => panic!("XCB handles must map to the X11 surface, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn x11_xlib_handles_are_accepted() {
+        use winit::raw_window_handle::{XlibDisplayHandle, XlibWindowHandle};
+
+        let display = RawDisplayHandle::Xlib(XlibDisplayHandle::new(None, 0));
+        let window = RawWindowHandle::Xlib(XlibWindowHandle::new(0x4001));
+
+        match classify_handles(display, window) {
+            Ok(NativeHandles::X11 { window }) => assert_eq!(window, 0x4001),
+            other => panic!("Xlib handles must map to the X11 surface, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wayland_handles_stay_on_the_wayland_path() {
+        use winit::raw_window_handle::{WaylandDisplayHandle, WaylandWindowHandle};
+
+        let display =
+            RawDisplayHandle::Wayland(WaylandDisplayHandle::new(std::ptr::NonNull::dangling()));
+        let window =
+            RawWindowHandle::Wayland(WaylandWindowHandle::new(std::ptr::NonNull::dangling()));
+
+        match classify_handles(display, window) {
+            Ok(NativeHandles::Wayland { display, surface }) => {
+                assert!(!display.is_null());
+                assert!(!surface.is_null());
+            }
+            other => panic!("Wayland handles must stay Wayland, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_handles_name_both_supported_backends() {
+        use winit::raw_window_handle::{DrmDisplayHandle, DrmWindowHandle};
+
+        let err = classify_handles(
+            RawDisplayHandle::Drm(DrmDisplayHandle::new(1)),
+            RawWindowHandle::Drm(DrmWindowHandle::new(1)),
+        )
+        .expect_err("DRM handles are not a presentation surface");
+        assert!(err.contains("Wayland") && err.contains("X11"), "{err}");
+    }
+
+    #[test]
+    fn backend_prefers_a_reachable_wayland_socket() {
+        assert_eq!(
+            choose_backend(None, true, true),
+            BackendChoice::Wayland,
+            "a working Wayland session must win over X11"
+        );
+    }
+
+    /// The Fedora 45 GNOME failure: `WAYLAND_DISPLAY` was set but the socket had
+    /// been unlinked, and winit picks Wayland from the variable alone, so the
+    /// process died with "Could not find wayland compositor" while a usable X11
+    /// display was present.
+    #[test]
+    fn backend_falls_back_to_x11_when_the_wayland_socket_is_dead() {
+        assert_eq!(choose_backend(None, false, true), BackendChoice::X11);
+    }
+
+    #[test]
+    fn backend_lets_winit_report_a_missing_session() {
+        assert_eq!(choose_backend(None, false, false), BackendChoice::Auto);
+    }
+
+    #[test]
+    fn backend_honours_an_explicit_override() {
+        assert_eq!(choose_backend(Some("x11"), true, true), BackendChoice::X11);
+        assert_eq!(
+            choose_backend(Some("wayland"), false, true),
+            BackendChoice::Wayland
+        );
+        assert_eq!(choose_backend(Some("XCB"), false, true), BackendChoice::X11);
+        // An unusable value must not silently disable fallback.
+        assert_eq!(
+            choose_backend(Some("nonsense"), true, false),
+            BackendChoice::Wayland
+        );
+        assert_eq!(choose_backend(Some(""), false, true), BackendChoice::X11);
+    }
 
     #[test]
     fn wake_signal_trait_forwarding_does_not_recurse() {

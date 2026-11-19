@@ -287,6 +287,9 @@ pub struct MuvrixApp {
     pub(crate) decode_observation: Option<DecodeObservation>,
     pub(crate) hdr_state: Option<PresentationState>,
     pub(crate) native_display_kind: Option<&'static str>,
+    /// What the VA-API probe found *before* the engine was created: resolved
+    /// client library, driver, and the reason initialisation failed, if it did.
+    pub(crate) vaapi: muvrix_player::VaapiCapability,
     /// What the shell observed about the output path. Drives the HDR decision.
     pub(crate) output: crate::output::OutputCaps,
 
@@ -394,6 +397,10 @@ pub struct MuvrixApp {
 
     // Phase E5: Audio DSP Expansion, EBU R128 & 32-Band Spectrum Visualizer
     pub(crate) spectrum_visualizer: muvrix_player::SpectrumVisualizer,
+    /// Adaptive cache for blocking engine probes; refreshed by the paint path
+    /// on a bounded, backoff-limited interval so a slow core cannot stall a
+    /// frame.
+    pub(crate) slow_metrics: crate::app::slow_metrics::SlowMetrics,
     pub(crate) autoeq_status_msg: Option<(String, bool)>,
 
     // Phase E7: Multi-Profile Support, Custom Theme Builder & Shortcut Mapper

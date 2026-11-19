@@ -2,9 +2,8 @@ Source: muvrix
 Section: video
 Priority: optional
 Maintainer: Muvrix Desktop Team <dev@muvrix.org>
-Build-Depends: debhelper-compat (= 13), cargo, rustc, libmpv-dev (>= 0.42.0), libplacebo-dev, libegl1-mesa-dev, libgl1-mesa-dev, libasound2-dev, libpulse-dev, libdbus-1-dev
 Standards-Version: 4.6.2
-Homepage: https://github.com/muvrix/muvrix-desktop
+Homepage: https://github.com/RobinMillford/Muvrix
 
 Package: muvrix
 Architecture: any

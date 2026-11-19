@@ -1,0 +1,11 @@
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends \
+        weston libgl1-mesa-dri libegl1 libgl1 ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+# Headless software-rendered compositor used by the release tests. It creates
+# its socket inside the mounted runtime directory, so the host-side Flatpak or
+# package under test can connect over Wayland without a physical display.
+ENTRYPOINT ["weston"]
+CMD ["--backend=headless-backend.so", "--socket=wayland-0", "--idle-time=0"]

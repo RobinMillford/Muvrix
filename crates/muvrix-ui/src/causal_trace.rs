@@ -61,6 +61,11 @@ pub enum Kind {
     FrameCallbackRequest = 36,
     GpuTime = 37,
     FrameDeadline = 38,
+    /// Time spent inside `MuvrixApp::frame_update` (state polling, property
+    /// reads, UI construction), excluding tessellation and GL painting.
+    AppUpdate = 39,
+    /// Time spent tessellating and painting the UI layer into its own target.
+    UiPaint = 40,
 }
 
 impl Kind {
@@ -104,6 +109,8 @@ impl Kind {
             Self::FrameCallbackRequest => "frame_callback_request",
             Self::GpuTime => "gpu_time",
             Self::FrameDeadline => "frame_deadline",
+            Self::AppUpdate => "app_update",
+            Self::UiPaint => "ui_paint",
         }
     }
 }

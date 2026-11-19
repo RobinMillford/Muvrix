@@ -1,4 +1,4 @@
-name: Multi-Platform Release Packaging (AppImage, Flatpak, DEB, RPM)
+name: Release Packaging & Verification
 
 on:
   push:
@@ -7,75 +7,181 @@ on:
     branches: [ "phase-*", "main", "master" ]
   workflow_dispatch:
 
+env:
+  CARGO_TERM_COLOR: always
+  SOURCE_DATE_EPOCH: "1763424000"
+
 jobs:
-  build-and-package:
-    name: Package ${{ matrix.distro }} (${{ matrix.format }})
+  build:
+    name: Build four formats, SBoM and release manifest
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install release toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            podman desktop-file-utils appstream dpkg-dev python3-yaml \
+            flatpak curl ca-certificates gnupg
+          chmod +x packaging/*.sh packaging/tests/*.sh packaging/appimage/AppRun
+
+      - name: Build private media runtime (libmpv 0.42 from pinned sources)
+        run: bash packaging/build_runtime_bundle.sh
+
+      - name: Build and verify all four packages
+        run: bash packaging/build_all_packages.sh
+
+      - name: Install test (mocked)
+        run: bash packaging/tests/install_test.sh
+
+      - name: Sign release manifest
+        if: ${{ secrets.RELEASE_GPG_PRIVATE_KEY != '' }}
+        env:
+          MUVRIX_SIGNING_KEY: ${{ secrets.RELEASE_GPG_KEY_ID }}
+          MUVRIX_SIGNING_PASSPHRASE: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          printf '%s' "${RELEASE_GPG_KEY}" > /tmp/release-key.asc
+          MUVRIX_SIGNING_KEY_FILE=/tmp/release-key.asc bash packaging/sign_release.sh
+          rm -f /tmp/release-key.asc
+          bash packaging/verify_release.sh
+
+      - name: Record signing status when no key is provisioned
+        if: ${{ secrets.RELEASE_GPG_PRIVATE_KEY == '' }}
+        run: |
+          bash packaging/sign_release.sh
+          echo "::notice::Release signing is PENDING: no signing secret is provisioned."
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: muvrix-release
+          path: |
+            target/packages/
+            docs/release/
+          if-no-files-found: error
+
+  live-install:
+    name: Install, launch and remove (${{ matrix.format }})
+    needs: build
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - distro: ubuntu-24.04
-            format: deb
-            container: packaging/containers/Containerfile.deb
-          - distro: fedora-40
-            format: rpm
-            container: packaging/containers/Containerfile.rpm
-          - distro: alpine-3.20
-            format: appimage
-            container: packaging/containers/Containerfile.appimage
-          - distro: alpine-3.20
-            format: flatpak
-            container: packaging/containers/Containerfile.flatpak
-
+        format: [ deb, rpm, appimage ]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
+      - uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          name: muvrix-release
+          path: release
 
-      - name: Install native packaging toolchain
+      - name: Restore artifact layout
+        run: |
+          mkdir -p target/packages
+          cp release/target/packages/* target/packages/ 2>/dev/null || cp -r release/* target/packages/
+          ls -l target/packages
+
+      - name: Install test tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            desktop-file-utils appstream dpkg-dev python3-yaml
-          case "${{ matrix.format }}" in
-            rpm)
-              # Native rpmbuild runs inside the Fedora packaging container.
-              sudo apt-get install -y --no-install-recommends podman
-              ;;
-            flatpak)
-              sudo apt-get install -y --no-install-recommends flatpak
-              ;;
-          esac
+          sudo apt-get install -y --no-install-recommends podman weston
+          sudo podman info >/dev/null
 
-      - name: Compile MUVRIX release binaries
-        run: |
-          cargo build --release --locked -p muvrix-ui
+      - name: Live install and launch test
+        run: bash packaging/tests/live_install_test.sh ${{ matrix.format }}
 
-      - name: Build and Validate Package
-        env:
-          # The Ubuntu runner is the target ABI for the .deb payload.
-          MUVRIX_BINARY: ${{ matrix.format == 'deb' && 'target/release/muvrix-ui' || '' }}
-        run: |
-          chmod +x packaging/*.sh packaging/appimage/AppRun
-          ./packaging/build_${{ matrix.format }}.sh
-
-      - name: Upload Package Artifact
+      - name: Upload launch screenshot
         uses: actions/upload-artifact@v4
         with:
-          name: muvrix-package-${{ matrix.format }}
-          path: target/packages/*
+          name: launch-evidence-${{ matrix.format }}
+          path: target/test-results/${{ matrix.format }}/
           if-no-files-found: error
+
+  flatpak-launch:
+    name: Flatpak sandbox install and launch
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: muvrix-release
+          path: release
+
+      - name: Restore artifact layout
+        run: |
+          mkdir -p target/packages
+          cp release/target/packages/* target/packages/ 2>/dev/null || cp -r release/* target/packages/
+          ls -l target/packages
+
+      - name: Install Flatpak and a headless compositor
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak weston
+          flatpak --version
+
+      - name: Flatpak install, launch and uninstall
+        run: bash packaging/tests/live_install_test.sh flatpak
+
+      - name: Upload launch screenshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: launch-evidence-flatpak
+          path: target/test-results/flatpak/
+          if-no-files-found: error
+
+  reproducibility:
+    name: Independent reproducibility comparison
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: muvrix-release
+          path: first-build
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends podman flatpak python3-yaml dpkg-dev \
+            desktop-file-utils appstream curl
+          chmod +x packaging/*.sh
+
+      - name: Rebuild from the same pinned inputs
+        run: |
+          bash packaging/build_runtime_bundle.sh
+          bash packaging/build_all_packages.sh
+
+      - name: Compare both builds
+        run: |
+          FIRST=$(find first-build -name SHA256SUMS | head -1)
+          python3 - "$FIRST" target/packages/SHA256SUMS <<'PY'
+          import sys
+          def load(p):
+              out = {}
+              for line in open(p):
+                  digest, name = line.split()
+                  out[name] = digest
+              return out
+          a, b = load(sys.argv[1]), load(sys.argv[2])
+          for name in sorted(set(a) | set(b)):
+              same = a.get(name) == b.get(name)
+              print(f"{name}: {'IDENTICAL' if same else 'DIFFERENT'}")
+          PY

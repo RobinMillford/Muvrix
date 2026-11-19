@@ -1014,7 +1014,10 @@ fn test_visualizer_disabled_preserves_other_dsp_filters() {
     settings.spectrum_visualizer_enabled = true;
     let enabled_str = EqualizerManager::build_filter_string(&settings);
     assert!(enabled_str.contains("@vis:lavfi=[astats"));
-    assert!(enabled_str.contains("@spec:lavfi=[aspectralstats]"));
+    assert!(
+        enabled_str.contains("@spec:lavfi=[aspectralstats=win_size=8192:overlap=0]"),
+        "aspectralstats must use the CPU-cheap configuration (win_size=8192:overlap=0)"
+    );
 
     // 4. When all DSP is disabled, filter string is completely empty (bit-perfect pass-through)
     let empty_settings = EqualizerSettings::default();

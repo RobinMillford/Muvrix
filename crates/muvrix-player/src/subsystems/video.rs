@@ -1,7 +1,7 @@
 //! Video, Decoder Watchdog, Shader, and Frame-Stepping domain subsystem.
 
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::decode::{classify, DecodeObservation, DecodePath};
 use crate::error::MpvError;
@@ -364,6 +364,10 @@ pub struct VideoSubsystem {
     stepping_preset: SteppingPreset,
     watchdog: DecoderWatchdog,
     current_hwdec: String,
+    /// Cached `frame-drop-count` probe; the watchdog polls it once per
+    /// event-loop iteration, but the engine round trip blocks the caller
+    /// under decode pressure, so it is refreshed at most twice a second.
+    drop_count_cache: Mutex<(Option<Instant>, i64)>,
 }
 
 impl Default for VideoSubsystem {
@@ -383,6 +387,7 @@ impl VideoSubsystem {
             stepping_preset: SteppingPreset::Frame,
             watchdog: DecoderWatchdog::new(),
             current_hwdec: "inactive".to_string(),
+            drop_count_cache: Mutex::new((None, 0)),
         }
     }
 
@@ -447,6 +452,22 @@ impl VideoSubsystem {
     /// Returns count of dropped video frames.
     pub fn frame_drop_count(&self, handle: &MpvHandle) -> i64 {
         handle.get_property::<i64>("frame-drop-count").unwrap_or(0)
+    }
+
+    /// Drop count refreshed at most once every two seconds; used by the
+    /// watchdog, which would otherwise pay one blocking mpv round trip per
+    /// event-loop iteration.
+    fn cached_frame_drop_count(&self, handle: &MpvHandle) -> i64 {
+        let mut cache = self.drop_count_cache.lock().unwrap();
+        let due = cache
+            .0
+            .map(|t| t.elapsed() >= Duration::from_millis(2_000))
+            .unwrap_or(true);
+        if due {
+            cache.1 = self.frame_drop_count(handle);
+            cache.0 = Some(Instant::now());
+        }
+        cache.1
     }
 
     /// Returns count of decoder-level dropped frames.
@@ -643,7 +664,7 @@ impl VideoSubsystem {
         is_buffering: bool,
         current_pos: f64,
     ) -> Option<DecoderFallbackReason> {
-        let drops = self.frame_drop_count(handle);
+        let drops = self.cached_frame_drop_count(handle);
         self.watchdog
             .check_watchdog(handle, is_playing, is_buffering, current_pos, drops)
     }

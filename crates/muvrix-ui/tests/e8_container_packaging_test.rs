@@ -9,7 +9,7 @@
 //! engine plus network access to fetch distribution dependencies.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use muvrix_ui::packaging::{PackageFormat, PackagingInfo};
@@ -45,13 +45,19 @@ fn packages_dir() -> PathBuf {
 
 /// Renders a `.deb` control file with native dpkg-deb, either on the host or in
 /// a disposable Ubuntu container.
-fn deb_control(deb: &PathBuf) -> Option<String> {
+fn deb_control(deb: &Path) -> Option<String> {
     let root = repo_root();
     let relative = format!("target/packages/{}", deb.file_name()?.to_string_lossy());
     let output = if have("dpkg-deb") {
-        Command::new("dpkg-deb")
-            .args(["--ctrl-tarfile"])
-            .arg(deb)
+        // `--ctrl-tarfile` emits the control member as a tar stream, not the
+        // control file itself; the member has to be extracted on both paths or
+        // the host branch would compare raw tar bytes against a control stanza.
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "dpkg-deb --ctrl-tarfile '{}' | tar -xO ./control",
+                deb.display()
+            ))
             .output()
     } else if have_container_engine() {
         Command::new("podman")
@@ -409,7 +415,7 @@ fn test_appimage_standalone_extraction_and_run() {
     // 3. Verify extracted AppDir layout
     assert!(extract_dir.join("AppRun").exists());
     assert!(extract_dir.join("muvrix.desktop").exists());
-    assert!(extract_dir.join("io.muvrix.Muvrix.desktop").exists());
+    assert!(extract_dir.join("org.muvrix.Muvrix.desktop").exists());
     assert!(extract_dir.join(".DirIcon").exists());
     assert!(extract_dir.join("usr/bin/muvrix").exists());
     assert!(extract_dir

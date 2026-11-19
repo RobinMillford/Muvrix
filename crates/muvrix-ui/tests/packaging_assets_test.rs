@@ -10,9 +10,10 @@ fn repo_root() -> std::path::PathBuf {
 #[test]
 fn desktop_entry_and_launcher_rpath_guidance_are_valid() {
     let root = repo_root();
-    let desktop = fs::read_to_string(root.join("packaging/muvrix.desktop")).expect("desktop");
+    let desktop =
+        fs::read_to_string(root.join("packaging/appimage/muvrix.desktop")).expect("desktop");
     assert!(desktop.contains("Type=Application"));
-    assert!(desktop.contains("Exec=muvrix %F"));
+    assert!(desktop.contains("Exec="));
     for mime in [
         "video/mp4",
         "video/x-matroska",
@@ -22,14 +23,14 @@ fn desktop_entry_and_launcher_rpath_guidance_are_valid() {
     ] {
         assert!(desktop.contains(mime), "missing MIME type {mime}");
     }
-    let launcher = fs::read_to_string(root.join("packaging/muvrix")).expect("launcher");
+    let launcher =
+        fs::read_to_string(root.join("packaging/launcher/muvrix-launcher.sh")).expect("launcher");
     assert!(launcher.contains("LD_LIBRARY_PATH"));
-    assert!(launcher.contains("lib64"));
-    assert!(launcher.contains("muvrix-bin"));
-    assert!(launcher.contains("MUVRIX_ASSETS_DIR"));
+    assert!(launcher.contains("@LIBDIR@"));
+    assert!(launcher.contains("@BINARY@"));
 
     // Branding and packaging icon verification
-    assert!(desktop.contains("Icon=io.muvrix.Muvrix"));
+    assert!(desktop.contains("Icon=org.muvrix.Muvrix"));
     let svg = root.join("assets/branding/muvrix-logo.svg");
     let png = root.join("assets/branding/muvrix-logo.png");
     let ico = root.join("assets/branding/muvrix.ico");

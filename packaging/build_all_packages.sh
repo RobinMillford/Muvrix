@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 echo "=========================================================="
-echo "=== MUVRIX PHASE E8 MULTI-PLATFORM PACKAGING PIPELINE ==="
+echo "=== MUVRIX PHASE E9 RELEASE PIPELINE (4 FORMATS + SBOM) ==="
 echo "=========================================================="
 echo "Repository Root: $REPO_ROOT"
 cd "$REPO_ROOT"
@@ -126,8 +126,22 @@ grep -q "Name:           muvrix" packaging/rpm/muvrix.spec
 grep -q "%description" packaging/rpm/muvrix.spec
 echo "  [+] RPM specfile verified."
 
-# 8. Execute Individual Format Builders
-echo "[*] Step 8: Building multi-platform distribution packages..."
+# 8. Private media runtime shared by every format.
+echo "[*] Step 8: Building the private media runtime (libmpv 0.42)..."
+if [ -d target/runtime/lib ] && [ -f target/runtime/runtime-manifest.json ]; then
+    python3 -c "
+import json, sys
+m = json.load(open('target/runtime/runtime-manifest.json'))
+assert m['libmpv']['version'].startswith('0.42'), m['libmpv']['version']
+print('  [+] Reusing runtime bundle: libmpv', m['libmpv']['version'],
+      '|', m['bundled_libraries'], 'libraries')
+"
+else
+    bash packaging/build_runtime_bundle.sh
+fi
+
+# 9. Execute Individual Format Builders
+echo "[*] Step 9: Building multi-platform distribution packages..."
 mkdir -p target/packages
 
 bash packaging/build_deb.sh
@@ -135,8 +149,8 @@ bash packaging/build_rpm.sh
 bash packaging/build_appimage.sh
 bash packaging/build_flatpak.sh
 
-# 9. Verify every artifact with the native tool of its format.
-echo "[*] Step 9: Verifying artifacts with native package tooling..."
+# 10. Verify every artifact with the native tool of its format.
+echo "[*] Step 10: Verifying artifacts with native package tooling..."
 DEB_ARTIFACT="muvrix_0.1.0_amd64.deb"
 RPM_ARTIFACT="muvrix-0.1.0-1.x86_64.rpm"
 APPIMAGE_ARTIFACT="Muvrix-0.1.0-x86_64.AppImage"
@@ -179,8 +193,26 @@ fi
 grep -qxF "Name=org.muvrix.Muvrix" "target/packages/$FLATPAKREF_ARTIFACT"
 echo "  [+] Flatpak bundle header and flatpakref descriptor verified."
 
-# 10. Cryptographic Checksum Generation & Verification
-echo "[*] Step 10: Computing SHA-256 cryptographic hashes..."
+# 10b. Every package must carry the private runtime, never rely on host libmpv.
+echo "[*] Step 10b: Verifying the bundled media runtime inside each package..."
+if ! podman run --rm -v "$REPO_ROOT:/workspace:z" -w /workspace ubuntu:24.04 \
+        bash -c "dpkg-deb -c 'target/packages/$DEB_ARTIFACT' | grep -q 'usr/lib/muvrix/lib/libmpv.so.2'" >/dev/null 2>&1; then
+    echo "[-] $DEB_ARTIFACT does not contain the private libmpv runtime" >&2
+    exit 1
+fi
+echo "  [+] $DEB_ARTIFACT ships libmpv 0.42 privately (no host libmpv2 dependency)."
+
+if command -v rpm >/dev/null 2>&1; then
+    rpm -qlp "target/packages/$RPM_ARTIFACT" | grep -qx "/usr/lib64/muvrix/lib/libmpv.so.2" || {
+        echo "[-] $RPM_ARTIFACT does not contain the private libmpv runtime" >&2; exit 1; }
+else
+    podman run --rm -v "$REPO_ROOT:/workspace:z" -w /workspace fedora:40 \
+        bash -c "rpm -qlp 'target/packages/$RPM_ARTIFACT' | grep -qx '/usr/lib64/muvrix/lib/libmpv.so.2'" >/dev/null
+fi
+echo "  [+] $RPM_ARTIFACT ships libmpv 0.42 privately (no mpv-libs dependency)."
+
+# 11. Cryptographic Checksum Generation & Verification
+echo "[*] Step 11: Computing SHA-256 cryptographic hashes..."
 (
     cd target/packages
     sha256sum \
@@ -194,9 +226,27 @@ echo "[*] Step 10: Computing SHA-256 cryptographic hashes..."
     sha256sum -c SHA256SUMS
 )
 
+# 12. Supply chain: SBOM, license inventory, signing status.
+echo "[*] Step 12: Generating SBOM and dependency license inventory..."
+python3 packaging/generate_sbom.py --output docs/release
+
+if [ -d target/runtime ]; then
+    cp target/runtime/runtime-manifest.json target/packages/runtime-manifest.json
+fi
+
+if command -v gpg >/dev/null 2>&1 || [ -n "${MUVRIX_SIGNING_KEY:-}" ]; then
+    echo "[*] Step 13: Signing release manifest (pending when no key is configured)..."
+    bash packaging/sign_release.sh target/packages
+    cp target/packages/SIGNING_STATUS target/packages/SIGNING_STATUS 2>/dev/null || true
+fi
+
+echo "[*] Step 14: Verifying the release directory..."
+bash packaging/verify_release.sh target/packages
+
 echo "=========================================================="
-echo "=== ALL PHASE E8 PACKAGES SUCCESSFULLY GENERATED ==="
+echo "=== ALL PHASE E9 RELEASE ARTIFACTS GENERATED ==="
 echo "=========================================================="
 ls -lh target/packages/
 echo ""
 cat target/packages/SHA256SUMS
+[ -f target/packages/SIGNING_STATUS ] && cat target/packages/SIGNING_STATUS

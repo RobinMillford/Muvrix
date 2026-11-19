@@ -1,18 +1,30 @@
 app-id: org.muvrix.Muvrix
 runtime: org.freedesktop.Platform
-runtime-version: '23.08'
+runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Platform.GL.default
+  - org.freedesktop.Platform.GL.extra
 command: muvrix
 
 finish-args:
-  # Display & Windowing
+  # Display & Windowing.
+  # Both sockets are exported deliberately: the runner prefers Wayland and
+  # falls back to X11 when the Wayland socket is absent or unusable (a stale
+  # WAYLAND_DISPLAY left behind by a crashed compositor is a real case on
+  # GNOME). --socket=fallback-x11 is NOT used alongside --socket=x11 because it
+  # is defined as "X11 only when Wayland is unavailable", which an unconditional
+  # x11 socket already contradicts.
   - --share=ipc
-  - --socket=x11
   - --socket=wayland
-  - --socket=fallback-x11
+  - --socket=x11
   - --device=dri
+
+  # Identity. The window class/app id must match the exported desktop file
+  # (org.muvrix.Muvrix.desktop), otherwise GNOME cannot associate the window
+  # with the application and shows a generic icon instead of Muvrix's.
+  - --env=MUVRIX_APP_ID=org.muvrix.Muvrix
 
   # Audio playback
   - --socket=pulseaudio
@@ -30,12 +42,28 @@ finish-args:
   - --talk-name=org.freedesktop.ScreenSaver
   - --talk-name=org.freedesktop.PowerManagement.Inhibit
 
+# The runtime is 25.08: 23.08 is end-of-life and ships glibc 2.37, which the
+# current Rust toolchain and the private media stack no longer target.
 modules:
+  # libmpv 0.42 + ffmpeg + libplacebo, built from pinned sources for a glibc
+  # 2.39 baseline by packaging/build_runtime_bundle.sh. Flatpak's runtime does
+  # not ship libmpv at all, and no distribution runtime ships 0.42.
+  - name: muvrix-runtime
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/lib/muvrix
+      - cp -a runtime/lib/. /app/lib/muvrix/
+      - cp -a runtime/share/licenses /app/lib/muvrix/licenses
+      - cp runtime/runtime-manifest.json /app/lib/muvrix/
+    sources:
+      - type: dir
+        path: ../../target/runtime
   - name: muvrix
     buildsystem: simple
     build-commands:
-      - cargo build --release --bin muvrix
-      - install -Dm755 target/release/muvrix /app/bin/muvrix
+      - install -Dm755 target/native/ubuntu-24.04/muvrix-ui /app/libexec/muvrix
+      - install -Dm755 packaging/launcher/muvrix-launcher.sh /app/bin/muvrix
+      - sed -i -e 's|@LIBDIR@|/app/lib/muvrix|' -e 's|@BINARY@|/app/libexec/muvrix|' /app/bin/muvrix
       - install -Dm644 packaging/appimage/muvrix.desktop /app/share/applications/org.muvrix.Muvrix.desktop
       - install -Dm644 packaging/metainfo/org.muvrix.Muvrix.metainfo.xml /app/share/metainfo/org.muvrix.Muvrix.metainfo.xml
     sources:

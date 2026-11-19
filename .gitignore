@@ -1,11 +1,43 @@
+# Muvrix — .gitignore
+#
+# Layout:
+#   1. Rust build output
+#   2. Generated release artifacts
+#   3. Test media and captures (large binaries)
+#   4. Private phase working documents (kept out of the public repo)
+#   5. Local development environment
+#   6. Editor and IDE state
+#   7. Secrets, credentials and signing material
+#   8. OS metadata
+#
+# Rules are deliberately anchored and narrow. Nothing is ignored merely
+# because of its extension; negations re-include committed fixtures.
+
+# ---------------------------------------------------------------------------
+# 1. Rust build output
+# ---------------------------------------------------------------------------
 /target/
 **/*.rs.bk
-*.swp
-*~
-.DS_Store
-.commandcode/
 
-# Large media files, test captures, and test media collections
+# ---------------------------------------------------------------------------
+# 2. Generated release artifacts
+# ---------------------------------------------------------------------------
+# The packaging pipeline writes its payloads under target/ (covered above).
+# These are explicit fallbacks for ad-hoc builds on the repository root.
+/dist/
+/build/
+/*.deb
+/*.rpm
+/*.AppImage
+/*.flatpak
+/*.flatpakref
+/*.tar.gz
+/*.tar.xz
+
+# ---------------------------------------------------------------------------
+# 3. Test media and captures (large binaries)
+# ---------------------------------------------------------------------------
+# Committed fixtures are re-included by the negations at the end.
 test/
 tests/MuvrixTestMedia/
 tests/**/*.mkv
@@ -15,7 +47,6 @@ tests/**/*.webm
 tests/**/*.mov
 tests/**/*.flac
 tests/**/*.wav
-tests/fixtures/audio_test_tone.wav
 tests/**/*.ogg
 tests/**/*.opus
 tests/**/*.mp3
@@ -33,11 +64,28 @@ tests/**/*.log
 tests/**/*.tmp
 tests/**/temp/
 tests/**/tmp/
+tests/fixtures/audio_test_tone.wav
 tests/fixtures/*.mp4
 tests/fixtures/*.txt
 tests/fixtures/*.lrc
 tests/fixtures/*.png
-# Private Phase engineering reports, internal audits, and research archives
+# Committed fixtures — these are referenced by the test suite and must stay.
+!tests/fixtures/path-resolution/
+!tests/fixtures/path-resolution/**
+!tests/fixtures/test_video.mp4
+!tests/fixtures/corrupted.mp4
+!tests/fixtures/unsupported.txt
+# Network-integration test host keys/artefacts (generated at test time).
+/tests/network-integration/openssh/ssh_host_*
+/tests/network-integration/openssh/*.pub
+/tests/network-integration/sftp_fingerprint.txt
+/tests/network-integration/fixtures/
+# Ephemeral test working directories.
+docs/tests/
+
+# ---------------------------------------------------------------------------
+# 4. Private phase working documents (kept out of the public repository)
+# ---------------------------------------------------------------------------
 docs/PHASE-*.md
 docs/PHASE-*.json
 docs/ROADMAP-CARRY-FORWARD.md
@@ -53,9 +101,16 @@ docs/phase-*
 docs/audits/
 docs/engineering/
 docs/screenshots/
+docs/*.zip
 PHASE_*.md
 
-# Local agent/editor state and scratch output
+# Local phase fixture generator
+scripts/generate-phase-2.8-media.sh
+
+# ---------------------------------------------------------------------------
+# 5. Local development environment
+# ---------------------------------------------------------------------------
+.commandcode/
 .freebuff/
 .codex/
 .claude/
@@ -63,21 +118,49 @@ PHASE_*.md
 .continue/
 .aider*
 *.local.log
+.env
+.env.*
+!.env.example
 
-# Local-only phase fixture generator
-scripts/generate-phase-2.8-media.sh
+# ---------------------------------------------------------------------------
+# 6. Editor and IDE state
+# ---------------------------------------------------------------------------
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+TAGS
 
-# Dedicated committed test fixtures
-!tests/fixtures/path-resolution/
-!tests/fixtures/path-resolution/**
-!tests/fixtures/test_video.mp4
-!tests/fixtures/corrupted.mp4
-!tests/fixtures/unsupported.txt
+# ---------------------------------------------------------------------------
+# 7. Secrets, credentials and signing material
+# ---------------------------------------------------------------------------
+# Never commit key material. Public verification material (e.g. an
+# egress-release public key) is deliberately committable via .pub files.
+*.key
+*.pem
+*.p12
+*.pfx
+*.keystore
+*.truststore
+*.token
+*.credentials
+git-credentials
 
-# Ephemeral network integration test artifacts
-/tests/network-integration/openssh/ssh_host_*
-/tests/network-integration/openssh/*.pub
-/tests/network-integration/sftp_fingerprint.txt
-/tests/network-integration/fixtures/
-docs/tests/
-docs/*.zip
+# ---------------------------------------------------------------------------
+# 8. OS metadata
+# ---------------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Thumbs.db:encryptable
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# 9. Generated release artifacts (regenerated by CI / packaging pipeline)
+# ---------------------------------------------------------------------------
+docs/release/

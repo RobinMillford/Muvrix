@@ -310,7 +310,7 @@ fn test_e5_spectrum_filter_inclusion_toggle() {
     // When enabled, visualizer passthrough filters must be present
     let enabled_filters = EqualizerManager::build_filter_string(&eq);
     assert!(enabled_filters.contains("@vis:lavfi=[astats=metadata=1:reset=1]"));
-    assert!(enabled_filters.contains("@spec:lavfi=[aspectralstats]"));
+    assert!(enabled_filters.contains("@spec:lavfi=[aspectralstats=win_size=8192:overlap=0]"));
 
     // When disabled, visualizer filters must NOT be injected
     eq.spectrum_visualizer_enabled = false;

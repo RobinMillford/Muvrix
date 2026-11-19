@@ -2,11 +2,11 @@
 <component type="desktop-application">
   <id>org.muvrix.Muvrix</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>MIT</project_license>
+  <project_license>LGPL-2.1-or-later</project_license>
   <name>Muvrix</name>
   <summary>Modern native desktop media player with advanced video shaders and pro audio DSP</summary>
-  <url type="homepage">https://github.com/muvrix/muvrix-desktop</url>
-  <developer id="org.muvrix">
+  <url type="homepage">https://github.com/RobinMillford/Muvrix</url>
+  <developer id="io.github.robinmillford">
     <name>Muvrix Desktop Team</name>
   </developer>
 
@@ -27,7 +27,7 @@
     </ul>
   </description>
 
-  <launchable type="desktop-id">io.muvrix.Muvrix.desktop</launchable>
+  <launchable type="desktop-id">org.muvrix.Muvrix.desktop</launchable>
 
   <provides>
     <binary>muvrix</binary>

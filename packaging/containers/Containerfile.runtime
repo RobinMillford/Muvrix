@@ -1,0 +1,28 @@
+# Reproducible build environment for the private Muvrix media runtime.
+#
+# Pinned to a single Ubuntu release so the produced libraries link against a
+# known glibc baseline (2.39). All build dependencies live in the image, so the
+# runtime build itself is a pure git/build operation over pinned sources.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8
+
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends \
+        build-essential meson ninja-build pkg-config python3 python3-pip \
+        curl ca-certificates xz-utils git \
+        libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev libavdevice-dev \
+        libswresample-dev libswscale-dev \
+        libass-dev liblcms2-dev libvulkan-dev glslang-tools libshaderc-dev \
+        libdrm-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+        libx11-dev libxext-dev libxfixes-dev libxrandr-dev libxss-dev libxv-dev \
+        libxpresent-dev libxcb1-dev libxcb-shm0-dev \
+        libarchive-dev libbluray-dev libdvdnav-dev libdvdread-dev libcdio-cdda-dev \
+        libcdio-paranoia-dev libuchardet-dev libjpeg-dev libluajit-5.1-dev \
+        librubberband-dev zlib1g-dev libzimg-dev libsixel-dev libpulse-dev \
+        libasound2-dev libcurl4-openssl-dev libmujs-dev pax-utils \
+        libffi-dev libexpat1-dev libxml2-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace

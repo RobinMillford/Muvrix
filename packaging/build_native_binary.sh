@@ -24,14 +24,14 @@ case "$TARGET_KIND" in
             apt-get update -qq
             apt-get install -y -qq build-essential pkg-config cmake curl \
                 libmpv-dev libegl1-mesa-dev libgl1-mesa-dev libwayland-dev \
-                libxkbcommon-dev libdbus-1-dev libssl-dev libasound2-dev'
+                libxkbcommon-dev libx11-dev libdbus-1-dev libssl-dev libasound2-dev'
         ;;
     rpm)
         IMAGE="fedora:40"
         TAG="fedora-40"
         INSTALL_CMD='dnf install -y -q gcc gcc-c++ make cmake pkgconf-pkg-config curl tar gzip \
                 mpv-libs-devel mesa-libEGL-devel mesa-libGL-devel wayland-devel \
-                libxkbcommon-devel dbus-devel openssl-devel alsa-lib-devel'
+                libxkbcommon-devel libX11-devel dbus-devel openssl-devel alsa-lib-devel'
         ;;
     *)
         echo "[-] Usage: $0 <deb|rpm> [--force]" >&2

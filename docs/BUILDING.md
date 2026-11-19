@@ -1,97 +1,71 @@
-# Building and Running Muvrix
+# Building Muvrix
 
-This document details the build prerequisites and compilation procedures for Muvrix on supported desktop platforms.
+This document describes how to build Muvrix from source.
 
----
+## Prerequisites
 
-## 1. System Prerequisites
+### Linux (Debian/Ubuntu)
 
-### Linux (Fedora 45 / 41+)
-```bash
-sudo dnf install -y \
-    mpv-libs-devel \
-    mesa-libGL-devel \
-    libX11-devel \
-    wayland-devel \
-    gcc \
-    pkgconf-pkg-config
+```sh
+sudo apt update
+sudo apt install build-essential pkg-config libmpv-dev libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libwayland-dev libx11-dev libdbus-1-dev libasound2-dev
 ```
 
-### Linux (Ubuntu 24.04 LTS / Debian 12+)
-```bash
-sudo apt-get update && sudo apt-get install -y \
-    libmpv-dev \
-    libgl1-mesa-dev \
-    libx11-dev \
-    libwayland-dev \
-    libxkbcommon-dev \
-    pkg-config \
-    build-essential
+### Linux (Fedora)
+
+```sh
+sudo dnf install gcc make pkg-config mpv-libs-devel mesa-libGL-devel mesa-libEGL-devel wayland-devel libxkbcommon-devel libX11-devel alsa-lib-devel dbus-devel
 ```
 
-### macOS 15+ (Apple Silicon & Intel)
-Install dependencies via Homebrew:
-```bash
-brew install mpv pkg-config
-```
-Configure `PKG_CONFIG_PATH` according to your architecture:
-- **Apple Silicon (arm64)**:
-  ```bash
-  export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-  ```
-- **Intel (x86_64)**:
-  ```bash
-  export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-  ```
+### macOS
 
-### Windows 10/11 (x86_64 MSVC)
-1. Install **Visual Studio Build Tools 2022** with the C++ Desktop workload (provides MSVC `cl.exe`, `lib.exe`, Windows SDK).
-2. Download a pinned 64-bit `libmpv` development package (e.g. from upstream mpv Windows builds).
-3. Generate the MSVC-compatible import library (`mpv.lib`) using the bundled module definition file:
-   ```cmd
-   lib.exe /def:crates\libmpv-sys\windows\libmpv-2.def /out:mpv.lib /machine:x64
-   ```
-4. Set environment variables to locate the headers, import library, and dynamic library:
-   ```powershell
-   $env:MPV_DIR = "C:\mpv-dev"
-   $env:LIB = "$env:MPV_DIR;$env:LIB"
-   $env:PATH = "$env:MPV_DIR;$env:PATH"
-   ```
-
----
-
-## 2. Compilation and Quality Gates
-
-### Quick Check
-```bash
-cargo check --workspace --all-targets
+```sh
+brew install mpv pkg-config libgl
 ```
 
-### Strict Linting
-```bash
-cargo fmt --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+### Rust
+
+Install Rust via rustup: <https://rustup.rs>
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-### Running Test Suite
-```bash
-# Run deterministic test suite (59 passed, 0 failed, 22 ignored)
-cargo test --workspace --all-targets -- --test-threads=1
+## Building
+
+```sh
+git clone https://github.com/RobinMillford/Muvrix.git
+cd Muvrix
+cargo build --release -p muvrix-ui
 ```
 
----
+The binary is produced at `target/release/muvrix-ui`.
 
-## 3. Running the Player
+## Running from build
 
-Launch with a test fixture or local media file:
-```bash
-# Launch with the tracked synthetic test video
-cargo run -p muvrix-ui -- tests/fixtures/test_video.mp4
-
-# Launch into idle state (welcome screen)
-cargo run -p muvrix-ui
+```sh
+./target/release/muvrix-ui
 ```
 
-### Environment Overrides for Testing
-- `MUVRIX_WINDOW_WIDTH` / `MUVRIX_WINDOW_HEIGHT`: Override initial window dimensions (e.g. `MUVRIX_WINDOW_WIDTH=1024 MUVRIX_WINDOW_HEIGHT=768 cargo run -p muvrix-ui`).
-- `MUVRIX_CAPTURE_WINDOW_PNG`: Automatically save a window screenshot after rendering begins and exit cleanly (used in automated UI verification).
+## Running tests
+
+```sh
+cargo test --workspace
+```
+
+Tests that require hardware will skip if hardware is not available.
+
+## Building with a locally built libmpv
+
+If your distribution does not ship libmpv 0.42+, you can build it from source:
+
+```sh
+./scripts/ci/build-mpv-0.42.sh /tmp/engine
+export PKG_CONFIG_PATH="/tmp/engine/lib64/pkgconfig:/tmp/engine/lib/pkgconfig:$PKG_CONFIG_PATH"
+export LD_LIBRARY_PATH="/tmp/engine/lib64:$LD_LIBRARY_PATH"
+cargo build --release -p muvrix-ui
+```
+
+## Packaging
+
+See `docs/RELEASING.md` for packaging and release instructions.

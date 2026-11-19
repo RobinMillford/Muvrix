@@ -8,6 +8,7 @@ pub mod os_integration;
 pub mod profiles;
 pub mod scanner_channel;
 pub mod shortcuts;
+pub mod slow_metrics;
 pub mod state;
 
 pub use formatting::{
@@ -94,6 +95,8 @@ impl MuvrixApp {
         self.update_osd_autohide(ctx);
         self.sync_seeded_ab_loop();
         self.update_spectrum_visualizer(ctx);
+        self.slow_metrics
+            .refresh_status(&self.controller, std::time::Instant::now());
 
         // Handle drag and drop media files into the application
         ctx.input(|i| {
@@ -376,7 +379,12 @@ impl MuvrixApp {
             return;
         }
 
-        let telemetry = self.controller.spectrum_telemetry();
+        // The engine probe blocks under decode pressure; serve the cached
+        // sample and let the adaptive refresh decide when the next probe is
+        // safe to perform.
+        self.slow_metrics
+            .refresh_spectrum(&self.controller, std::time::Instant::now());
+        let telemetry = self.slow_metrics.spectrum.clone();
         self.spectrum_visualizer.update(&telemetry);
 
         // Continuous repaint during active audio playback for smooth 60 FPS animation

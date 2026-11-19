@@ -122,11 +122,11 @@ impl MuvrixApp {
 
                         ui.separator();
                         let source_fps = self
-                            .controller
-                            .container_fps()
-                            .or_else(|| self.controller.estimated_vf_fps())
+                            .slow_metrics
+                            .container_fps
+                            .or(self.slow_metrics.estimated_vf_fps)
                             .unwrap_or(0.0);
-                        let drops = self.controller.frame_drop_count();
+                        let drops = self.slow_metrics.frame_drops;
                         ui.label(
                             RichText::new(format!(
                                 "UI: {:.1} FPS ({:.1} ms) | Video: {:.1} fps ({} drops)",
@@ -510,7 +510,7 @@ impl MuvrixApp {
                     }
 
                     // Draw demuxer/stream buffer range on slider track
-                    let cache_time = self.controller.demuxer_cache_time();
+                    let cache_time = self.slow_metrics.demuxer_cache_time;
                     if duration > 0.0 && cache_time > time_pos {
                         let painter = ui.painter();
                         let frac_cur = (time_pos / max_dur).clamp(0.0, 1.0) as f32;

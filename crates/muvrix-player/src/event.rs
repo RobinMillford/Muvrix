@@ -68,6 +68,12 @@ pub enum Event {
         reply_userdata: u64,
         name: String,
         format: PropertyFormat,
+        /// Value carried inline by the observation (when registered with a
+        /// typed format instead of `PropertyFormat::None`). Lets the hot path
+        /// consume property changes without a blocking `mpv_get_property`
+        /// round trip, which under decode pressure stalls the caller for
+        /// tens to hundreds of milliseconds.
+        value: Option<PropertyChangeValue>,
     },
     QueueOverflow,
     Hook {
@@ -75,6 +81,18 @@ pub enum Event {
         id: u64,
     },
     Unknown(i32),
+}
+
+/// Scalar property value delivered inline by a typed property observation.
+///
+/// `Node` payloads (track lists, playlists, device lists) are not decoded here;
+/// those observations are registered with `PropertyFormat::None` and re-read on
+/// demand, as before.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PropertyChangeValue {
+    Flag(bool),
+    Int64(i64),
+    Double(f64),
 }
 
 impl Event {
@@ -190,21 +208,24 @@ impl Event {
             20 => Self::Seek,
             21 => Self::PlaybackRestart,
             22 => {
-                let (name, format) = if !event.data.is_null() {
+                let (name, format, value) = if !event.data.is_null() {
                     let prop = &*(event.data as *const libmpv_sys::mpv_event_property);
                     let name = if prop.name.is_null() {
                         String::new()
                     } else {
                         CStr::from_ptr(prop.name).to_string_lossy().into_owned()
                     };
-                    (name, PropertyFormat::from_raw(prop.format))
+                    let format = PropertyFormat::from_raw(prop.format);
+                    let value = decode_property_value(format, prop.data);
+                    (name, format, value)
                 } else {
-                    (String::new(), PropertyFormat::None)
+                    (String::new(), PropertyFormat::None, None)
                 };
                 Self::PropertyChange {
                     reply_userdata: event.reply_userdata,
                     name,
                     format,
+                    value,
                 }
             }
             24 => Self::QueueOverflow,
@@ -229,5 +250,127 @@ impl Event {
             }
             other => Self::Unknown(other),
         }
+    }
+}
+
+/// Decodes the payload of a typed property-change observation.
+///
+/// `data` may be null (mpv coalesced an unchanged value) or a `Node` that this
+/// client does not decode. Both cases yield `None`; callers fall back to
+/// re-reading the property, exactly as they did before typed observations
+/// existed.
+fn decode_property_value(
+    format: PropertyFormat,
+    data: *mut std::os::raw::c_void,
+) -> Option<PropertyChangeValue> {
+    if data.is_null() {
+        return None;
+    }
+    match format {
+        PropertyFormat::Flag => Some(PropertyChangeValue::Flag(unsafe {
+            *(data as *const std::os::raw::c_int) != 0
+        })),
+        PropertyFormat::Int64 => Some(PropertyChangeValue::Int64(unsafe { *(data as *const i64) })),
+        PropertyFormat::Double => {
+            let v = unsafe { *(data as *const f64) };
+            if v.is_finite() {
+                Some(PropertyChangeValue::Double(v))
+            } else {
+                None
+            }
+        }
+        // String-carrying events are deliberately not decoded: ownership of
+        // the `char*` inside `mpv_event_property` is unspecified across
+        // versions, and the string-typed properties (hwdec-current,
+        // current-ao) change rarely enough that the fallback re-read is fine.
+        PropertyFormat::String
+        | PropertyFormat::OsdString
+        | PropertyFormat::None
+        | PropertyFormat::Node => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prop_event(format: PropertyFormat) -> Event {
+        Event::PropertyChange {
+            reply_userdata: 1,
+            name: "time-pos".to_string(),
+            format,
+            value: None,
+        }
+    }
+
+    #[test]
+    fn untyped_observation_carries_no_inline_value() {
+        // A `PropertyFormat::None` observation has no inline payload; the
+        // client must fall back to a synchronous read, which is why the hot
+        // properties are observed with typed formats instead.
+        let ev = prop_event(PropertyFormat::None);
+        match ev {
+            Event::PropertyChange { value, .. } => assert!(value.is_none()),
+            _ => panic!("wrong event variant"),
+        }
+    }
+
+    #[test]
+    fn double_payload_decodes_from_raw_pointer() {
+        let val: f64 = 12.5;
+        let ptr = &val as *const f64 as *mut std::os::raw::c_void;
+        assert_eq!(
+            decode_property_value(PropertyFormat::Double, ptr),
+            Some(PropertyChangeValue::Double(12.5))
+        );
+    }
+
+    #[test]
+    fn flag_payload_decodes_from_raw_pointer() {
+        let val: std::os::raw::c_int = 1;
+        let ptr = &val as *const _ as *mut std::os::raw::c_void;
+        assert_eq!(
+            decode_property_value(PropertyFormat::Flag, ptr),
+            Some(PropertyChangeValue::Flag(true))
+        );
+        let zero: std::os::raw::c_int = 0;
+        let ptr = &zero as *const _ as *mut std::os::raw::c_void;
+        assert_eq!(
+            decode_property_value(PropertyFormat::Flag, ptr),
+            Some(PropertyChangeValue::Flag(false))
+        );
+    }
+
+    #[test]
+    fn int64_payload_decodes_from_raw_pointer() {
+        let val: i64 = 42;
+        let ptr = &val as *const i64 as *mut std::os::raw::c_void;
+        assert_eq!(
+            decode_property_value(PropertyFormat::Int64, ptr),
+            Some(PropertyChangeValue::Int64(42))
+        );
+    }
+
+    #[test]
+    fn node_and_none_formats_decode_to_none() {
+        let val: i64 = 42;
+        let ptr = &val as *const i64 as *mut std::os::raw::c_void;
+        assert_eq!(decode_property_value(PropertyFormat::Node, ptr), None);
+        assert_eq!(decode_property_value(PropertyFormat::None, ptr), None);
+    }
+
+    #[test]
+    fn null_payload_decodes_to_none() {
+        assert_eq!(
+            decode_property_value(PropertyFormat::Double, std::ptr::null_mut()),
+            None
+        );
+    }
+
+    #[test]
+    fn non_finite_double_is_not_reported() {
+        let val: f64 = f64::NAN;
+        let ptr = &val as *const f64 as *mut std::os::raw::c_void;
+        assert_eq!(decode_property_value(PropertyFormat::Double, ptr), None);
     }
 }

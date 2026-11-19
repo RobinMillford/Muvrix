@@ -45,12 +45,28 @@ mkdir -p "$STAGING_DIR/usr/bin"
 mkdir -p "$STAGING_DIR/usr/share/applications"
 mkdir -p "$STAGING_DIR/usr/share/metainfo"
 mkdir -p "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps"
+mkdir -p "$STAGING_DIR/usr/lib64/muvrix"
 
-cp "$BIN_SOURCE" "$STAGING_DIR/usr/bin/muvrix"
+# Private media runtime (libmpv 0.42 + ffmpeg + libplacebo). No Fedora release
+# ships mpv-libs 0.42, so the payload carries it.
+if [ ! -d "target/runtime/lib" ]; then
+    echo "[*] Private runtime missing; building it first..."
+    bash packaging/build_runtime_bundle.sh
+fi
+cp -a target/runtime/lib "$STAGING_DIR/usr/lib64/muvrix/lib"
+cp -a target/runtime/share/licenses "$STAGING_DIR/usr/lib64/muvrix/licenses"
+cp target/runtime/runtime-manifest.json "$STAGING_DIR/usr/lib64/muvrix/runtime-manifest.json"
+chmod -R go-w "$STAGING_DIR/usr/lib64/muvrix"
+
+cp "$BIN_SOURCE" "$STAGING_DIR/usr/lib64/muvrix/muvrix"
+chmod 755 "$STAGING_DIR/usr/lib64/muvrix/muvrix"
+
+sed -e 's|@LIBDIR@|/usr/lib64/muvrix/lib|' -e 's|@BINARY@|/usr/lib64/muvrix/muvrix|' \
+    packaging/launcher/muvrix-launcher.sh > "$STAGING_DIR/usr/bin/muvrix"
 chmod 755 "$STAGING_DIR/usr/bin/muvrix"
 
-sed 's|^Exec=.*|Exec=muvrix %U|' packaging/appimage/muvrix.desktop > "$STAGING_DIR/usr/share/applications/io.muvrix.Muvrix.desktop"
-chmod 644 "$STAGING_DIR/usr/share/applications/io.muvrix.Muvrix.desktop"
+sed 's|^Exec=.*|Exec=muvrix %U|' packaging/appimage/muvrix.desktop > "$STAGING_DIR/usr/share/applications/org.muvrix.Muvrix.desktop"
+chmod 644 "$STAGING_DIR/usr/share/applications/org.muvrix.Muvrix.desktop"
 
 cp packaging/metainfo/org.muvrix.Muvrix.metainfo.xml "$STAGING_DIR/usr/share/metainfo/org.muvrix.Muvrix.metainfo.xml"
 chmod 644 "$STAGING_DIR/usr/share/metainfo/org.muvrix.Muvrix.metainfo.xml"
@@ -59,13 +75,13 @@ for size in 16 24 32 48 64 128 256 512; do
     ICON_DIR="$STAGING_DIR/usr/share/icons/hicolor/${size}x${size}/apps"
     mkdir -p "$ICON_DIR"
     if [ -f "assets/branding/icons/muvrix-${size}x${size}.png" ]; then
-        cp "assets/branding/icons/muvrix-${size}x${size}.png" "$ICON_DIR/io.muvrix.Muvrix.png"
-        chmod 644 "$ICON_DIR/io.muvrix.Muvrix.png"
+        cp "assets/branding/icons/muvrix-${size}x${size}.png" "$ICON_DIR/org.muvrix.Muvrix.png"
+        chmod 644 "$ICON_DIR/org.muvrix.Muvrix.png"
     fi
 done
 
-cp assets/branding/muvrix-logo.svg "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps/io.muvrix.Muvrix.svg"
-chmod 644 "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps/io.muvrix.Muvrix.svg"
+cp assets/branding/muvrix-logo.svg "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps/org.muvrix.Muvrix.svg"
+chmod 644 "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps/org.muvrix.Muvrix.svg"
 
 # 3. Binary RPM specfile. The payload is staged above; %build is intentionally
 #    empty because the binary was compiled in the target distribution.
@@ -75,10 +91,10 @@ Name:           muvrix
 Version:        ${VERSION}
 Release:        ${RELEASE}
 Summary:        Modern native desktop media player
-License:        MIT OR Apache-2.0
-URL:            https://github.com/muvrix/muvrix-desktop
+License:        GPL-2.0-or-later
+URL:            https://github.com/RobinMillford/Muvrix
 AutoReqProv:    no
-Requires:       mpv-libs >= 0.42.0, mesa-libEGL, mesa-libGL, dbus-libs, openssl-libs, libwayland-client, libwayland-egl, libxkbcommon, libxkbcommon-x11, hicolor-icon-theme
+Requires:       glibc >= 2.39, mesa-libEGL, mesa-libGL, dbus-libs, openssl-libs, libwayland-client, libwayland-egl, libxkbcommon, libxkbcommon-x11, libX11, libva, hicolor-icon-theme
 
 %description
 Muvrix is a high-performance desktop media player written in Rust and powered by libmpv.
@@ -94,9 +110,10 @@ cp -a %{_stagedir}/usr %{buildroot}/
 
 %files
 %{_bindir}/muvrix
-%{_datadir}/applications/io.muvrix.Muvrix.desktop
+%{_libdir}/muvrix
+%{_datadir}/applications/org.muvrix.Muvrix.desktop
 %{_datadir}/metainfo/org.muvrix.Muvrix.metainfo.xml
-%{_datadir}/icons/hicolor/*/apps/io.muvrix.Muvrix.*
+%{_datadir}/icons/hicolor/*/apps/org.muvrix.Muvrix.*
 
 %changelog
 * Tue Nov 17 2026 Muvrix Desktop Team <dev@muvrix.org> - ${VERSION}-${RELEASE}
@@ -163,15 +180,19 @@ echo "[*] Verifying RPM metadata and payload..."
 rpm_query -qip "$OUTPUT_DIR/$PKG_NAME"
 rpm_query -qlp "$OUTPUT_DIR/$PKG_NAME" | tee /tmp/muvrix-rpm-contents.txt
 
-for expected in "/usr/bin/muvrix" "/usr/share/applications/io.muvrix.Muvrix.desktop" "/usr/share/metainfo/org.muvrix.Muvrix.metainfo.xml"; do
+for expected in "/usr/bin/muvrix" "/usr/lib64/muvrix/muvrix" "/usr/lib64/muvrix/lib/libmpv.so.2" "/usr/share/applications/org.muvrix.Muvrix.desktop" "/usr/share/metainfo/org.muvrix.Muvrix.metainfo.xml"; do
     if ! grep -qx "$expected" /tmp/muvrix-rpm-contents.txt; then
         echo "[-] RPM payload missing expected path: $expected" >&2
         exit 1
     fi
 done
 
-if ! rpm_query -qp --requires "$OUTPUT_DIR/$PKG_NAME" | grep -q "mpv-libs"; then
-    echo "[-] RPM is missing the mpv-libs runtime dependency" >&2
+if rpm_query -qp --requires "$OUTPUT_DIR/$PKG_NAME" | grep -q "mpv-libs"; then
+    echo "[-] RPM still depends on host mpv-libs although libmpv 0.42 is bundled" >&2
+    exit 1
+fi
+if ! rpm_query -qp --requires "$OUTPUT_DIR/$PKG_NAME" | grep -q "glibc >= 2.39"; then
+    echo "[-] RPM is missing the glibc floor required by the private runtime" >&2
     exit 1
 fi
 

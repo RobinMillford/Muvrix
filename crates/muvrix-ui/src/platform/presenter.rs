@@ -3,7 +3,8 @@
 //! Responsibilities, deliberately narrow:
 //!
 //! * select the EGL configuration (10-bit when the driver/compositor allow it),
-//! * create the GLES context and the window surface on winit's `wl_surface`,
+//! * create the GLES context and the window surface on winit's `wl_surface`
+//!   (Wayland) or on winit's X11 window (X11),
 //! * own the swap interval and the swap call,
 //! * carry an explicit presentation state machine and its timing.
 //!
@@ -44,6 +45,28 @@ impl PresentationState {
             Self::Recovering => "recovering",
             Self::DeviceLost => "device-lost",
             Self::Failed => "failed",
+        }
+    }
+}
+
+/// Which native windowing system the surface is created on.
+///
+/// The EGL configuration, context and swap path are identical for both; only
+/// platform selection and the native window object differ. Keeping them in one
+/// type is deliberate: a second present-on-X11 path would be a second set of
+/// swap/timing semantics, which is exactly what the presentation state machine
+/// exists to avoid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceTarget {
+    Wayland,
+    X11,
+}
+
+impl SurfaceTarget {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Wayland => "wayland",
+            Self::X11 => "x11",
         }
     }
 }
@@ -103,6 +126,10 @@ pub struct Presenter {
     surface_ptr: *mut c_void,
     api_bound: &'static str,
     unavailable_started: Option<Instant>,
+    target: SurfaceTarget,
+    /// `true` when this presenter opened the X11 `Display*` itself and must
+    /// close it on destroy. Wayland's connection always belongs to winit.
+    owns_display: bool,
 }
 
 impl std::fmt::Debug for Presenter {
@@ -111,6 +138,7 @@ impl std::fmt::Debug for Presenter {
             .field("format", &self.format)
             .field("swap_interval", &self.swap_interval)
             .field("state", &self.state)
+            .field("target", &self.target)
             .field("size", &(self.width, self.height))
             .finish()
     }
@@ -130,17 +158,93 @@ impl Presenter {
         height: u32,
         want_ten_bit: bool,
     ) -> Result<Self, String> {
-        if display_ptr.is_null() || surface_ptr.is_null() {
-            return Err("null Wayland display/surface".into());
+        Self::new_for_target(
+            SurfaceTarget::Wayland,
+            display_ptr,
+            surface_ptr,
+            width,
+            height,
+            want_ten_bit,
+        )
+    }
+
+    /// Creates the EGL surface on an X11 window.
+    ///
+    /// `window` is winit's `xcb_window_t`. The Xlib connection is opened here
+    /// (see `egl::XOpenDisplay` for why it cannot be borrowed from winit) and is
+    /// owned by the returned presenter.
+    ///
+    /// # Safety
+    ///
+    /// `window` must be a live X11 window that outlives the returned presenter,
+    /// and this must run on the thread that keeps the GL context current.
+    pub unsafe fn new_x11_window(
+        window: u64,
+        width: u32,
+        height: u32,
+        want_ten_bit: bool,
+    ) -> Result<Self, String> {
+        if window == 0 {
+            return Err("null X11 window".into());
+        }
+        let display_ptr = egl::XOpenDisplay(std::ptr::null());
+        if display_ptr.is_null() {
+            return Err("XOpenDisplay(NULL) failed: no X server reachable".into());
+        }
+        match Self::new_for_target(
+            SurfaceTarget::X11,
+            display_ptr,
+            window as usize as *mut c_void,
+            width,
+            height,
+            want_ten_bit,
+        ) {
+            Ok(presenter) => Ok(presenter),
+            Err(e) => {
+                egl::XCloseDisplay(display_ptr);
+                Err(e)
+            }
+        }
+    }
+
+    /// Shared construction path for both native targets.
+    ///
+    /// # Safety
+    ///
+    /// `display_ptr` must be the live connection for `target` and
+    /// `surface_ptr` the live `wl_surface` (Wayland) or window XID (X11); both
+    /// must outlive the returned presenter.
+    unsafe fn new_for_target(
+        target: SurfaceTarget,
+        display_ptr: *mut c_void,
+        surface_ptr: *mut c_void,
+        width: u32,
+        height: u32,
+        want_ten_bit: bool,
+    ) -> Result<Self, String> {
+        let plat_name = match target {
+            SurfaceTarget::Wayland => "Wayland",
+            SurfaceTarget::X11 => "X11",
+        };
+        if display_ptr.is_null() {
+            return Err(format!("null {plat_name} display"));
+        }
+        if surface_ptr.is_null() {
+            return Err(match target {
+                SurfaceTarget::Wayland => "null Wayland surface".to_string(),
+                SurfaceTarget::X11 => "null X11 window".to_string(),
+            });
         }
 
-        let display = egl::eglGetPlatformDisplay(
-            egl::EGL_PLATFORM_WAYLAND_KHR,
-            display_ptr,
-            std::ptr::null(),
-        );
+        let platform = match target {
+            SurfaceTarget::Wayland => egl::EGL_PLATFORM_WAYLAND_KHR,
+            SurfaceTarget::X11 => egl::EGL_PLATFORM_X11_KHR,
+        };
+        let display = egl::eglGetPlatformDisplay(platform, display_ptr, std::ptr::null());
         if display.is_null() {
-            return Err("eglGetPlatformDisplay(Wayland) returned no display".into());
+            return Err(format!(
+                "eglGetPlatformDisplay({plat_name}) returned no display"
+            ));
         }
 
         let mut major = 0;
@@ -160,7 +264,10 @@ impl Presenter {
                 std::ffi::CStr::from_ptr(s).to_string_lossy().into_owned()
             }
         };
-        log::info!("EGL {major}.{minor} ({version}) on wl_display {display_ptr:p}");
+        log::info!(
+            "EGL {major}.{minor} ({version}) on {} display {display_ptr:p}",
+            target.as_str()
+        );
 
         if egl::eglBindAPI(egl::EGL_OPENGL_ES_API) == egl::EGL_FALSE {
             let err = egl::eglGetError();
@@ -283,24 +390,33 @@ impl Presenter {
             return Err(format!("eglCreateContext failed: {}", egl::error_name(err)));
         }
 
-        let egl_window = egl::wl_egl_window_create(surface_ptr, width as c_int, height as c_int);
-        if egl_window.is_null() {
-            egl::eglDestroyContext(display, context);
-            return Err("wl_egl_window_create failed".into());
-        }
+        // Wayland needs the wl_egl_window wrapper EGL resizes through; X11 takes
+        // the window's XID directly, so there is no wrapper to create or destroy.
+        let egl_window = match target {
+            SurfaceTarget::Wayland => {
+                let w = egl::wl_egl_window_create(surface_ptr, width as c_int, height as c_int);
+                if w.is_null() {
+                    egl::eglDestroyContext(display, context);
+                    return Err("wl_egl_window_create failed".into());
+                }
+                w
+            }
+            SurfaceTarget::X11 => std::ptr::null_mut(),
+        };
+        let native_window: egl::EGLNativeWindowType = match target {
+            SurfaceTarget::Wayland => egl_window as egl::EGLNativeWindowType,
+            SurfaceTarget::X11 => surface_ptr,
+        };
 
-        let surface = egl::eglCreateWindowSurface(
-            display,
-            config,
-            egl_window as egl::EGLNativeWindowType,
-            std::ptr::null(),
-        );
+        let surface = egl::eglCreateWindowSurface(display, config, native_window, std::ptr::null());
         if surface.is_null() {
             let err = egl::eglGetError();
-            egl::wl_egl_window_destroy(egl_window);
+            if !egl_window.is_null() {
+                egl::wl_egl_window_destroy(egl_window);
+            }
             egl::eglDestroyContext(display, context);
             return Err(format!(
-                "eglCreateWindowSurface failed: {}",
+                "eglCreateWindowSurface failed on {plat_name}: {}",
                 egl::error_name(err)
             ));
         }
@@ -308,7 +424,9 @@ impl Presenter {
         if egl::eglMakeCurrent(display, surface, surface, context) == egl::EGL_FALSE {
             let err = egl::eglGetError();
             egl::eglDestroySurface(display, surface);
-            egl::wl_egl_window_destroy(egl_window);
+            if !egl_window.is_null() {
+                egl::wl_egl_window_destroy(egl_window);
+            }
             egl::eglDestroyContext(display, context);
             return Err(format!("eglMakeCurrent failed: {}", egl::error_name(err)));
         }
@@ -346,16 +464,23 @@ impl Presenter {
             surface_ptr,
             api_bound: "opengl-es",
             unavailable_started: None,
+            target,
+            owns_display: target == SurfaceTarget::X11,
         };
 
-        // Interval 0 is the fix: Mesa's Wayland WSI blocks inside
-        // eglSwapBuffers waiting for a frame callback at interval 1.
-        // Phase 2.11 controlled experiment: test-only interval override. The
-        // production caller still requests 0 unless this env var is set.
+        // Interval 0 is the fix on Wayland: Mesa's Wayland WSI blocks inside
+        // eglSwapBuffers waiting for a frame callback at interval 1. X11 has no
+        // such WSI behaviour, so it keeps the normal vsync interval; running X11
+        // unthrottled would simply burn a core.
+        // Phase 2.11 controlled experiment: test-only interval override.
+        let default_interval = match target {
+            SurfaceTarget::Wayland => 0,
+            SurfaceTarget::X11 => 1,
+        };
         let requested_interval = std::env::var("MUVRIX_TEST_EGL_SWAP_INTERVAL")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
-            .unwrap_or(0);
+            .unwrap_or(default_interval);
         presenter.set_swap_interval(requested_interval)?;
         log::info!(
             "swap interval requested={} applied={} range={}..={}",
@@ -423,6 +548,10 @@ impl Presenter {
         self.api_bound
     }
 
+    pub fn target(&self) -> SurfaceTarget {
+        self.target
+    }
+
     pub fn set_swap_interval(&mut self, interval: i32) -> Result<(), String> {
         if interval < self.interval_min || interval > self.interval_max {
             log::warn!(
@@ -459,8 +588,12 @@ impl Presenter {
         if width == self.width && height == self.height {
             return;
         }
-        unsafe {
-            egl::wl_egl_window_resize(self.egl_window, width as c_int, height as c_int, 0, 0);
+        // An X11 EGL surface tracks its drawable's size on the server; only the
+        // Wayland wl_egl_window carries a client-side size that needs updating.
+        if self.target == SurfaceTarget::Wayland {
+            unsafe {
+                egl::wl_egl_window_resize(self.egl_window, width as c_int, height as c_int, 0, 0);
+            }
         }
         self.width = width;
         self.height = height;
@@ -564,8 +697,14 @@ impl Presenter {
                 self.context = std::ptr::null_mut();
             }
             egl::eglReleaseThread();
+            if self.owns_display && !self.display_ptr.is_null() {
+                // We opened this Xlib connection ourselves.
+                egl::XCloseDisplay(self.display_ptr);
+                self.display_ptr = std::ptr::null_mut();
+                self.owns_display = false;
+            }
             if !self.display.is_null() {
-                // The connection belongs to winit, so never terminate it.
+                // A Wayland connection belongs to winit, so never terminate it.
                 self.display = std::ptr::null_mut();
             }
         }

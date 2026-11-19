@@ -22,6 +22,7 @@ pub mod stream;
 pub mod subsystems;
 pub mod thumbnail;
 pub mod track;
+pub mod vaapi;
 pub mod version;
 
 pub use autoeq::{AutoEqError, AutoEqFilter, AutoEqFilterType, AutoEqProfile};
@@ -77,4 +78,5 @@ pub use thumbnail::MpvThumbnailExtractor;
 pub use track::{
     AssOverrideMode, ChapterInfo, SubtitleJustify, SubtitleStyling, TrackInfo, TrackType,
 };
+pub use vaapi::{VaapiCapability, VaapiState};
 pub use version::ApiVersion;

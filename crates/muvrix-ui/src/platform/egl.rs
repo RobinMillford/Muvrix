@@ -142,6 +142,23 @@ extern "C" {
     pub fn wl_egl_window_get_height(egl_window: WlEglWindow) -> c_int;
 }
 
+/// Xlib `Display*`, used only by the X11 presenter.
+pub type X11Display = *mut c_void;
+
+// Minimal Xlib binding.
+//
+// The X11 presenter opens its *own* connection instead of borrowing winit's:
+// winit's X11 backend is XCB-based, and EGL's X11 platform requires an Xlib
+// `Display*`. The drawable itself is a server-side XID, so a second connection
+// referring to the same window is valid — unlike the Wayland case, where the
+// surface is tied to one connection and must never be duplicated.
+#[link(name = "X11")]
+extern "C" {
+    pub fn XOpenDisplay(name: *const c_char) -> X11Display;
+    pub fn XCloseDisplay(display: X11Display) -> c_int;
+    pub fn XSync(display: X11Display, discard: c_int) -> c_int;
+}
+
 /// Human-readable EGL error name for diagnostics.
 pub fn error_name(code: EGLint) -> &'static str {
     match code {

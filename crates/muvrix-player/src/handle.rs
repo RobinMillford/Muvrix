@@ -22,16 +22,40 @@ unsafe impl Sync for MpvHandle {}
 
 impl MpvHandle {
     /// Creates an uninitialized mpv instance (`mpv_create()`).
+    ///
+    /// The new instance is subscribed to the engine's own log stream at `warn`
+    /// unless `MUVRIX_MPV_LOG` selects another level. This is not optional
+    /// decoration: without it the engine's decoder diagnostics (driver load
+    /// failures, unsupported profiles, interop errors) are discarded, leaving
+    /// only the client-side summary "decoder unavailable" to explain a
+    /// fallback.
     pub fn new() -> Result<Self, MpvError> {
         let ctx = unsafe { libmpv_sys::mpv_create() };
         if ctx.is_null() {
             return Err(MpvError::NoMem);
         }
-        Ok(Self {
+        let handle = Self {
             ctx,
             is_destroyed: AtomicBool::new(false),
             retained_resources: std::sync::Mutex::new(Vec::new()),
-        })
+        };
+        let level = std::env::var("MUVRIX_MPV_LOG").unwrap_or_else(|_| "warn".to_string());
+        match handle.request_log_messages(&level) {
+            Ok(()) => log::debug!("mpv log stream subscribed at level '{level}'"),
+            Err(e) => log::warn!("mpv log subscription '{level}' rejected: {e}"),
+        }
+        Ok(handle)
+    }
+
+    /// Subscribes this handle to the engine log stream (`mpv_request_log_messages`).
+    ///
+    /// `level` is one of `no`, `fatal`, `error`, `warn`, `info`, `v`, `debug`,
+    /// `trace`; `no` unsubscribes. Messages arrive as [`Event::LogMessage`].
+    pub fn request_log_messages(&self, level: &str) -> Result<(), MpvError> {
+        let ctx = self.check_active()?;
+        let level = CString::new(level).map_err(|_| MpvError::InvalidParameter)?;
+        let rc = unsafe { libmpv_sys::mpv_request_log_messages(ctx, level.as_ptr()) };
+        MpvError::from_raw(rc)
     }
 
     /// Retains a reference-counted resource for the lifetime of this `MpvHandle`.

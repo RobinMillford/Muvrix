@@ -180,28 +180,28 @@ impl PlaybackController {
         }
 
         // Observe key properties to avoid high-frequency polling
-        handle.observe_property(PROP_TIME_POS, "time-pos", PropertyFormat::None)?;
-        handle.observe_property(PROP_DURATION, "duration", PropertyFormat::None)?;
-        handle.observe_property(PROP_PAUSE, "pause", PropertyFormat::None)?;
+        handle.observe_property(PROP_TIME_POS, "time-pos", PropertyFormat::Double)?;
+        handle.observe_property(PROP_DURATION, "duration", PropertyFormat::Double)?;
+        handle.observe_property(PROP_PAUSE, "pause", PropertyFormat::Flag)?;
         handle.observe_property(
             PROP_PAUSED_FOR_CACHE,
             "paused-for-cache",
-            PropertyFormat::None,
+            PropertyFormat::Flag,
         )?;
-        handle.observe_property(PROP_SPEED, "speed", PropertyFormat::None)?;
-        handle.observe_property(PROP_VOLUME, "volume", PropertyFormat::None)?;
-        handle.observe_property(PROP_MUTE, "mute", PropertyFormat::None)?;
+        handle.observe_property(PROP_SPEED, "speed", PropertyFormat::Double)?;
+        handle.observe_property(PROP_VOLUME, "volume", PropertyFormat::Double)?;
+        handle.observe_property(PROP_MUTE, "mute", PropertyFormat::Flag)?;
         handle.observe_property(PROP_TRACK_LIST, "track-list", PropertyFormat::None)?;
         handle.observe_property(PROP_CHAPTER_LIST, "chapter-list", PropertyFormat::None)?;
         handle.observe_property(PROP_HWDEC_CURRENT, "hwdec-current", PropertyFormat::None)?;
         handle.observe_property(PROP_CURRENT_AO, "current-ao", PropertyFormat::None)?;
-        handle.observe_property(PROP_EOF_REACHED, "eof-reached", PropertyFormat::None)?;
-        handle.observe_property(PROP_SUB_DELAY, "sub-delay", PropertyFormat::None)?;
-        handle.observe_property(PROP_SUB_VISIBILITY, "sub-visibility", PropertyFormat::None)?;
-        handle.observe_property(PROP_CHAPTER, "chapter", PropertyFormat::None)?;
+        handle.observe_property(PROP_EOF_REACHED, "eof-reached", PropertyFormat::Flag)?;
+        handle.observe_property(PROP_SUB_DELAY, "sub-delay", PropertyFormat::Double)?;
+        handle.observe_property(PROP_SUB_VISIBILITY, "sub-visibility", PropertyFormat::Flag)?;
+        handle.observe_property(PROP_CHAPTER, "chapter", PropertyFormat::Int64)?;
         handle.observe_property(PROP_PLAYLIST, "playlist", PropertyFormat::None)?;
-        handle.observe_property(PROP_PLAYLIST_POS, "playlist-pos", PropertyFormat::None)?;
-        handle.observe_property(PROP_PLAYLIST_COUNT, "playlist-count", PropertyFormat::None)?;
+        handle.observe_property(PROP_PLAYLIST_POS, "playlist-pos", PropertyFormat::Int64)?;
+        handle.observe_property(PROP_PLAYLIST_COUNT, "playlist-count", PropertyFormat::Int64)?;
         handle.observe_property(PROP_SECONDARY_SID, "secondary-sid", PropertyFormat::None)?;
         handle.observe_property(
             PROP_AUDIO_DEVICE_LIST,
@@ -400,12 +400,14 @@ impl PlaybackController {
     }
 
     /// Whether playback is paused waiting for cache refill.
+    ///
+    /// Reads the event-maintained cache only: `paused-for-cache` is observed
+    /// with a typed `PropertyFormat::Flag`, and the observation carries the
+    /// fresh value inline, so a synchronous round trip here is both
+    /// unnecessary and expensive (it blocks until the engine core answers,
+    /// which under decode pressure is tens to hundreds of milliseconds).
     pub fn is_paused_for_cache(&self) -> bool {
         self.is_buffering
-            || self
-                .handle
-                .get_property::<bool>("paused-for-cache")
-                .unwrap_or(false)
     }
 
     /// Configures demuxer cache limits and read-ahead bounds for network streaming.
@@ -1393,9 +1395,10 @@ impl PlaybackController {
             Event::PropertyChange {
                 reply_userdata,
                 name,
+                value,
                 ..
             } => {
-                self.handle_property_change(*reply_userdata, name);
+                self.handle_property_change(*reply_userdata, name, value.as_ref());
             }
             Event::PlaybackRestart | Event::Seek => {
                 if let Ok(pos) = self.handle.get_property::<f64>("time-pos") {
@@ -1416,20 +1419,37 @@ impl PlaybackController {
         }
     }
 
-    fn handle_property_change(&mut self, reply_userdata: u64, name: &str) {
+    fn handle_property_change(
+        &mut self,
+        reply_userdata: u64,
+        name: &str,
+        value: Option<&crate::event::PropertyChangeValue>,
+    ) {
         match reply_userdata {
             PROP_TIME_POS => {
-                if let Ok(pos) = self.handle.get_property::<f64>("time-pos") {
+                let pos = match value {
+                    Some(crate::event::PropertyChangeValue::Double(v)) => Some(*v),
+                    _ => self.handle.get_property::<f64>("time-pos").ok(),
+                };
+                if let Some(pos) = pos {
                     self.time_pos = pos;
                 }
             }
             PROP_DURATION => {
-                if let Ok(dur) = self.handle.get_property::<f64>("duration") {
+                let dur = match value {
+                    Some(crate::event::PropertyChangeValue::Double(v)) => Some(*v),
+                    _ => self.handle.get_property::<f64>("duration").ok(),
+                };
+                if let Some(dur) = dur {
                     self.duration = dur;
                 }
             }
             PROP_PAUSE => {
-                if let Ok(paused) = self.handle.get_property::<bool>("pause") {
+                let paused = match value {
+                    Some(crate::event::PropertyChangeValue::Flag(v)) => Some(*v),
+                    _ => self.handle.get_property::<bool>("pause").ok(),
+                };
+                if let Some(paused) = paused {
                     self.is_paused = paused;
                     if !self.is_buffering {
                         if self.state == PlaybackState::Playing && self.is_paused {
@@ -1441,7 +1461,11 @@ impl PlaybackController {
                 }
             }
             PROP_PAUSED_FOR_CACHE => {
-                if let Ok(caching) = self.handle.get_property::<bool>("paused-for-cache") {
+                let caching = match value {
+                    Some(crate::event::PropertyChangeValue::Flag(v)) => Some(*v),
+                    _ => self.handle.get_property::<bool>("paused-for-cache").ok(),
+                };
+                if let Some(caching) = caching {
                     self.is_buffering = caching;
                     if caching
                         && (self.state == PlaybackState::Playing
@@ -1458,17 +1482,29 @@ impl PlaybackController {
                 }
             }
             PROP_SPEED => {
-                if let Ok(speed) = self.handle.get_property::<f64>("speed") {
+                let speed = match value {
+                    Some(crate::event::PropertyChangeValue::Double(v)) => Some(*v),
+                    _ => self.handle.get_property::<f64>("speed").ok(),
+                };
+                if let Some(speed) = speed {
                     self.audio.on_speed_changed(speed);
                 }
             }
             PROP_VOLUME => {
-                if let Ok(vol) = self.handle.get_property::<f64>("volume") {
+                let vol = match value {
+                    Some(crate::event::PropertyChangeValue::Double(v)) => Some(*v),
+                    _ => self.handle.get_property::<f64>("volume").ok(),
+                };
+                if let Some(vol) = vol {
                     self.audio.on_volume_changed(vol);
                 }
             }
             PROP_MUTE => {
-                if let Ok(muted) = self.handle.get_property::<bool>("mute") {
+                let muted = match value {
+                    Some(crate::event::PropertyChangeValue::Flag(v)) => Some(*v),
+                    _ => self.handle.get_property::<bool>("mute").ok(),
+                };
+                if let Some(muted) = muted {
                     self.audio.on_mute_changed(muted);
                 }
             }
@@ -1483,7 +1519,11 @@ impl PlaybackController {
                 }
             }
             PROP_CHAPTER => {
-                if let Ok(ch) = self.handle.get_property::<i64>("chapter") {
+                let ch = match value {
+                    Some(crate::event::PropertyChangeValue::Int64(v)) => Some(*v),
+                    _ => self.handle.get_property::<i64>("chapter").ok(),
+                };
+                if let Some(ch) = ch {
                     let ch_opt = if ch >= 0 { Some(ch) } else { None };
                     self.track.on_chapter_changed(ch_opt);
                 }
@@ -1505,17 +1545,29 @@ impl PlaybackController {
                 self.audio.on_device_list_changed(&self.handle);
             }
             PROP_SUB_DELAY => {
-                if let Ok(delay) = self.handle.get_property::<f64>("sub-delay") {
+                let delay = match value {
+                    Some(crate::event::PropertyChangeValue::Double(v)) => Some(*v),
+                    _ => self.handle.get_property::<f64>("sub-delay").ok(),
+                };
+                if let Some(delay) = delay {
                     self.track.on_sub_delay_changed(delay);
                 }
             }
             PROP_SUB_VISIBILITY => {
-                if let Ok(vis) = self.handle.get_property::<bool>("sub-visibility") {
+                let vis = match value {
+                    Some(crate::event::PropertyChangeValue::Flag(v)) => Some(*v),
+                    _ => self.handle.get_property::<bool>("sub-visibility").ok(),
+                };
+                if let Some(vis) = vis {
                     self.track.on_sub_visibility_changed(vis);
                 }
             }
             PROP_EOF_REACHED => {
-                if let Ok(eof) = self.handle.get_property::<bool>("eof-reached") {
+                let eof = match value {
+                    Some(crate::event::PropertyChangeValue::Flag(v)) => Some(*v),
+                    _ => self.handle.get_property::<bool>("eof-reached").ok(),
+                };
+                if let Some(eof) = eof {
                     if eof && self.state != PlaybackState::Idle {
                         self.state = PlaybackState::Ended;
                     }

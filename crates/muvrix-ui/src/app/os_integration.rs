@@ -184,39 +184,55 @@ impl MuvrixApp {
         self.hdr_state = Some(state);
 
         // Fallback: a hardware mode was requested but software was selected.
+        //
+        // This is the one place where the *reason* matters more than the
+        // decision. The VA-API probe ran before the engine existed, so a failed
+        // decoder can be attributed to a concrete cause (no render node, libva
+        // that cannot open the installed driver, driver initialisation failure)
+        // rather than reported as "unavailable".
+        //
+        // No `video-reload` is issued here. The engine rejects a reload of a
+        // decoder that never initialised, which is why every retry used to end
+        // in "Command execution error" *after* the decoder had already failed;
+        // the retry could not have succeeded and only obscured the cause. A
+        // corrective mode is remembered for the next load instead, and this
+        // file keeps the software path rather than churning the decoder.
         let expects_hardware = self.controller.requested_hwdec() != "no"
             && !self.controller.requested_hwdec().is_empty();
         if expects_hardware && observation.path == DecodePath::Software {
-            if let Some(next) = self.decode_policy.next_mode(self.decode_attempt) {
-                let _ = self.controller.set_hwdec_mode(next);
-                // Force a decoder reinit so the retry is observable in this
-                // session. If the command is unavailable, the new mode applies
-                // on the next file load instead (logged, not assumed).
-                let reload = self.controller.handle().command(&["video-reload"]);
-                self.decode_attempt += 1;
-                self.decode_settled = false;
-                match reload {
-                    Ok(()) => log::warn!(
-                        "Requested hardware decoding but engine selected software; \
-                         retrying with hwdec='{next}' (video-reload issued)"
-                    ),
-                    Err(e) => log::warn!(
-                        "Requested hardware decoding but engine selected software; \
-                         hwdec='{next}' set but video-reload failed ({e}); it applies on next load"
-                    ),
-                }
-                self.status_message = format!(
-                    "Hardware decoding unavailable ({}), retrying with '{next}'",
-                    observation.active
-                );
-                return;
-            }
+            let reason = self.vaapi.fallback_reason().unwrap_or_else(|| {
+                format!(
+                    "engine reported hwdec='{}' with pixel format '{}'",
+                    observation.active, observation.pixel_format
+                )
+            });
             log::error!(
-                "Hardware decoding unavailable: all decoder modes exhausted ({:?})",
-                self.decode_policy.candidates()
+                "Hardware decoding unavailable: {reason} (requested='{}', observed='{}', \
+                 pixelformat='{}')",
+                self.controller.requested_hwdec(),
+                observation.active,
+                observation.pixel_format
             );
-            self.status_message =
-                "Software decoding — hardware acceleration unavailable".to_string();
+            match self.decode_policy.next_mode(self.decode_attempt) {
+                Some(next) => {
+                    self.decode_attempt += 1;
+                    match self.controller.set_hwdec_mode(next) {
+                        Ok(()) => log::warn!(
+                            "Decoder fallback: hwdec='{next}' will be requested on the next \
+                             load (this item stays on software: {reason})"
+                        ),
+                        Err(e) => log::warn!(
+                            "Decoder fallback: could not prepare hwdec='{next}' ({e}); it \
+                             applies on next load at the earliest"
+                        ),
+                    }
+                }
+                None => log::error!(
+                    "Hardware decoding unavailable: all decoder modes exhausted ({:?})",
+                    self.decode_policy.candidates()
+                ),
+            }
+            self.status_message = format!("Software decoding — {reason}");
         } else {
             self.status_message = format!("{}{hdr_note}", observation.describe());
         }
@@ -328,6 +344,33 @@ impl MuvrixApp {
         }
         for event in events {
             match event {
+                // The engine's own log stream. Without this the decoder's
+                // diagnostics never leave libmpv, which is how a VA-API driver
+                // that could not be opened looked like a silent software
+                // fallback. Warnings and errors are forwarded verbatim; the
+                // subscription level is set in `MpvHandle::new`.
+                Event::LogMessage {
+                    prefix,
+                    text,
+                    log_level,
+                    ..
+                } => {
+                    let text = text.trim_end();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let scope = if prefix.is_empty() {
+                        "mpv".to_string()
+                    } else {
+                        format!("mpv/{prefix}")
+                    };
+                    match log_level {
+                        l if l <= 10 => log::error!("{scope}: {text}"),
+                        l if l <= 20 => log::warn!("{scope}: {text}"),
+                        l if l <= 30 => log::info!("{scope}: {text}"),
+                        _ => log::debug!("{scope}: {text}"),
+                    }
+                }
                 Event::FileLoaded => {
                     let (w, h) = self.controller.video_dimensions();
                     let vfmt = self.controller.video_format();

@@ -764,7 +764,14 @@ impl EqualizerManager {
 
         if settings.spectrum_visualizer_enabled {
             filters.push("@vis:lavfi=[astats=metadata=1:reset=1]".to_string());
-            filters.push("@spec:lavfi=[aspectralstats]".to_string());
+            // aspectralstats is an FFT analysis tap; at its default settings
+            // it does far more per-sample work than the playloop can spare,
+            // and a loaded engine starves the audio clock the video cadence
+            // is paced against (measured: 4K HEVC HDR10 drops from 23.976 FPS
+            // to ~5 FPS with the default window). 8192-sample windows with no
+            // overlap (~6 FFTs per second per channel at 48 kHz) keep the
+            // 5 spectral features the visualizer needs at negligible cost.
+            filters.push("@spec:lavfi=[aspectralstats=win_size=8192:overlap=0]".to_string());
         }
 
         filters.join(",")
@@ -906,5 +913,49 @@ impl EqualizerManager {
             Self::set_audio_device(handle, "auto")?;
             Ok("auto".to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings_with_visualizer() -> EqualizerSettings {
+        EqualizerSettings {
+            is_enabled: false,
+            spectrum_visualizer_enabled: true,
+            ..EqualizerSettings::default()
+        }
+    }
+
+    #[test]
+    fn spectrum_analysis_uses_cheap_fft_configuration() {
+        // A 4K HDR workload cannot afford FFmpeg's full-spectral FFT defaults
+        // on the shared playloop (measured: 23.976 FPS collapses to ~5 FPS).
+        // The shipped default must use a small overlap-free analysis window.
+        let chain = EqualizerManager::build_filter_string(&settings_with_visualizer());
+        assert!(
+            chain.contains("aspectralstats=win_size=8192:overlap=0"),
+            "expected the cheap aspectralstats configuration, got: {chain}"
+        );
+        assert!(
+            !chain.contains("[aspectralstats]"),
+            "default factory aspectralstats configuration is too expensive: {chain}"
+        );
+    }
+
+    #[test]
+    fn analysis_filters_are_only_present_when_visualizer_enabled() {
+        let mut s = settings_with_visualizer();
+        s.spectrum_visualizer_enabled = false;
+        let chain = EqualizerManager::build_filter_string(&s);
+        assert!(
+            !chain.contains("astats"),
+            "unexpected analysis filter: {chain}"
+        );
+        assert!(
+            !chain.contains("aspectralstats"),
+            "unexpected analysis filter: {chain}"
+        );
     }
 }

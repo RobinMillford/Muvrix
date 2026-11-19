@@ -64,6 +64,7 @@ fn test_subsystem_state_synchronization_across_property_events() {
         reply_userdata: muvrix_player::controller::PROP_VOLUME,
         name: "volume".to_string(),
         format: muvrix_player::PropertyFormat::None,
+        value: None,
     });
     assert!(controller.volume() >= 0.0);
     assert_eq!(controller.audio().volume(), controller.volume());
@@ -73,6 +74,7 @@ fn test_subsystem_state_synchronization_across_property_events() {
         reply_userdata: muvrix_player::controller::PROP_MUTE,
         name: "mute".to_string(),
         format: muvrix_player::PropertyFormat::None,
+        value: None,
     });
     assert_eq!(controller.is_muted(), controller.audio().is_muted());
 
@@ -81,6 +83,7 @@ fn test_subsystem_state_synchronization_across_property_events() {
         reply_userdata: muvrix_player::controller::PROP_SPEED,
         name: "speed".to_string(),
         format: muvrix_player::PropertyFormat::None,
+        value: None,
     });
     assert_eq!(controller.speed(), controller.audio().speed());
 
@@ -89,6 +92,7 @@ fn test_subsystem_state_synchronization_across_property_events() {
         reply_userdata: muvrix_player::controller::PROP_HWDEC_CURRENT,
         name: "hwdec-current".to_string(),
         format: muvrix_player::PropertyFormat::None,
+        value: None,
     });
     assert_eq!(
         controller.hwdec_current(),
@@ -100,6 +104,7 @@ fn test_subsystem_state_synchronization_across_property_events() {
         reply_userdata: muvrix_player::controller::PROP_SUB_DELAY,
         name: "sub-delay".to_string(),
         format: muvrix_player::PropertyFormat::None,
+        value: None,
     });
     assert_eq!(controller.sub_delay(), controller.track().sub_delay());
 }

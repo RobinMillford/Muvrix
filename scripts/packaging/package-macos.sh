@@ -67,7 +67,7 @@ cat << 'EOF' > "$APP_BUNDLE/Contents/Info.plist"
     <key>CFBundleIconFile</key>
     <string>Muvrix</string>
     <key>CFBundleIdentifier</key>
-    <string>io.muvrix.desktop</string>
+    <string>org.muvrix.Muvrix</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

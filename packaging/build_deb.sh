@@ -29,6 +29,18 @@ mkdir -p "$STAGING_DIR/usr/bin"
 mkdir -p "$STAGING_DIR/usr/share/applications"
 mkdir -p "$STAGING_DIR/usr/share/metainfo"
 mkdir -p "$STAGING_DIR/usr/share/doc/muvrix"
+mkdir -p "$STAGING_DIR/usr/lib/muvrix"
+
+# 0. Private media runtime (libmpv 0.42 + ffmpeg + libplacebo). It is shipped
+#    inside the package because no supported distribution provides libmpv 0.42.
+if [ ! -d "target/runtime/lib" ]; then
+    echo "[*] Private runtime missing; building it first..."
+    bash packaging/build_runtime_bundle.sh
+fi
+cp -a target/runtime/lib "$STAGING_DIR/usr/lib/muvrix/lib"
+cp -a target/runtime/share/licenses "$STAGING_DIR/usr/lib/muvrix/licenses"
+cp target/runtime/runtime-manifest.json "$STAGING_DIR/usr/lib/muvrix/runtime-manifest.json"
+chmod -R go-w "$STAGING_DIR/usr/lib/muvrix"
 
 # 1. Resolve the release binary. Packages must ship a binary built against
 #    Ubuntu 24.04's C library and OpenSSL ABI, not the development host's.
@@ -42,12 +54,17 @@ if [ ! -f "$BIN_SOURCE" ]; then
     echo "[-] Release binary not found: $BIN_SOURCE" >&2
     exit 1
 fi
-cp "$BIN_SOURCE" "$STAGING_DIR/usr/bin/muvrix"
+cp "$BIN_SOURCE" "$STAGING_DIR/usr/lib/muvrix/muvrix"
+chmod 755 "$STAGING_DIR/usr/lib/muvrix/muvrix"
+
+# Launcher: prepends the private runtime to LD_LIBRARY_PATH and execs the binary.
+sed -e 's|@LIBDIR@|/usr/lib/muvrix/lib|' -e 's|@BINARY@|/usr/lib/muvrix/muvrix|' \
+    packaging/launcher/muvrix-launcher.sh > "$STAGING_DIR/usr/bin/muvrix"
 chmod 755 "$STAGING_DIR/usr/bin/muvrix"
 
 # 2. Desktop entry and AppStream metainfo
-sed 's|^Exec=.*|Exec=muvrix %U|' packaging/appimage/muvrix.desktop > "$STAGING_DIR/usr/share/applications/io.muvrix.Muvrix.desktop"
-chmod 644 "$STAGING_DIR/usr/share/applications/io.muvrix.Muvrix.desktop"
+sed 's|^Exec=.*|Exec=muvrix %U|' packaging/appimage/muvrix.desktop > "$STAGING_DIR/usr/share/applications/org.muvrix.Muvrix.desktop"
+chmod 644 "$STAGING_DIR/usr/share/applications/org.muvrix.Muvrix.desktop"
 
 cp packaging/metainfo/org.muvrix.Muvrix.metainfo.xml "$STAGING_DIR/usr/share/metainfo/org.muvrix.Muvrix.metainfo.xml"
 chmod 644 "$STAGING_DIR/usr/share/metainfo/org.muvrix.Muvrix.metainfo.xml"
@@ -57,15 +74,15 @@ for size in 16 24 32 48 64 128 256 512; do
     ICON_DIR="$STAGING_DIR/usr/share/icons/hicolor/${size}x${size}/apps"
     mkdir -p "$ICON_DIR"
     if [ -f "assets/branding/icons/muvrix-${size}x${size}.png" ]; then
-        cp "assets/branding/icons/muvrix-${size}x${size}.png" "$ICON_DIR/io.muvrix.Muvrix.png"
-        chmod 644 "$ICON_DIR/io.muvrix.Muvrix.png"
+        cp "assets/branding/icons/muvrix-${size}x${size}.png" "$ICON_DIR/org.muvrix.Muvrix.png"
+        chmod 644 "$ICON_DIR/org.muvrix.Muvrix.png"
     fi
 done
 
 # Scalable SVG icon
 mkdir -p "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps"
-cp assets/branding/muvrix-logo.svg "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps/io.muvrix.Muvrix.svg"
-chmod 644 "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps/io.muvrix.Muvrix.svg"
+cp assets/branding/muvrix-logo.svg "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps/org.muvrix.Muvrix.svg"
+chmod 644 "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps/org.muvrix.Muvrix.svg"
 
 # 4. Compose the binary control file from the binary package stanza.
 #
@@ -113,7 +130,11 @@ fi
 # ${shlibs:Depends} is produced by dpkg-shlibdeps during a source build. This
 # package is assembled from a prebuilt binary, so the runtime library set is
 # declared explicitly and merged into the binary stanza's dependency list.
-SHLIBS_DEPENDS="libmpv2 (>= 0.42.0), libc6 (>= 2.34), libegl1, libgl1, libdbus-1-3, libwayland-client0, libwayland-egl1, libxkbcommon0, libxkbcommon-x11-0"
+# libmpv is bundled privately, so the package does not depend on the host's
+# libmpv2 (which would be 0.37 on Ubuntu 24.04 and crashes this build). What it
+# does need from the host is a C library new enough for the private runtime, the
+# graphics stack, D-Bus and OpenSSL.
+SHLIBS_DEPENDS="libc6 (>= 2.39), libegl1, libgl1, libdbus-1-3, libssl3 (>= 3.0.0), libwayland-client0, libwayland-egl1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libva2, libva-drm2, libva-x11-2"
 DEPENDS="$(control_field "$BINARY_STANZA" "Depends")"
 DEPENDS="${DEPENDS//\$\{shlibs:Depends\}/$SHLIBS_DEPENDS}"
 DEPENDS="${DEPENDS//\$\{misc:Depends\}/}"
@@ -133,6 +154,12 @@ DEPENDS="$(printf '%s' "$DEPENDS" | awk -F', *' '
     }')"
 
 INSTALLED_SIZE=$(du -sk "$STAGING_DIR/usr" | cut -f1)
+
+# The private runtime is large; keep md5sums and the archive in sync with it.
+if [ ! -f "$STAGING_DIR/usr/lib/muvrix/lib/libmpv.so.2" ]; then
+    echo "[-] Private runtime payload is incomplete (libmpv.so.2 missing)" >&2
+    exit 1
+fi
 
 {
     echo "Package: ${PKG_FIELD}"
