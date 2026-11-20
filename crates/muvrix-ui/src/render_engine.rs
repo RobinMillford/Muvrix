@@ -80,6 +80,35 @@ mod pacing_tests {
         assert_eq!(PacingMode::from_value("scheduled"), PacingMode::Scheduled);
         assert_eq!(PacingMode::from_value("blocking"), PacingMode::Blocking);
     }
+
+    #[test]
+    fn nanosecond_target_time_is_normalized_to_microseconds() {
+        // Real values measured from the libmpv 0.42 build MUVRIX links: the
+        // target sits ~1000x above the engine clock and advances by one frame
+        // period in nanoseconds.
+        let now_us = 11_181_879;
+        let target_ns = 11_157_579_500;
+        let got = normalize_target_time(target_ns, Some(now_us));
+        assert_eq!(got, 11_157_579, "ns target must be scaled into us");
+        let delta = got - now_us;
+        assert!(
+            delta.abs() < 1_000_000,
+            "delta {delta} us is not a sane lead"
+        );
+    }
+
+    #[test]
+    fn microsecond_target_time_is_left_alone() {
+        // A build that follows the documented contract reports microseconds.
+        let now_us = Some(11_181_879);
+        let target_us = 11_157_579;
+        assert_eq!(normalize_target_time(target_us, now_us), target_us);
+    }
+
+    #[test]
+    fn normalization_is_a_no_op_without_a_clock_base() {
+        assert_eq!(normalize_target_time(11_157_579_500, None), 11_157_579_500);
+    }
 }
 
 /// Construction options that differ between the eframe shell and the native runner.
@@ -192,6 +221,34 @@ pub struct RenderEngine {
     /// with a bottom-left origin. Consumed by the shell's composite pass.
     last_video_rect: [i32; 4],
     gpu: crate::gpu_timing::GpuTiming,
+}
+
+/// Normalizes the engine's `target_time` into the microsecond clock used by
+/// [`RenderEngine::now_us`].
+///
+/// `mpv/render.h` documents `target_time` as "the same unit and base as
+/// `mpv_get_time_us()`", i.e. microseconds. The libmpv 0.42 build this
+/// application links reports **nanoseconds** instead: measured on this machine,
+/// consecutive frames advance the value by 16,666,685 on 60 fps content and by
+/// 42,000,000 on 23.976 fps content — exactly one frame period in ns — and it
+/// sits ~1000x above `mpv_get_time_us()` at the same instant.
+///
+/// Treating those as microseconds made `delta_us` ~1000x too large, so the
+/// computed wait always hit its 50 ms cap. At 60 fps that is three frame
+/// periods, so the paced wake fired after the frame it was meant to present was
+/// already due; at 24 fps a 50 ms cap is only 1.2 frame periods, which is why
+/// the defect surfaced only at 60 fps.
+///
+/// The unit is derived from the value rather than assumed, so a build that
+/// follows the documented contract keeps working: a genuine target is at most a
+/// few hundred milliseconds beyond `now`, so a gap above one second can only mean
+/// the engine reported nanoseconds.
+pub(crate) fn normalize_target_time(target_time: i64, now_us: Option<i64>) -> i64 {
+    const MAX_PLAUSIBLE_LEAD_US: i64 = 1_000_000;
+    match now_us {
+        Some(now) if target_time - now > MAX_PLAUSIBLE_LEAD_US => target_time / 1_000,
+        _ => target_time,
+    }
 }
 
 impl RenderEngine {
@@ -556,7 +613,9 @@ impl RenderEngine {
                 true,
             );
             let target = match &frame {
-                Ok(info) if info.valid && info.target_time > 0 => Some(info.target_time),
+                Ok(info) if info.valid && info.target_time > 0 => {
+                    Some(normalize_target_time(info.target_time, self.now_us()))
+                }
                 _ => None,
             };
             let elapsed = started.elapsed();
@@ -763,6 +822,7 @@ impl RenderEngine {
             "egui_repaint_after",
         );
         if wait_us > 0 {
+            // Future target: wake shortly before it.
             let capped = (wait_us as u64).min(50_000);
             ctx.request_repaint_after(Duration::from_micros(capped));
         }
