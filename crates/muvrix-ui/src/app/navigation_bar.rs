@@ -21,9 +21,10 @@ impl MuvrixApp {
                     .inner_margin(egui::Margin::symmetric(12, 6)),
             )
             .show(ctx, |ui| {
-                if !self.ui_overlay_visible {
-                    return;
-                }
+                // The navigation bar is application chrome, not part of the
+                // player HUD. Tying it to HUD visibility used to collapse the
+                // panel to its margins when the HUD faded, which resized the
+                // video on every hover transition.
                 ui.add_space(3.0);
                 let available_w = ui.available_width();
 
@@ -48,6 +49,10 @@ impl MuvrixApp {
                     ui.add_space(4.0);
 
                     let is_wide = available_w >= 1400.0;
+                    // Below this width the header cannot carry tabs, file
+                    // actions, title and the right-hand toolbar side by side;
+                    // egui would overlap them instead of clipping.
+                    let is_narrow = available_w < 900.0;
                     if is_wide {
                         // At 1400px+ show all 8 tabs
                         for view in &[
@@ -74,14 +79,21 @@ impl MuvrixApp {
                             }
                         }
                     } else {
-                        // At <1400px show primary tabs + More dropdown for secondary tabs
-                        for view in &[
-                            AppView::Home,
-                            AppView::Player,
-                            AppView::Library,
-                            AppView::Playlist,
-                            AppView::Settings,
-                        ] {
+                        // At <1400px show primary tabs + More dropdown for
+                        // secondary tabs; at <900px only the three core tabs
+                        // stay inline and everything else moves into More.
+                        let primary: &[AppView] = if is_narrow {
+                            &[AppView::Home, AppView::Player, AppView::Library]
+                        } else {
+                            &[
+                                AppView::Home,
+                                AppView::Player,
+                                AppView::Library,
+                                AppView::Playlist,
+                                AppView::Settings,
+                            ]
+                        };
+                        for view in primary {
                             let is_active = self.current_view == *view;
                             let text = if *view == AppView::Playlist
                                 && self.controller.playlist_count() > 0
@@ -97,11 +109,21 @@ impl MuvrixApp {
                         }
 
                         // Secondary views dropdown (Files / Lyrics / History)
-                        let secondary_views = [
-                            (AppView::Browser, "Files (Browser)"),
-                            (AppView::Lyrics, "Lyrics"),
-                            (AppView::Recent, "History (Recent)"),
-                        ];
+                        let secondary_views: &[(AppView, &str)] = if is_narrow {
+                            &[
+                                (AppView::Browser, "Files (Browser)"),
+                                (AppView::Playlist, "Playlist"),
+                                (AppView::Lyrics, "Lyrics"),
+                                (AppView::Recent, "History (Recent)"),
+                                (AppView::Settings, "Settings"),
+                            ]
+                        } else {
+                            &[
+                                (AppView::Browser, "Files (Browser)"),
+                                (AppView::Lyrics, "Lyrics"),
+                                (AppView::Recent, "History (Recent)"),
+                            ]
+                        };
                         let active_secondary = secondary_views.iter().find(|(v, _)| *v == self.current_view);
                         let more_label = if let Some((_, label)) = active_secondary {
                             format!("{} ▾", label)
@@ -121,9 +143,9 @@ impl MuvrixApp {
                             .selected_text(more_rich)
                             .show_ui(ui, |ui| {
                                 for (view, label) in secondary_views {
-                                    let is_sel = self.current_view == view;
+                                    let is_sel = self.current_view == *view;
                                     if ui_components::nav_tab(ui, label, is_sel).clicked() {
-                                        self.current_view = view;
+                                        self.current_view = *view;
                                     }
                                 }
                             });
@@ -219,27 +241,35 @@ impl MuvrixApp {
                         0.0
                     };
                     let right_padding = 40.0;
-                    let total_right_w = player_extra_w + dev_w + help_w + badge_w + right_padding;
+                    let total_right_w = if is_narrow {
+                        0.0
+                    } else {
+                        player_extra_w + dev_w + help_w + badge_w + right_padding
+                    };
 
                     let remaining_w = ui.available_width();
                     let title_w = (remaining_w - total_right_w).max(40.0);
 
-                    // Allocated middle title with truncation guarantee
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(title_w, ui.available_height()),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&file_label)
-                                        .strong()
-                                        .color(label_color),
+                    // Allocated middle title with truncation guarantee. Narrow
+                    // windows drop it entirely: the player top overlay already
+                    // names the file, and a 40 px stub only added noise.
+                    if !is_narrow {
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(title_w, ui.available_height()),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&file_label)
+                                            .strong()
+                                            .color(label_color),
+                                    )
+                                    .truncate(),
                                 )
-                                .truncate(),
-                            )
-                            .on_hover_text(&file_label);
-                        },
-                    );
+                                .on_hover_text(&file_label);
+                            },
+                        );
+                    }
 
                     // Right-aligned toolbar section
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -266,6 +296,9 @@ impl MuvrixApp {
                             ui.separator();
                         }
 
+                        // Profile and developer menus are the first things to
+                        // go when the header has no room for them.
+                        if !is_narrow {
                         // Phase E7: Profile Selector Combo Box
                         let active_name = self
                             .active_profile
@@ -400,6 +433,7 @@ impl MuvrixApp {
                                     ]);
                                 }
                             });
+                        }
 
                         ui.separator();
 
@@ -426,7 +460,7 @@ impl MuvrixApp {
                         }
 
                         // Stream metadata badge
-                        if has_media_meta {
+                        if has_media_meta && !is_narrow {
                             ui.separator();
                             let v_clean = format_codec_name(&vfmt);
                             let a_clean = format_codec_name(&afmt);
