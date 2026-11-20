@@ -92,6 +92,31 @@ jobs:
       - name: Native Link Smoke Test & Strict ABI Assertion (libmpv C API 2.6)
         run: cargo test -p libmpv-sys --test link_smoke_test -- --nocapture
 
+      # The media fixtures under docs/tests/fixtures/ are not tracked in git
+      # (the directory is ignored so user media cannot be committed by
+      # accident). Generate the deterministic 3 s 640x360 H.264 + AAC clip here
+      # so the real-runtime playback tests below actually decode media instead
+      # of skipping. The file must match what those tests assert: 640x360,
+      # h264 video, ~3.0 s duration.
+      - name: Generate deterministic playback fixture
+        run: |
+          set -euo pipefail
+          mkdir -p docs/tests/fixtures
+          ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i "testsrc=size=640x360:rate=30:duration=3" \
+            -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=3" \
+            -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 30 \
+            -c:a aac -b:a 64k -shortest \
+            docs/tests/fixtures/test_video.mp4
+          ffprobe -v error -show_entries stream=codec_name,width,height \
+            -of default=nw=1 docs/tests/fixtures/test_video.mp4
+
+      # Real libmpv runtime decode: opens the fixture through the actual engine,
+      # with software decoding and null outputs so no GPU or driver is needed.
+      # This verifies playback initialisation and decode, NOT GPU rendering.
+      - name: libmpv Runtime Playback Test (software decode, null outputs)
+        run: cargo test -p muvrix-player --test playback_test -- --nocapture --test-threads=1
+
       - name: Run Test Suite (Headless Runtime)
         run: cargo test --workspace --all-targets
 
