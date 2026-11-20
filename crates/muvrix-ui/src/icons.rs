@@ -43,6 +43,13 @@ pub enum Icon {
     Library,
     Sliders,
     Lyrics,
+    AspectRatio,
+    Crop,
+    ZoomIn,
+    ZoomOut,
+    Screenshot,
+    Pin,
+    Information,
 }
 
 /// Paints a vector icon into the designated bounding rectangle.
@@ -408,6 +415,61 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
 
             painter.line_segment([at(0.75, 0.15), at(0.75, 0.85)], stroke);
             painter.circle_filled(at(0.75, 0.30), 2.5_f32, color);
+        }
+
+        Icon::AspectRatio => {
+            let stroke = Stroke::new(1.4_f32, color);
+            let outer = Rect::from_min_max(at(0.12, 0.22), at(0.88, 0.78));
+            painter.rect_stroke(outer, 2.0_f32, stroke, StrokeKind::Inside);
+            // Corner tick marks suggesting a frame with a source ratio.
+            painter.line_segment([at(0.30, 0.22), at(0.30, 0.34)], stroke);
+            painter.line_segment([at(0.70, 0.66), at(0.70, 0.78)], stroke);
+            painter.line_segment([at(0.12, 0.42), at(0.22, 0.42)], stroke);
+            painter.line_segment([at(0.78, 0.58), at(0.88, 0.58)], stroke);
+        }
+
+        Icon::Crop => {
+            let stroke = Stroke::new(1.4_f32, color);
+            painter.line_segment([at(0.24, 0.10), at(0.24, 0.76)], stroke);
+            painter.line_segment([at(0.24, 0.76), at(0.90, 0.76)], stroke);
+            painter.line_segment([at(0.10, 0.24), at(0.76, 0.24)], stroke);
+            painter.line_segment([at(0.76, 0.24), at(0.76, 0.90)], stroke);
+        }
+
+        Icon::ZoomIn | Icon::ZoomOut => {
+            let stroke = Stroke::new(1.4_f32, color);
+            painter.circle_stroke(at(0.44, 0.44), w * 0.28, stroke);
+            painter.line_segment([at(0.66, 0.66), at(0.88, 0.88)], stroke);
+            painter.line_segment([at(0.32, 0.44), at(0.56, 0.44)], stroke);
+            if matches!(icon, Icon::ZoomIn) {
+                painter.line_segment([at(0.44, 0.32), at(0.44, 0.56)], stroke);
+            }
+        }
+
+        Icon::Screenshot => {
+            let stroke = Stroke::new(1.3_f32, color);
+            let body = Rect::from_min_max(at(0.10, 0.30), at(0.90, 0.82));
+            painter.rect_stroke(body, 2.0_f32, stroke, StrokeKind::Inside);
+            painter.circle_stroke(at(0.50, 0.57), w * 0.16, stroke);
+            painter.rect_filled(
+                Rect::from_min_max(at(0.34, 0.20), at(0.58, 0.32)),
+                1.0_f32,
+                color,
+            );
+        }
+
+        Icon::Pin => {
+            let stroke = Stroke::new(1.4_f32, color);
+            painter.circle_filled(at(0.50, 0.34), w * 0.18, color);
+            painter.line_segment([at(0.50, 0.50), at(0.50, 0.88)], stroke);
+            painter.line_segment([at(0.32, 0.62), at(0.68, 0.62)], stroke);
+        }
+
+        Icon::Information => {
+            let stroke = Stroke::new(1.4_f32, color);
+            painter.circle_stroke(at(0.50, 0.50), w * 0.38, stroke);
+            painter.circle_filled(at(0.50, 0.30), 2.0_f32, color);
+            painter.line_segment([at(0.50, 0.42), at(0.50, 0.70)], stroke);
         }
 
         Icon::Lyrics => {

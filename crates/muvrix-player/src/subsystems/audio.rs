@@ -370,84 +370,19 @@ impl AudioSubsystem {
     }
 
     /// Queries real-time audio spectrum telemetry from libmpv's active passthrough filter chain.
+    ///
+    /// This performs seven blocking `mpv_get_property` round trips. The engine
+    /// core services those on its playloop, which under 4K decode load can defer
+    /// a reply by tens of milliseconds. Callers must therefore not run it on a
+    /// presentation thread; [`spectrum_telemetry_for`] is the handle-only entry
+    /// point a background sampler should use.
     pub fn spectrum_telemetry(
         &self,
         handle: &MpvHandle,
         is_playing: bool,
         is_paused: bool,
     ) -> crate::spectrum::SpectrumTelemetry {
-        use crate::spectrum::SpectrumTelemetry;
-
-        if !is_playing {
-            return SpectrumTelemetry {
-                is_playing: false,
-                is_paused,
-                ..SpectrumTelemetry::default()
-            };
-        }
-
-        // Allow test probe injection for automated testing and deterministic validation
-        if let Ok(test_val) = std::env::var("MUVRIX_SPECTRUM_TEST_TELEMETRY") {
-            if let Ok(parsed) = serde_json::from_str::<SpectrumTelemetry>(&test_val) {
-                return parsed;
-            }
-        }
-
-        // Query RMS level and peak level from @vis (astats)
-        let rms_db = handle
-            .get_property_string("af-metadata/vis/lavfi.astats.Overall.RMS_level")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(-100.0);
-
-        let peak_db = handle
-            .get_property_string("af-metadata/vis/lavfi.astats.Overall.Peak_level")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(-100.0);
-
-        // Query spectral features from @spec (aspectralstats)
-        let centroid = handle
-            .get_property_string("af-metadata/spec/lavfi.aspectralstats.1.centroid")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(1000.0);
-
-        let spread = handle
-            .get_property_string("af-metadata/spec/lavfi.aspectralstats.1.spread")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(400.0);
-
-        let rolloff = handle
-            .get_property_string("af-metadata/spec/lavfi.aspectralstats.1.rolloff")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(8000.0);
-
-        let flatness = handle
-            .get_property_string("af-metadata/spec/lavfi.aspectralstats.1.flatness")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(0.1);
-
-        let slope = handle
-            .get_property_string("af-metadata/spec/lavfi.aspectralstats.1.slope")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(0.0);
-
-        SpectrumTelemetry {
-            rms_db,
-            peak_db,
-            spectral_centroid: centroid,
-            spectral_spread: spread,
-            spectral_rolloff: rolloff,
-            spectral_flatness: flatness,
-            spectral_slope: slope,
-            is_playing: true,
-            is_paused,
-        }
+        spectrum_telemetry_for(handle, is_playing, is_paused)
     }
 
     /// Returns whether gapless audio mode is currently enabled.
@@ -678,5 +613,53 @@ impl AudioSubsystem {
 
     pub fn on_codec_changed(&mut self, codec: String) {
         self.audio_codec = codec;
+    }
+}
+
+/// Reads the spectrum telemetry straight from a handle.
+///
+/// Handle-only so a background sampler can call it without borrowing the
+/// `AudioSubsystem`. Seven blocking property reads; see
+/// [`AudioSubsystem::spectrum_telemetry`].
+pub fn spectrum_telemetry_for(
+    handle: &MpvHandle,
+    is_playing: bool,
+    is_paused: bool,
+) -> crate::spectrum::SpectrumTelemetry {
+    use crate::spectrum::SpectrumTelemetry;
+
+    if !is_playing {
+        return SpectrumTelemetry {
+            is_playing: false,
+            is_paused,
+            ..SpectrumTelemetry::default()
+        };
+    }
+
+    // Allow test probe injection for automated testing and deterministic validation
+    if let Ok(test_val) = std::env::var("MUVRIX_SPECTRUM_TEST_TELEMETRY") {
+        if let Ok(parsed) = serde_json::from_str::<SpectrumTelemetry>(&test_val) {
+            return parsed;
+        }
+    }
+
+    let read = |name: &str, default: f64| {
+        handle
+            .get_property_string(name)
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(default)
+    };
+
+    SpectrumTelemetry {
+        rms_db: read("af-metadata/vis/lavfi.astats.Overall.RMS_level", -100.0),
+        peak_db: read("af-metadata/vis/lavfi.astats.Overall.Peak_level", -100.0),
+        spectral_centroid: read("af-metadata/spec/lavfi.aspectralstats.1.centroid", 1000.0),
+        spectral_spread: read("af-metadata/spec/lavfi.aspectralstats.1.spread", 400.0),
+        spectral_rolloff: read("af-metadata/spec/lavfi.aspectralstats.1.rolloff", 8000.0),
+        spectral_flatness: read("af-metadata/spec/lavfi.aspectralstats.1.flatness", 0.1),
+        spectral_slope: read("af-metadata/spec/lavfi.aspectralstats.1.slope", 0.0),
+        is_playing: true,
+        is_paused,
     }
 }

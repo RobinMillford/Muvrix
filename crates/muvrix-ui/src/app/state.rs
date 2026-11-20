@@ -388,6 +388,65 @@ pub struct MuvrixApp {
     pub(crate) cleanup_confirm_open: bool,
     pub(crate) integrity_status_msg: Option<String>,
 
+    /// Background libmpv diagnostics probe (statistics overlay + report export).
+    pub(crate) diagnostics: Option<crate::app::diagnostics::DiagnosticsProbe>,
+    /// Statistics overlay visibility.
+    pub(crate) show_playback_stats: bool,
+    /// Panel refresh rate reported by the windowing system (`None` until the
+    /// runner has seen a monitor). This is the real display refresh; libmpv
+    /// cannot report one through the embedded render API.
+    pub(crate) display_refresh_hz: Option<f64>,
+    /// Duration of the most recent `frame_update`, measured on the paint thread.
+    /// `None` before the first sample. This is what the overlay labels "HUD
+    /// build" so a slow paint is attributable rather than guessed.
+    pub(crate) hud_build_us: Option<u64>,
+    /// Duration of the most recent UI tessellation+paint pass.
+    pub(crate) ui_paint_us: Option<u64>,
+    /// Unattended verification: when `MUVRIX_AUTOPLAY_DIAG_SECS` is set, the
+    /// probe runs from startup and a diagnostics report is exported (then the
+    /// app closes) at this deadline. Used to measure real playback without a
+    /// human at the keyboard; has no effect otherwise.
+    pub(crate) auto_diag_deadline: Option<std::time::Instant>,
+    /// Test-only interaction schedule `(due_secs, action)`; inert unless
+    /// `MUVRIX_TEST_INTERACT` is set. Used to measure continuity across seeks,
+    /// pause/resume and track switches.
+    pub(crate) test_interact: Option<Vec<(f64, String)>>,
+    /// Next entry of [`Self::test_interact`] to execute.
+    pub(crate) test_interact_next: usize,
+    /// Screenshot harness state (inert unless `MUVRIX_CAPTURE_DIR` is set).
+    pub(crate) capture: crate::app::capture::CaptureState,
+    /// Cinema / video-only immersive mode (video, HUD and nothing else).
+    pub(crate) is_cinema_mode: bool,
+    /// Opacity of the floating player HUD (0.0 hidden … 1.0 fully visible).
+    pub(crate) overlay_alpha: f32,
+    /// Screen rect of the bottom deck from the previous frame, used for real
+    /// pointer hit-testing instead of a guessed band.
+    pub(crate) deck_rect: Option<egui::Rect>,
+    /// Screen rect of the top player overlay from the previous frame.
+    pub(crate) top_overlay_rect: Option<egui::Rect>,
+    /// Width of the overlay playlist drawer.
+    pub(crate) playlist_drawer_width: f32,
+    /// Last cursor visibility state requested from the window system.
+    pub(crate) cursor_hidden: bool,
+    /// A/V sync adjustment increment in milliseconds (10/50/100).
+    pub(crate) sync_adjust_ms: f64,
+    /// Dedicated A/V and subtitle sync panel visibility.
+    pub(crate) sync_panel_open: bool,
+    /// Transient on-screen feedback for shortcut/OSD-driven changes.
+    pub(crate) osd_notice: Option<(String, Instant)>,
+    /// Configurable skip duration for the transport rewind/forward buttons.
+    pub(crate) skip_seconds: f64,
+    /// Mirrors the requested always-on-top window level.
+    pub(crate) always_on_top: bool,
+    /// Aspect/crop/zoom popover visibility in the player toolbar.
+    pub(crate) player_view_menu_open: bool,
+    /// Shortcut manager UI state.
+    pub(crate) shortcut_search: String,
+    pub(crate) shortcut_help_search: String,
+    pub(crate) shortcut_category: Option<crate::app::actions::ShortcutCategory>,
+    pub(crate) pending_shortcut_conflict: Option<crate::app::shortcuts::PendingShortcutConflict>,
+    pub(crate) shortcut_status: Option<(String, bool)>,
+
     // Phase E4: Adaptive Player HUD, Three-Tier Collapsible Decks & Overflow
     pub(crate) player_secondary_deck_expanded: bool,
     pub(crate) player_secondary_deck_collapsed_wide: bool,
@@ -405,7 +464,7 @@ pub struct MuvrixApp {
 
     // Phase E7: Multi-Profile Support, Custom Theme Builder & Shortcut Mapper
     pub(crate) keybindings: crate::app::shortcuts::KeyBindingMap,
-    pub(crate) recording_shortcut: Option<crate::app::shortcuts::ShortcutAction>,
+    pub(crate) recording_shortcut: Option<crate::app::actions::PlayerAction>,
     pub(crate) active_profile: Option<muvrix_core::database::PlaybackProfile>,
     pub(crate) available_profiles: Vec<muvrix_core::database::PlaybackProfile>,
     pub(crate) profile_switch_elapsed: Option<Duration>,

@@ -4,8 +4,12 @@ pub mod audio;
 pub mod track;
 pub mod video;
 
-pub use audio::{AudioDeviceChangeEvent, AudioRecoveryStatus, AudioSubsystem, DynamicsTelemetry};
+pub use audio::{
+    spectrum_telemetry_for, AudioDeviceChangeEvent, AudioRecoveryStatus, AudioSubsystem,
+    DynamicsTelemetry,
+};
 pub use track::TrackSubsystem;
 pub use video::{
-    DecoderFallbackReason, DecoderWatchdog, SteppingPreset, VideoSubsystem, WatchdogStatus,
+    crop_rect_for_ratio, CropPreset, DecoderFallbackReason, DecoderWatchdog, ScalingMode,
+    ScreenshotMode, SteppingPreset, VideoSubsystem, WatchdogStatus,
 };

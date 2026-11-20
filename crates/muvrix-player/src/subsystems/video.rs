@@ -1,7 +1,8 @@
 //! Video, Decoder Watchdog, Shader, and Frame-Stepping domain subsystem.
 
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::decode::{classify, DecodeObservation, DecodePath};
 use crate::error::MpvError;
@@ -23,6 +24,175 @@ pub enum SteppingPreset {
     Ntsc30,
     /// Advance/retreat by 1/60 second (~16.67ms, High-Rate standard).
     HighRate60,
+}
+
+/// How the decoded video is fitted into the presentation surface.
+///
+/// These are deliberately distinct from aspect override, crop and zoom: the
+/// scaling mode only decides what happens to the parts of the surface the
+/// video does not cover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScalingMode {
+    /// Preserve aspect ratio and show the whole frame (letterbox / pillarbox).
+    #[default]
+    Fit,
+    /// Preserve aspect ratio and fill the surface, cropping the excess.
+    Fill,
+    /// Ignore the source aspect ratio and fill the surface exactly.
+    Stretch,
+    /// Present at native pixel dimensions without upscaling.
+    Original,
+}
+
+impl ScalingMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Fit => "Fit (Contain)",
+            Self::Fill => "Fill (Cover)",
+            Self::Stretch => "Stretch",
+            Self::Original => "Original Size",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Fit => "Show the whole frame, letterboxing where needed",
+            Self::Fill => "Fill the view, cropping the excess edges",
+            Self::Stretch => "Stretch to the view, ignoring the source aspect",
+            Self::Original => "Display at the source's native pixel size",
+        }
+    }
+
+    pub const ALL: &'static [ScalingMode] = &[
+        ScalingMode::Fit,
+        ScalingMode::Fill,
+        ScalingMode::Stretch,
+        ScalingMode::Original,
+    ];
+}
+
+/// Common crop presets expressed as a target display ratio.
+///
+/// The crop rectangle is derived from the decoded frame size and centred, so
+/// it always removes the requested amount from the visible area rather than
+/// relying on container metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CropPreset {
+    #[default]
+    Default,
+    R1x1,
+    R4x3,
+    R5x4,
+    R16x9,
+    R16x10,
+    R21x9,
+    R221x100,
+    R235x100,
+    R239x100,
+}
+
+impl CropPreset {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Default => "Default (No Crop)",
+            Self::R1x1 => "1:1",
+            Self::R4x3 => "4:3",
+            Self::R5x4 => "5:4",
+            Self::R16x9 => "16:9",
+            Self::R16x10 => "16:10",
+            Self::R21x9 => "21:9",
+            Self::R221x100 => "2.21:1",
+            Self::R235x100 => "2.35:1",
+            Self::R239x100 => "2.39:1",
+        }
+    }
+
+    /// Returns the target width/height ratio, or `None` for the reset preset.
+    pub fn ratio(&self) -> Option<(f64, f64)> {
+        match self {
+            Self::Default => None,
+            Self::R1x1 => Some((1.0, 1.0)),
+            Self::R4x3 => Some((4.0, 3.0)),
+            Self::R5x4 => Some((5.0, 4.0)),
+            Self::R16x9 => Some((16.0, 9.0)),
+            Self::R16x10 => Some((16.0, 10.0)),
+            Self::R21x9 => Some((21.0, 9.0)),
+            Self::R221x100 => Some((2.21, 1.0)),
+            Self::R235x100 => Some((2.35, 1.0)),
+            Self::R239x100 => Some((2.39, 1.0)),
+        }
+    }
+
+    pub const ALL: &'static [CropPreset] = &[
+        CropPreset::Default,
+        CropPreset::R1x1,
+        CropPreset::R4x3,
+        CropPreset::R5x4,
+        CropPreset::R16x9,
+        CropPreset::R16x10,
+        CropPreset::R21x9,
+        CropPreset::R221x100,
+        CropPreset::R235x100,
+        CropPreset::R239x100,
+    ];
+}
+
+/// Builds a centred libmpv `video-crop` rectangle for `ratio` inside a
+/// `width`x`height` decoded frame. Dimensions are rounded to even numbers so
+/// chroma-subsampled formats crop cleanly.
+///
+/// Returns an empty string when the preset is the reset preset or the frame
+/// dimensions are unknown.
+pub fn crop_rect_for_ratio(preset: CropPreset, width: i64, height: i64) -> String {
+    let Some((num, den)) = preset.ratio() else {
+        return String::new();
+    };
+    if width <= 0 || height <= 0 || num <= 0.0 || den <= 0.0 {
+        return String::new();
+    }
+
+    let source_ratio = width as f64 / height as f64;
+    let target_ratio = num / den;
+
+    let (crop_w, crop_h) = if target_ratio > source_ratio {
+        // Target is wider than the source: keep the full width, cut height.
+        let h = (width as f64 / target_ratio).round() as i64;
+        (width, h)
+    } else {
+        // Target is narrower: keep the full height, cut width.
+        let w = (height as f64 * target_ratio).round() as i64;
+        (w, height)
+    };
+
+    let even = |v: i64| -> i64 { (v / 2).max(1) * 2 };
+    let crop_w = even(crop_w.min(width));
+    let crop_h = even(crop_h.min(height));
+    let x = ((width - crop_w) / 2).max(0);
+    let y = ((height - crop_h) / 2).max(0);
+
+    format!("{crop_w}x{crop_h}+{x}+{y}")
+}
+
+/// Screenshot capture source for [`VideoSubsystem::screenshot`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScreenshotMode {
+    /// Video frame with subtitles and OSD burnt in.
+    #[default]
+    Subtitles,
+    /// Raw video frame with subtitles and OSD omitted.
+    Video,
+    /// The rendered window contents.
+    Window,
+}
+
+impl ScreenshotMode {
+    fn mpv_arg(&self) -> &'static str {
+        match self {
+            Self::Subtitles => "subtitles",
+            Self::Video => "video",
+            Self::Window => "window",
+        }
+    }
 }
 
 impl SteppingPreset {
@@ -364,10 +534,14 @@ pub struct VideoSubsystem {
     stepping_preset: SteppingPreset,
     watchdog: DecoderWatchdog,
     current_hwdec: String,
-    /// Cached `frame-drop-count` probe; the watchdog polls it once per
-    /// event-loop iteration, but the engine round trip blocks the caller
-    /// under decode pressure, so it is refreshed at most twice a second.
-    drop_count_cache: Mutex<(Option<Instant>, i64)>,
+    /// Last `frame-drop-count` delivered by the observed property.
+    ///
+    /// The watchdog consumes this instead of reading the engine: the observation
+    /// carries the value inline, so a paint costs no engine round trip. It is
+    /// genuinely `unknown` until the engine has reported a value at least once,
+    /// which is kept distinct from a real zero.
+    observed_drop_count: AtomicI64,
+    observed_drop_count_known: AtomicBool,
 }
 
 impl Default for VideoSubsystem {
@@ -387,7 +561,8 @@ impl VideoSubsystem {
             stepping_preset: SteppingPreset::Frame,
             watchdog: DecoderWatchdog::new(),
             current_hwdec: "inactive".to_string(),
-            drop_count_cache: Mutex::new((None, 0)),
+            observed_drop_count: AtomicI64::new(0),
+            observed_drop_count_known: AtomicBool::new(false),
         }
     }
 
@@ -454,20 +629,38 @@ impl VideoSubsystem {
         handle.get_property::<i64>("frame-drop-count").unwrap_or(0)
     }
 
-    /// Drop count refreshed at most once every two seconds; used by the
-    /// watchdog, which would otherwise pay one blocking mpv round trip per
-    /// event-loop iteration.
-    fn cached_frame_drop_count(&self, handle: &MpvHandle) -> i64 {
-        let mut cache = self.drop_count_cache.lock().unwrap();
-        let due = cache
-            .0
-            .map(|t| t.elapsed() >= Duration::from_millis(2_000))
-            .unwrap_or(true);
-        if due {
-            cache.1 = self.frame_drop_count(handle);
-            cache.0 = Some(Instant::now());
-        }
-        cache.1
+    /// Records the `frame-drop-count` delivered by the observed property.
+    ///
+    /// Called from the event path, never from a paint, so the paint path has no
+    /// engine read to perform.
+    pub fn on_frame_drop_count_changed(&self, count: i64) {
+        self.observed_drop_count.store(count, Ordering::Release);
+        self.observed_drop_count_known.store(true, Ordering::Release);
+    }
+
+    /// Last observed drop count, or `None` until the engine has reported one.
+    pub fn observed_frame_drop_count(&self) -> Option<i64> {
+        self.observed_drop_count_known
+            .load(Ordering::Acquire)
+            .then(|| self.observed_drop_count.load(Ordering::Acquire))
+    }
+
+    /// Watchdog tick fed by the observed drop count — performs no engine read.
+    pub fn check_watchdog_observed(
+        &self,
+        handle: &MpvHandle,
+        is_playing: bool,
+        is_buffering: bool,
+        current_pos: f64,
+    ) {
+        // Before the engine has reported a drop count there is nothing to judge;
+        // treating "not yet known" as zero would be a guess, so the watchdog
+        // simply waits for the first observation.
+        let Some(drops) = self.observed_frame_drop_count() else {
+            return;
+        };
+        self.watchdog
+            .check_watchdog(handle, is_playing, is_buffering, current_pos, drops);
     }
 
     /// Returns count of decoder-level dropped frames.
@@ -548,6 +741,172 @@ impl VideoSubsystem {
     /// Sets panscan to 1.0 (Fill/Crop).
     pub fn set_panscan_crop(&mut self, handle: &MpvHandle) -> Result<(), MpvError> {
         self.set_panscan(handle, 1.0)
+    }
+
+    // -----------------------------------------------------------------
+    // Video geometry: aspect override, scaling, crop, zoom and pan.
+    // Each of these is an independent libmpv property; the UI reads them
+    // back so the displayed state always matches the engine.
+    // -----------------------------------------------------------------
+
+    /// Returns the effective aspect override (`"auto"` when none is set).
+    pub fn aspect_override(&self, handle: &MpvHandle) -> String {
+        match handle.get_property_string("video-aspect-override") {
+            Ok(v) if !v.is_empty() && v != "no" => v,
+            _ => "auto".to_string(),
+        }
+    }
+
+    /// Sets `video-aspect-override`. `"auto"`, an empty string or `"no"`
+    /// clears the override and restores the stream's own aspect ratio.
+    pub fn set_aspect_override(&self, handle: &MpvHandle, aspect: &str) -> Result<(), MpvError> {
+        let value = match aspect.trim() {
+            "" | "auto" | "no" => "no",
+            other => other,
+        };
+        handle.set_property_string("video-aspect-override", value)
+    }
+
+    /// Returns the current `video-zoom` factor (0.0 = neutral).
+    pub fn video_zoom(&self, handle: &MpvHandle) -> f64 {
+        handle.get_property::<f64>("video-zoom").unwrap_or(0.0)
+    }
+
+    /// Sets `video-zoom`, clamped to a sane range so the frame cannot be
+    /// zoomed into invisibility by a stray key repeat.
+    pub fn set_video_zoom(&self, handle: &MpvHandle, zoom: f64) -> Result<(), MpvError> {
+        handle.set_property("video-zoom", zoom.clamp(-5.0, 5.0))
+    }
+
+    /// Adjusts `video-zoom` by `delta`.
+    pub fn adjust_video_zoom(&self, handle: &MpvHandle, delta: f64) -> Result<(), MpvError> {
+        let next = self.video_zoom(handle) + delta;
+        self.set_video_zoom(handle, next)
+    }
+
+    /// Returns the current `(video-pan-x, video-pan-y)` offsets.
+    pub fn video_pan(&self, handle: &MpvHandle) -> (f64, f64) {
+        let x = handle.get_property::<f64>("video-pan-x").unwrap_or(0.0);
+        let y = handle.get_property::<f64>("video-pan-y").unwrap_or(0.0);
+        (x, y)
+    }
+
+    /// Sets the `video-pan-x` / `video-pan-y` offsets.
+    pub fn set_video_pan(&self, handle: &MpvHandle, x: f64, y: f64) -> Result<(), MpvError> {
+        handle.set_property("video-pan-x", x.clamp(-2.0, 2.0))?;
+        handle.set_property("video-pan-y", y.clamp(-2.0, 2.0))
+    }
+
+    /// Recentres the video by clearing both pan offsets.
+    pub fn reset_video_pan(&self, handle: &MpvHandle) -> Result<(), MpvError> {
+        self.set_video_pan(handle, 0.0, 0.0)
+    }
+
+    /// Applies a [`ScalingMode`] by configuring the underlying libmpv
+    /// properties (`keepaspect`, `video-unscaled`, `panscan`).
+    pub fn apply_scaling_mode(
+        &mut self,
+        handle: &MpvHandle,
+        mode: ScalingMode,
+    ) -> Result<(), MpvError> {
+        match mode {
+            ScalingMode::Fit => {
+                handle.set_property("video-unscaled", false)?;
+                handle.set_property("keepaspect", true)?;
+                self.set_panscan(handle, 0.0)?;
+            }
+            ScalingMode::Fill => {
+                handle.set_property("video-unscaled", false)?;
+                handle.set_property("keepaspect", true)?;
+                self.set_panscan(handle, 1.0)?;
+            }
+            ScalingMode::Stretch => {
+                handle.set_property("video-unscaled", false)?;
+                handle.set_property("keepaspect", false)?;
+                self.set_panscan(handle, 0.0)?;
+            }
+            ScalingMode::Original => {
+                handle.set_property("keepaspect", true)?;
+                self.set_panscan(handle, 0.0)?;
+                handle.set_property("video-unscaled", true)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Derives the active [`ScalingMode`] from the live engine properties.
+    pub fn scaling_mode(&self, handle: &MpvHandle) -> ScalingMode {
+        let unscaled = handle
+            .get_property::<bool>("video-unscaled")
+            .unwrap_or(false);
+        if unscaled {
+            return ScalingMode::Original;
+        }
+        let keepaspect = handle.get_property::<bool>("keepaspect").unwrap_or(true);
+        if !keepaspect {
+            return ScalingMode::Stretch;
+        }
+        if self.panscan >= 0.999 {
+            ScalingMode::Fill
+        } else {
+            ScalingMode::Fit
+        }
+    }
+
+    /// Returns the decoded frame dimensions in pixels.
+    pub fn video_pixel_size(&self, handle: &MpvHandle) -> (i64, i64) {
+        let w = handle.get_property::<i64>("width").unwrap_or(0);
+        let h = handle.get_property::<i64>("height").unwrap_or(0);
+        (w, h)
+    }
+
+    /// Applies a [`CropPreset`] as a centred `video-crop` rectangle.
+    pub fn apply_crop_preset(
+        &self,
+        handle: &MpvHandle,
+        preset: CropPreset,
+    ) -> Result<(), MpvError> {
+        let (w, h) = self.video_pixel_size(handle);
+        let rect = crop_rect_for_ratio(preset, w, h);
+        handle.set_property_string("video-crop", &rect)
+    }
+
+    /// Returns the active `video-crop` rectangle (`""` when uncropped).
+    pub fn video_crop(&self, handle: &MpvHandle) -> String {
+        match handle.get_property_string("video-crop") {
+            Ok(v) if v != "no" => v,
+            _ => String::new(),
+        }
+    }
+
+    /// Toggles libmpv deinterlacing.
+    pub fn set_deinterlace(&self, handle: &MpvHandle, enabled: bool) -> Result<(), MpvError> {
+        handle.set_property("deinterlace", enabled)
+    }
+
+    /// Returns whether deinterlacing is currently enabled.
+    pub fn deinterlace(&self, handle: &MpvHandle) -> bool {
+        handle.get_property::<bool>("deinterlace").unwrap_or(false)
+    }
+
+    /// Toggles libmpv debanding.
+    pub fn set_deband_enabled(&self, handle: &MpvHandle, enabled: bool) -> Result<(), MpvError> {
+        handle.set_property("deband", enabled)
+    }
+
+    /// Returns whether debanding is currently enabled.
+    pub fn deband_enabled(&self, handle: &MpvHandle) -> bool {
+        handle.get_property::<bool>("deband").unwrap_or(false)
+    }
+
+    /// Captures a screenshot to `path` using the engine's own capture path.
+    pub fn screenshot(
+        &self,
+        handle: &MpvHandle,
+        path: &str,
+        mode: ScreenshotMode,
+    ) -> Result<(), MpvError> {
+        handle.command(&["screenshot-to-file", path, mode.mpv_arg()])
     }
 
     /// Steps forward one video frame.
@@ -657,18 +1016,6 @@ impl VideoSubsystem {
     }
 
     // Watchdog and Recovery delegation
-    pub fn check_watchdog(
-        &self,
-        handle: &MpvHandle,
-        is_playing: bool,
-        is_buffering: bool,
-        current_pos: f64,
-    ) -> Option<DecoderFallbackReason> {
-        let drops = self.cached_frame_drop_count(handle);
-        self.watchdog
-            .check_watchdog(handle, is_playing, is_buffering, current_pos, drops)
-    }
-
     pub fn trigger_decoder_fallback(
         &self,
         handle: &MpvHandle,
@@ -693,6 +1040,9 @@ impl VideoSubsystem {
 
     pub fn on_file_loaded(&mut self, handle: &MpvHandle) {
         self.watchdog.reset_for_new_media();
+        // A new file has its own counter; the previous file's value must not be
+        // mistaken for this one's until the engine reports again.
+        self.observed_drop_count_known.store(false, Ordering::Release);
         if let Ok(w) = handle.get_property::<i64>("width") {
             self.video_width = w;
         }
@@ -715,5 +1065,71 @@ impl VideoSubsystem {
 
     pub fn on_panscan_changed(&mut self, panscan: f64) {
         self.panscan = panscan;
+    }
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    #[test]
+    fn observed_drop_count_is_unknown_until_the_engine_reports_one() {
+        let v = VideoSubsystem::new();
+        // "Not yet observed" must not be laundered into a real zero: the
+        // watchdog would then judge a stall from a counter it never read.
+        assert_eq!(v.observed_frame_drop_count(), None);
+        v.on_frame_drop_count_changed(0);
+        assert_eq!(v.observed_frame_drop_count(), Some(0));
+        v.on_frame_drop_count_changed(7);
+        assert_eq!(v.observed_frame_drop_count(), Some(7));
+    }
+
+    #[test]
+    fn new_media_clears_the_observed_drop_count() {
+        let v = VideoSubsystem::new();
+        v.on_frame_drop_count_changed(42);
+        assert_eq!(v.observed_frame_drop_count(), Some(42));
+        v.observed_drop_count_known.store(false, Ordering::Release);
+        assert_eq!(v.observed_frame_drop_count(), None);
+    }
+
+    #[test]
+    fn crop_default_and_unknown_sizes_produce_no_rectangle() {
+        assert_eq!(crop_rect_for_ratio(CropPreset::Default, 1920, 1080), "");
+        assert_eq!(crop_rect_for_ratio(CropPreset::R16x9, 0, 1080), "");
+        assert_eq!(crop_rect_for_ratio(CropPreset::R16x9, 1920, 0), "");
+    }
+
+    #[test]
+    fn wider_target_crop_keeps_width_and_centres_height() {
+        // 16:9 source cropped to 21:9 keeps the full width and cuts the height.
+        let rect = crop_rect_for_ratio(CropPreset::R21x9, 1920, 1080);
+        assert_eq!(rect, "1920x822+0+129");
+    }
+
+    #[test]
+    fn narrower_target_crop_keeps_height_and_centres_width() {
+        // 16:9 source cropped to 4:3 keeps the full height and cuts the width.
+        let rect = crop_rect_for_ratio(CropPreset::R4x3, 1920, 1080);
+        assert_eq!(rect, "1440x1080+240+0");
+    }
+
+    #[test]
+    fn square_crop_is_centred_and_even() {
+        let rect = crop_rect_for_ratio(CropPreset::R1x1, 1919, 1081);
+        assert_eq!(rect, "1080x1080+419+0");
+    }
+
+    #[test]
+    fn every_scale_and_crop_preset_has_a_label() {
+        assert_eq!(ScalingMode::ALL.len(), 4);
+        assert_eq!(CropPreset::ALL.len(), 10);
+        for mode in ScalingMode::ALL {
+            assert!(!mode.label().is_empty());
+            assert!(!mode.description().is_empty());
+        }
+        for preset in CropPreset::ALL {
+            assert!(!preset.label().is_empty());
+        }
     }
 }

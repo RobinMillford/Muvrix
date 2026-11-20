@@ -119,6 +119,16 @@ impl MuvrixApp {
         mpv.set_option_string("vo", "libmpv")?;
         mpv.set_option_string("hwdec", decode_policy.initial_mode())?;
         mpv.set_option_string("keepaspect", "yes")?;
+        // Timing baseline. Audio is the authoritative clock and the output
+        // drops late frames instead of letting A/V drift; both are mpv's own
+        // defaults, made explicit so a config or environment cannot silently
+        // switch playback into an unsynchronised mode. `display-resample` is
+        // deliberately not forced: it only helps on matched refresh rates and
+        // hurts variable-frame-rate content.
+        if std::env::var("MUVRIX_TEST_VIDEO_SYNC").is_err() {
+            mpv.set_option_string("video-sync", "audio")?;
+        }
+        mpv.set_option_string("framedrop", "vo")?;
         // `video-timing-offset` is the headroom the renderer gets before the
         // frame's target display time. At 0 there is no headroom, which makes
         // target-time blocking a no-op; it must be non-zero for paced playback.
@@ -284,9 +294,22 @@ impl MuvrixApp {
 
         let render_engine = Arc::new(Mutex::new(render_engine));
 
-        // 6. Wrap in PlaybackController
+        // 7. Wrap in PlaybackController
         let controller = PlaybackController::new(mpv)?;
         let media_capabilities = controller.handle().detect_media_capabilities();
+        // Sampling runs off the paint thread; see `app::diagnostics`.
+        let diagnostics =
+            crate::app::diagnostics::DiagnosticsProbe::new(controller.handle().clone());
+        let probe_handle = controller.handle().clone();
+        // Unattended measurement harness: sample from the first frame so a
+        // report reflects steady-state playback, not an empty snapshot.
+        let auto_diag_deadline = std::env::var("MUVRIX_AUTOPLAY_DIAG_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|secs| {
+                diagnostics.set_enabled(true);
+                std::time::Instant::now() + std::time::Duration::from_secs(secs)
+            });
 
         let db_path = if let Ok(custom) = std::env::var("MUVRIX_DATABASE_PATH") {
             std::path::PathBuf::from(custom)
@@ -1004,6 +1027,40 @@ impl MuvrixApp {
             cleanup_confirm_open: false,
             integrity_status_msg: None,
 
+            diagnostics: Some(diagnostics),
+            show_playback_stats: std::env::var("MUVRIX_SHOW_PLAYBACK_STATS").is_ok(),
+            display_refresh_hz: None,
+            hud_build_us: None,
+            ui_paint_us: None,
+            auto_diag_deadline,
+            test_interact: std::env::var("MUVRIX_TEST_INTERACT").ok().map(|raw| {
+                raw.split(',')
+                    .filter_map(|entry| {
+                        let (secs, action) = entry.split_once(':')?;
+                        Some((secs.trim().parse::<f64>().ok()?, action.trim().to_string()))
+                    })
+                    .collect::<Vec<_>>()
+            }),
+            test_interact_next: 0,
+            capture: crate::app::capture::CaptureState::from_env(),
+            is_cinema_mode: false,
+            overlay_alpha: 1.0,
+            deck_rect: None,
+            top_overlay_rect: None,
+            playlist_drawer_width: 300.0,
+            cursor_hidden: false,
+            sync_adjust_ms: 50.0,
+            sync_panel_open: false,
+            osd_notice: None,
+            skip_seconds: 10.0,
+            always_on_top: false,
+            player_view_menu_open: false,
+            shortcut_search: String::new(),
+            shortcut_help_search: String::new(),
+            shortcut_category: None,
+            pending_shortcut_conflict: None,
+            shortcut_status: None,
+
             // Phase E4: Adaptive Player HUD, Three-Tier Collapsible Decks & Overflow
             player_secondary_deck_expanded: std::env::var("MUVRIX_OPEN_PLAYER_DECK").is_ok(),
             player_secondary_deck_collapsed_wide: false,
@@ -1013,7 +1070,7 @@ impl MuvrixApp {
 
             // Phase E5: Audio DSP Expansion, EBU R128 & 32-Band Spectrum Visualizer
             spectrum_visualizer: muvrix_player::SpectrumVisualizer::new(),
-            slow_metrics: crate::app::slow_metrics::SlowMetrics::default(),
+            slow_metrics: crate::app::slow_metrics::SlowMetrics::new(Some(probe_handle)),
             autoeq_status_msg: std::env::var("MUVRIX_AUTOEQ_STATUS")
                 .ok()
                 .map(|s| (s, false)),
@@ -1021,8 +1078,8 @@ impl MuvrixApp {
             // Phase E7: Multi-Profile Support, Custom Theme Builder & Shortcut Mapper
             keybindings: crate::app::shortcuts::KeyBindingMap::load_from_disk(),
             recording_shortcut: match std::env::var("MUVRIX_SHORTCUT_RECORDING").as_deref() {
-                Ok("play" | "play_pause") => Some(crate::app::shortcuts::ShortcutAction::PlayPause),
-                Ok("seek_forward") => Some(crate::app::shortcuts::ShortcutAction::SeekForward),
+                Ok("play" | "play_pause") => Some(crate::app::actions::PlayerAction::PlayPause),
+                Ok("seek_forward") => Some(crate::app::actions::PlayerAction::SeekForwardShort),
                 _ => None,
             },
             active_profile: None,

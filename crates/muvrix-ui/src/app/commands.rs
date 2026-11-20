@@ -482,17 +482,57 @@ impl MuvrixApp {
         self.sync_active_queue_to_db();
     }
 
-    /// Toggles fullscreen window state.
+    /// Toggles native fullscreen window state.
+    ///
+    /// This is the window manager's own fullscreen state — not "make the video
+    /// widget bigger" — so desktop panels are hidden by the compositor where
+    /// it supports that. Leaving fullscreen always drops cinema mode with it,
+    /// otherwise the app would restore a decorated window with no navigation.
     pub fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
         self.is_fullscreen = !self.is_fullscreen;
+        if !self.is_fullscreen {
+            self.is_cinema_mode = false;
+        }
+        self.ui_overlay_visible = true;
+        self.last_mouse_activity = std::time::Instant::now();
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+        self.cursor_hidden = false;
     }
 
-    /// Exits fullscreen mode if currently active.
+    /// Toggles MUVRIX Cinema / video-only mode (native fullscreen plus no
+    /// application chrome and no drawer).
+    pub fn toggle_cinema(&mut self, ctx: &egui::Context) {
+        self.is_cinema_mode = !self.is_cinema_mode;
+        if self.is_cinema_mode {
+            self.show_playlist_drawer = false;
+            self.current_view = AppView::Player;
+            self.is_pip = false;
+            if !self.is_fullscreen {
+                self.is_fullscreen = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+            }
+            self.ui_overlay_visible = true;
+            self.last_mouse_activity = std::time::Instant::now();
+            self.push_osd("Cinema mode — Shift+Enter or Esc to exit");
+        } else {
+            self.push_osd("Cinema mode off");
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+        self.cursor_hidden = false;
+    }
+
+    /// Exits fullscreen and cinema mode if either is active.
     pub fn exit_fullscreen(&mut self, ctx: &egui::Context) {
+        let was_immersive = self.is_fullscreen || self.is_cinema_mode;
+        self.is_cinema_mode = false;
         if self.is_fullscreen {
             self.is_fullscreen = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+        if was_immersive {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+            self.cursor_hidden = false;
         }
     }
 

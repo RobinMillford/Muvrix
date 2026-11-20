@@ -834,27 +834,6 @@ impl MuvrixApp {
             .unwrap_or(0)
     }
 
-    pub fn current_aspect_label(&self) -> String {
-        let current = normalize_aspect(&self.controller.aspect_override());
-        ASPECT_PRESETS
-            .iter()
-            .find(|(value, _)| *value == current)
-            .map(|(_, label)| (*label).to_string())
-            .unwrap_or_else(|| {
-                // libmpv reports "no override" as a negative number; showing
-                // that raw float in the deck looked like a broken widget.
-                if current
-                    .parse::<f64>()
-                    .map(|value| value <= 0.0)
-                    .unwrap_or(false)
-                {
-                    "Auto".to_string()
-                } else {
-                    current
-                }
-            })
-    }
-
     fn cycle_audio_track(&mut self) {
         let ids: Vec<i64> = self
             .controller
@@ -1034,6 +1013,32 @@ fn normalize_aspect(value: &str) -> String {
         "" | "no" | "auto" => "auto".to_string(),
         other => other.to_string(),
     }
+}
+
+/// Human label for a raw `video-aspect-override` value.
+///
+/// The HUD builds its aspect label from the off-thread probe snapshot instead of
+/// performing a blocking `mpv_get_property_string` on the paint thread every
+/// frame.
+pub fn aspect_label_from_raw(raw: &str) -> String {
+    let current = normalize_aspect(raw);
+    ASPECT_PRESETS
+        .iter()
+        .find(|(value, _)| *value == current)
+        .map(|(_, label)| (*label).to_string())
+        .unwrap_or_else(|| {
+            // libmpv reports "no override" as a negative number; showing
+            // that raw float in the deck looked like a broken widget.
+            if current
+                .parse::<f64>()
+                .map(|value| value <= 0.0)
+                .unwrap_or(false)
+            {
+                "Auto".to_string()
+            } else {
+                current
+            }
+        })
 }
 
 fn parse_crop_ratio(rect: &str) -> Option<(f64, f64)> {

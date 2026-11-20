@@ -1,3 +1,16 @@
+//! Keyboard shortcut registry with VLC/mpv/MUVRIX profiles.
+//!
+//! The registry maps stable [`PlayerAction`] identifiers to key combinations.
+//! Four built-in profiles resolve the places where VLC and mpv disagree:
+//!
+//! * `Classic`  — VLC-compatible defaults (the shipped default).
+//! * `Advanced` — mpv-style defaults for advanced playback and video control.
+//! * `Hybrid`   — VLC keys win conflicts; mpv actions receive alternatives.
+//! * `Legacy`   — the bindings MUVRIX shipped before the profile system.
+//!
+//! Every profile is editable, and edits are stored per profile so switching
+//! profiles and restarting the app both preserve customisations.
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Instant;
@@ -6,128 +19,107 @@ use eframe::egui::{self, RichText};
 use muvrix_player::PlaybackState;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::app::actions::{PlayerAction, ShortcutCategory};
 use crate::app::MuvrixApp;
 use crate::branding::BrandPalette;
 use crate::views::AppView;
 
-/// Identifies all configurable shortcut actions across MUVRIX Desktop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum ShortcutAction {
-    PlayPause,
-    SeekBackward,
-    SeekForward,
-    VolumeUp,
-    VolumeDown,
-    FrameStepForward,
-    FrameStepBack,
-    CycleAbLoop,
-    ToggleMute,
-    ToggleFullscreen,
-    Escape,
-    TogglePlayerMore,
-    ToggleSecondaryDeck,
-    ToggleUrlInput,
-    SpeedDecrease,
-    SpeedIncrease,
-    SpeedReset,
-    OpenFile,
-    ToggleOsd,
-    TogglePlaylist,
-    ToggleBrowser,
-    TogglePip,
-    ShowHelp,
+/// Which default catalogue the registry is currently resolving.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ShortcutProfile {
+    /// VLC-compatible defaults. Shipped as the default profile.
+    #[default]
+    Classic,
+    /// mpv-compatible defaults for advanced playback and video control.
+    Advanced,
+    /// VLC defaults first, mpv-only actions on alternative combinations.
+    Hybrid,
+    /// The original MUVRIX bindings.
+    Legacy,
 }
 
-impl ShortcutAction {
-    pub const ALL: &'static [ShortcutAction] = &[
-        ShortcutAction::PlayPause,
-        ShortcutAction::SeekBackward,
-        ShortcutAction::SeekForward,
-        ShortcutAction::VolumeUp,
-        ShortcutAction::VolumeDown,
-        ShortcutAction::FrameStepForward,
-        ShortcutAction::FrameStepBack,
-        ShortcutAction::CycleAbLoop,
-        ShortcutAction::ToggleMute,
-        ShortcutAction::ToggleFullscreen,
-        ShortcutAction::Escape,
-        ShortcutAction::TogglePlayerMore,
-        ShortcutAction::ToggleSecondaryDeck,
-        ShortcutAction::ToggleUrlInput,
-        ShortcutAction::SpeedDecrease,
-        ShortcutAction::SpeedIncrease,
-        ShortcutAction::SpeedReset,
-        ShortcutAction::OpenFile,
-        ShortcutAction::ToggleOsd,
-        ShortcutAction::TogglePlaylist,
-        ShortcutAction::ToggleBrowser,
-        ShortcutAction::TogglePip,
-        ShortcutAction::ShowHelp,
+impl ShortcutProfile {
+    pub const ALL: &'static [ShortcutProfile] = &[
+        ShortcutProfile::Classic,
+        ShortcutProfile::Advanced,
+        ShortcutProfile::Hybrid,
+        ShortcutProfile::Legacy,
     ];
 
-    pub fn display_name(&self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
-            Self::PlayPause => "Play / Pause Toggle",
-            Self::SeekBackward => "Seek Backward (-5s)",
-            Self::SeekForward => "Seek Forward (+5s)",
-            Self::VolumeUp => "Volume Increase (+5%)",
-            Self::VolumeDown => "Volume Decrease (-5%)",
-            Self::FrameStepForward => "Frame Step Forward",
-            Self::FrameStepBack => "Frame Step Backward",
-            Self::CycleAbLoop => "Cycle A-B Loop (A / B / Clear)",
-            Self::ToggleMute => "Mute / Unmute Audio",
-            Self::ToggleFullscreen => "Toggle Fullscreen",
-            Self::Escape => "Exit Fullscreen / Dismiss Popover",
-            Self::TogglePlayerMore => "Toggle Player Overflow Menu",
-            Self::ToggleSecondaryDeck => "Toggle Secondary Controls Deck",
-            Self::ToggleUrlInput => "Toggle Stream URL Input",
-            Self::SpeedDecrease => "Playback Speed Decrease (-0.25x)",
-            Self::SpeedIncrease => "Playback Speed Increase (+0.25x)",
-            Self::SpeedReset => "Reset Playback Speed (1.0x)",
-            Self::OpenFile => "Open Media File",
-            Self::ToggleOsd => "Toggle On-Screen Display (OSD)",
-            Self::TogglePlaylist => "Toggle Queue / Playlist Drawer",
-            Self::ToggleBrowser => "Toggle Media Browser View",
-            Self::TogglePip => "Toggle Compact Mini-Player (PiP)",
-            Self::ShowHelp => "Toggle Keyboard Shortcuts Help",
+            Self::Classic => "MUVRIX Classic (VLC)",
+            Self::Advanced => "MUVRIX Advanced (mpv)",
+            Self::Hybrid => "MUVRIX Hybrid",
+            Self::Legacy => "Legacy MUVRIX",
         }
     }
 
-    pub fn default_combination(&self) -> KeyCombination {
+    pub fn short_label(&self) -> &'static str {
         match self {
-            Self::PlayPause => KeyCombination::new(egui::Key::Space),
-            Self::SeekBackward => KeyCombination::new(egui::Key::ArrowLeft),
-            Self::SeekForward => KeyCombination::new(egui::Key::ArrowRight),
-            Self::VolumeUp => KeyCombination::new(egui::Key::ArrowUp),
-            Self::VolumeDown => KeyCombination::new(egui::Key::ArrowDown),
-            Self::FrameStepForward => KeyCombination::new(egui::Key::Period),
-            Self::FrameStepBack => KeyCombination::new(egui::Key::Comma),
-            Self::CycleAbLoop => KeyCombination::new(egui::Key::L),
-            Self::ToggleMute => KeyCombination::new(egui::Key::M),
-            Self::ToggleFullscreen => KeyCombination::new(egui::Key::F),
-            Self::Escape => KeyCombination::new(egui::Key::Escape),
-            Self::TogglePlayerMore => KeyCombination::new(egui::Key::M).with_alt(),
-            Self::ToggleSecondaryDeck => KeyCombination::new(egui::Key::D).with_ctrl(),
-            Self::ToggleUrlInput => KeyCombination::new(egui::Key::U).with_ctrl(),
-            Self::SpeedDecrease => KeyCombination::new(egui::Key::OpenBracket),
-            Self::SpeedIncrease => KeyCombination::new(egui::Key::CloseBracket),
-            Self::SpeedReset => KeyCombination::new(egui::Key::Backspace),
-            Self::OpenFile => KeyCombination::new(egui::Key::O).with_ctrl(),
-            Self::ToggleOsd => KeyCombination::new(egui::Key::H),
-            Self::TogglePlaylist => KeyCombination::new(egui::Key::P),
-            Self::ToggleBrowser => KeyCombination::new(egui::Key::B),
-            Self::TogglePip => KeyCombination::new(egui::Key::I),
-            Self::ShowHelp => KeyCombination::new(egui::Key::F1),
+            Self::Classic => "Classic",
+            Self::Advanced => "Advanced",
+            Self::Hybrid => "Hybrid",
+            Self::Legacy => "Legacy",
         }
     }
 
-    pub fn default_alternate(&self) -> Option<KeyCombination> {
+    pub fn description(&self) -> &'static str {
         match self {
-            Self::ToggleFullscreen => Some(KeyCombination::new(egui::Key::F11)),
-            Self::ToggleSecondaryDeck => Some(KeyCombination::new(egui::Key::D).with_alt()),
-            _ => None,
+            Self::Classic => {
+                "Familiar VLC shortcuts for playback, seeking, audio, subtitles and video."
+            }
+            Self::Advanced => {
+                "mpv-style bindings for frame stepping, pan/zoom, statistics and advanced control."
+            }
+            Self::Hybrid => {
+                "VLC bindings take priority; mpv-only actions move to alternative combinations."
+            }
+            Self::Legacy => "The original MUVRIX bindings, preserved for existing users.",
         }
     }
+
+    pub(crate) fn source_badge(&self) -> &'static str {
+        match self {
+            Self::Classic | Self::Hybrid | Self::Legacy => "VLC",
+            Self::Advanced => "mpv",
+        }
+    }
+}
+
+/// Which slot of an action a conflicting collision occupies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingSlot {
+    Primary,
+    Alternate,
+}
+
+/// A duplicate binding between two actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyConflict {
+    pub action_a: PlayerAction,
+    pub slot_a: BindingSlot,
+    pub action_b: PlayerAction,
+    pub slot_b: BindingSlot,
+    pub combination: KeyCombination,
+}
+
+/// Result of attempting to bind a combination to an action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindOutcome {
+    Bound,
+    Conflict(Vec<(PlayerAction, BindingSlot)>),
+}
+
+/// A conflict awaiting the user's replace/swap/cancel decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingShortcutConflict {
+    pub action: PlayerAction,
+    pub combination: KeyCombination,
+    pub conflicts: Vec<(PlayerAction, BindingSlot)>,
 }
 
 /// A specific physical key combined with modifier flags.
@@ -182,16 +174,19 @@ impl KeyCombination {
             !input.modifiers.alt
         };
 
+        // Keys that only exist as shifted symbols on a US layout report
+        // `shift = true` from the platform layer. Binding them without an
+        // explicit Shift must still match.
         let shift_match = if self.shift {
             input.modifiers.shift
         } else {
-            !input.modifiers.shift
+            !input.modifiers.shift || shift_is_implicit(self.key)
         };
 
         ctrl_match && alt_match && shift_match
     }
 
-    /// Formats this combination into a human-readable display string (e.g. `Ctrl+O`, `Alt+M`, `Space`).
+    /// Formats this combination into a human-readable display string.
     pub fn display_string(&self) -> String {
         let mut parts = Vec::new();
         if self.ctrl {
@@ -207,33 +202,43 @@ impl KeyCombination {
         parts.join("+")
     }
 
-    /// Parses a string representation like `Ctrl+O` or `Space` into a KeyCombination.
+    /// Parses a string representation like `Ctrl+O` or `Space`.
+    ///
+    /// Splitting happens from the right so symbol keys that are themselves a
+    /// plus sign (`Ctrl++`) round-trip correctly.
     pub fn parse_str(s: &str) -> Option<Self> {
         let s = s.trim();
         if s.is_empty() {
             return None;
         }
 
-        let tokens: Vec<&str> = s.split('+').map(|t| t.trim()).collect();
+        let (mods, key) = if let Some(rest) = s.strip_suffix("++") {
+            (rest, key_from_name("+")?)
+        } else if let Some(idx) = s.rfind('+') {
+            let tail = s[idx + 1..].trim();
+            let key = if tail.is_empty() {
+                key_from_name("+")?
+            } else {
+                key_from_name(tail)?
+            };
+            (&s[..idx], key)
+        } else {
+            ("", key_from_name(s)?)
+        };
+
         let mut ctrl = false;
         let mut alt = false;
         let mut shift = false;
-        let mut key_opt = None;
-
-        for token in tokens {
-            match token.to_ascii_lowercase().as_str() {
+        for token in mods.split('+').filter(|t| !t.trim().is_empty()) {
+            match token.trim().to_ascii_lowercase().as_str() {
                 "ctrl" | "control" | "cmd" | "command" => ctrl = true,
                 "alt" | "opt" | "option" => alt = true,
                 "shift" => shift = true,
-                other => {
-                    if let Some(k) = key_from_name(other) {
-                        key_opt = Some(k);
-                    }
-                }
+                _ => return None,
             }
         }
 
-        key_opt.map(|key| Self {
+        Some(Self {
             key,
             ctrl,
             alt,
@@ -264,178 +269,586 @@ impl<'de> Deserialize<'de> for KeyCombination {
     {
         let s = String::deserialize(deserializer)?;
         KeyCombination::parse_str(&s)
-            .ok_or_else(|| serde::de::Error::custom(format!("Invalid key combination string: {s}")))
+            .ok_or_else(|| serde::de::Error::custom(format!("Invalid key combination: {s}")))
     }
 }
 
 /// Returns a human-friendly string name for an `egui::Key`.
 pub fn key_name(key: egui::Key) -> &'static str {
+    use egui::Key as K;
     match key {
-        egui::Key::Space => "Space",
-        egui::Key::ArrowLeft => "Left",
-        egui::Key::ArrowRight => "Right",
-        egui::Key::ArrowUp => "Up",
-        egui::Key::ArrowDown => "Down",
-        egui::Key::Period => ".",
-        egui::Key::Comma => ",",
-        egui::Key::OpenBracket => "[",
-        egui::Key::CloseBracket => "]",
-        egui::Key::Backspace => "Backspace",
-        egui::Key::Escape => "Esc",
-        egui::Key::Enter => "Enter",
-        egui::Key::Tab => "Tab",
-        egui::Key::Delete => "Delete",
-        egui::Key::F1 => "F1",
-        egui::Key::F2 => "F2",
-        egui::Key::F3 => "F3",
-        egui::Key::F4 => "F4",
-        egui::Key::F5 => "F5",
-        egui::Key::F6 => "F6",
-        egui::Key::F7 => "F7",
-        egui::Key::F8 => "F8",
-        egui::Key::F9 => "F9",
-        egui::Key::F10 => "F10",
-        egui::Key::F11 => "F11",
-        egui::Key::F12 => "F12",
-        egui::Key::A => "A",
-        egui::Key::B => "B",
-        egui::Key::C => "C",
-        egui::Key::D => "D",
-        egui::Key::E => "E",
-        egui::Key::F => "F",
-        egui::Key::G => "G",
-        egui::Key::H => "H",
-        egui::Key::I => "I",
-        egui::Key::J => "J",
-        egui::Key::K => "K",
-        egui::Key::L => "L",
-        egui::Key::M => "M",
-        egui::Key::N => "N",
-        egui::Key::O => "O",
-        egui::Key::P => "P",
-        egui::Key::Q => "Q",
-        egui::Key::R => "R",
-        egui::Key::S => "S",
-        egui::Key::T => "T",
-        egui::Key::U => "U",
-        egui::Key::V => "V",
-        egui::Key::W => "W",
-        egui::Key::X => "X",
-        egui::Key::Y => "Y",
-        egui::Key::Z => "Z",
-        egui::Key::Num0 => "0",
-        egui::Key::Num1 => "1",
-        egui::Key::Num2 => "2",
-        egui::Key::Num3 => "3",
-        egui::Key::Num4 => "4",
-        egui::Key::Num5 => "5",
-        egui::Key::Num6 => "6",
-        egui::Key::Num7 => "7",
-        egui::Key::Num8 => "8",
-        egui::Key::Num9 => "9",
+        K::Space => "Space",
+        K::ArrowLeft => "Left",
+        K::ArrowRight => "Right",
+        K::ArrowUp => "Up",
+        K::ArrowDown => "Down",
+        K::Period => ".",
+        K::Comma => ",",
+        K::OpenBracket => "[",
+        K::CloseBracket => "]",
+        K::OpenCurlyBracket => "{",
+        K::CloseCurlyBracket => "}",
+        K::Backspace => "Backspace",
+        K::Escape => "Esc",
+        K::Enter => "Enter",
+        K::Tab => "Tab",
+        K::Delete => "Delete",
+        K::Insert => "Insert",
+        K::Home => "Home",
+        K::End => "End",
+        K::PageUp => "PageUp",
+        K::PageDown => "PageDown",
+        K::Minus => "−",
+        K::Plus => "+",
+        K::Equals => "=",
+        K::Slash => "/",
+        K::Backslash => "\\",
+        K::Semicolon => ";",
+        K::Colon => ":",
+        K::Quote => "'",
+        K::Pipe => "|",
+        K::Questionmark => "?",
+        K::Backtick => "`",
+        K::F1 => "F1",
+        K::F2 => "F2",
+        K::F3 => "F3",
+        K::F4 => "F4",
+        K::F5 => "F5",
+        K::F6 => "F6",
+        K::F7 => "F7",
+        K::F8 => "F8",
+        K::F9 => "F9",
+        K::F10 => "F10",
+        K::F11 => "F11",
+        K::F12 => "F12",
+        K::A => "A",
+        K::B => "B",
+        K::C => "C",
+        K::D => "D",
+        K::E => "E",
+        K::F => "F",
+        K::G => "G",
+        K::H => "H",
+        K::I => "I",
+        K::J => "J",
+        K::K => "K",
+        K::L => "L",
+        K::M => "M",
+        K::N => "N",
+        K::O => "O",
+        K::P => "P",
+        K::Q => "Q",
+        K::R => "R",
+        K::S => "S",
+        K::T => "T",
+        K::U => "U",
+        K::V => "V",
+        K::W => "W",
+        K::X => "X",
+        K::Y => "Y",
+        K::Z => "Z",
+        K::Num0 => "0",
+        K::Num1 => "1",
+        K::Num2 => "2",
+        K::Num3 => "3",
+        K::Num4 => "4",
+        K::Num5 => "5",
+        K::Num6 => "6",
+        K::Num7 => "7",
+        K::Num8 => "8",
+        K::Num9 => "9",
         _ => "Unknown",
     }
 }
 
 /// Parses an `egui::Key` from its string name.
 pub fn key_from_name(s: &str) -> Option<egui::Key> {
+    use egui::Key as K;
     match s.trim().to_ascii_lowercase().as_str() {
-        "space" => Some(egui::Key::Space),
-        "left" | "arrowleft" => Some(egui::Key::ArrowLeft),
-        "right" | "arrowright" => Some(egui::Key::ArrowRight),
-        "up" | "arrowup" => Some(egui::Key::ArrowUp),
-        "down" | "arrowdown" => Some(egui::Key::ArrowDown),
-        "." | "period" | "dot" => Some(egui::Key::Period),
-        "," | "comma" => Some(egui::Key::Comma),
-        "[" | "openbracket" => Some(egui::Key::OpenBracket),
-        "]" | "closebracket" => Some(egui::Key::CloseBracket),
-        "backspace" => Some(egui::Key::Backspace),
-        "esc" | "escape" => Some(egui::Key::Escape),
-        "enter" | "return" => Some(egui::Key::Enter),
-        "tab" => Some(egui::Key::Tab),
-        "delete" | "del" => Some(egui::Key::Delete),
-        "f1" => Some(egui::Key::F1),
-        "f2" => Some(egui::Key::F2),
-        "f3" => Some(egui::Key::F3),
-        "f4" => Some(egui::Key::F4),
-        "f5" => Some(egui::Key::F5),
-        "f6" => Some(egui::Key::F6),
-        "f7" => Some(egui::Key::F7),
-        "f8" => Some(egui::Key::F8),
-        "f9" => Some(egui::Key::F9),
-        "f10" => Some(egui::Key::F10),
-        "f11" => Some(egui::Key::F11),
-        "f12" => Some(egui::Key::F12),
-        "a" => Some(egui::Key::A),
-        "b" => Some(egui::Key::B),
-        "c" => Some(egui::Key::C),
-        "d" => Some(egui::Key::D),
-        "e" => Some(egui::Key::E),
-        "f" => Some(egui::Key::F),
-        "g" => Some(egui::Key::G),
-        "h" => Some(egui::Key::H),
-        "i" => Some(egui::Key::I),
-        "j" => Some(egui::Key::J),
-        "k" => Some(egui::Key::K),
-        "l" => Some(egui::Key::L),
-        "m" => Some(egui::Key::M),
-        "n" => Some(egui::Key::N),
-        "o" => Some(egui::Key::O),
-        "p" => Some(egui::Key::P),
-        "q" => Some(egui::Key::Q),
-        "r" => Some(egui::Key::R),
-        "s" => Some(egui::Key::S),
-        "t" => Some(egui::Key::T),
-        "u" => Some(egui::Key::U),
-        "v" => Some(egui::Key::V),
-        "w" => Some(egui::Key::W),
-        "x" => Some(egui::Key::X),
-        "y" => Some(egui::Key::Y),
-        "z" => Some(egui::Key::Z),
-        "0" => Some(egui::Key::Num0),
-        "1" => Some(egui::Key::Num1),
-        "2" => Some(egui::Key::Num2),
-        "3" => Some(egui::Key::Num3),
-        "4" => Some(egui::Key::Num4),
-        "5" => Some(egui::Key::Num5),
-        "6" => Some(egui::Key::Num6),
-        "7" => Some(egui::Key::Num7),
-        "8" => Some(egui::Key::Num8),
-        "9" => Some(egui::Key::Num9),
+        "space" => Some(K::Space),
+        "left" | "arrowleft" => Some(K::ArrowLeft),
+        "right" | "arrowright" => Some(K::ArrowRight),
+        "up" | "arrowup" => Some(K::ArrowUp),
+        "down" | "arrowdown" => Some(K::ArrowDown),
+        "." | "period" | "dot" => Some(K::Period),
+        "," | "comma" => Some(K::Comma),
+        "[" | "openbracket" => Some(K::OpenBracket),
+        "]" | "closebracket" => Some(K::CloseBracket),
+        "{" | "opencurlybracket" => Some(K::OpenCurlyBracket),
+        "}" | "closecurlybracket" => Some(K::CloseCurlyBracket),
+        "backspace" => Some(K::Backspace),
+        "esc" | "escape" => Some(K::Escape),
+        "enter" | "return" => Some(K::Enter),
+        "tab" => Some(K::Tab),
+        "delete" | "del" => Some(K::Delete),
+        "insert" => Some(K::Insert),
+        "home" => Some(K::Home),
+        "end" => Some(K::End),
+        "pageup" | "pgup" => Some(K::PageUp),
+        "pagedown" | "pgdown" => Some(K::PageDown),
+        "-" | "minus" | "−" => Some(K::Minus),
+        "+" | "plus" => Some(K::Plus),
+        "=" | "equals" => Some(K::Equals),
+        "/" | "slash" => Some(K::Slash),
+        "\\" | "backslash" => Some(K::Backslash),
+        ";" | "semicolon" => Some(K::Semicolon),
+        ":" | "colon" => Some(K::Colon),
+        "'" | "quote" => Some(K::Quote),
+        "|" | "pipe" => Some(K::Pipe),
+        "?" | "questionmark" => Some(K::Questionmark),
+        "`" | "backtick" | "grave" => Some(K::Backtick),
+        "f1" => Some(K::F1),
+        "f2" => Some(K::F2),
+        "f3" => Some(K::F3),
+        "f4" => Some(K::F4),
+        "f5" => Some(K::F5),
+        "f6" => Some(K::F6),
+        "f7" => Some(K::F7),
+        "f8" => Some(K::F8),
+        "f9" => Some(K::F9),
+        "f10" => Some(K::F10),
+        "f11" => Some(K::F11),
+        "f12" => Some(K::F12),
+        "0" => Some(K::Num0),
+        "1" => Some(K::Num1),
+        "2" => Some(K::Num2),
+        "3" => Some(K::Num3),
+        "4" => Some(K::Num4),
+        "5" => Some(K::Num5),
+        "6" => Some(K::Num6),
+        "7" => Some(K::Num7),
+        "8" => Some(K::Num8),
+        "9" => Some(K::Num9),
+        other if other.len() == 1 => {
+            let c = other.chars().next()?;
+            letter_or_digit_key(c)
+        }
         _ => None,
     }
 }
 
-/// Configurable keybinding map with conflict detection, JSON persistence, and reset capabilities.
+/// Keys whose character requires Shift on a standard layout.
+fn shift_is_implicit(key: egui::Key) -> bool {
+    use egui::Key as K;
+    matches!(
+        key,
+        K::Plus | K::Questionmark | K::Colon | K::Pipe | K::Exclamationmark
+    )
+}
+
+fn letter_or_digit_key(c: char) -> Option<egui::Key> {
+    use egui::Key as K;
+    Some(match c.to_ascii_lowercase() {
+        'a' => K::A,
+        'b' => K::B,
+        'c' => K::C,
+        'd' => K::D,
+        'e' => K::E,
+        'f' => K::F,
+        'g' => K::G,
+        'h' => K::H,
+        'i' => K::I,
+        'j' => K::J,
+        'k' => K::K,
+        'l' => K::L,
+        'm' => K::M,
+        'n' => K::N,
+        'o' => K::O,
+        'p' => K::P,
+        'q' => K::Q,
+        'r' => K::R,
+        's' => K::S,
+        't' => K::T,
+        'u' => K::U,
+        'v' => K::V,
+        'w' => K::W,
+        'x' => K::X,
+        'y' => K::Y,
+        'z' => K::Z,
+        _ => return None,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Built-in default catalogues
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct BindingSet {
+    primary: BTreeMap<PlayerAction, KeyCombination>,
+    alternate: BTreeMap<PlayerAction, KeyCombination>,
+}
+
+impl BindingSet {
+    fn used(&self, combo: KeyCombination, ignore: PlayerAction) -> bool {
+        self.primary
+            .iter()
+            .any(|(a, c)| *a != ignore && *c == combo)
+            || self
+                .alternate
+                .iter()
+                .any(|(a, c)| *a != ignore && *c == combo)
+    }
+
+    fn add(&mut self, action: PlayerAction, combo: KeyCombination) {
+        self.primary.insert(action, combo);
+    }
+
+    fn add_alt(&mut self, action: PlayerAction, combo: KeyCombination) {
+        if !self.used(combo, action) {
+            self.alternate.insert(action, combo);
+        }
+    }
+
+    /// Adds a binding only when the action and key are both free. Actions that
+    /// already have a primary receive this combination as an alternative.
+    fn try_add(&mut self, action: PlayerAction, combo: KeyCombination) -> bool {
+        if self.used(combo, action) || self.primary.get(&action) == Some(&combo) {
+            return false;
+        }
+        if self.primary.contains_key(&action) {
+            if self.alternate.contains_key(&action) {
+                return false;
+            }
+            self.alternate.insert(action, combo);
+            return true;
+        }
+        self.primary.insert(action, combo);
+        true
+    }
+}
+
+fn combo(key: egui::Key) -> KeyCombination {
+    KeyCombination::new(key)
+}
+
+fn classic_bindings() -> BindingSet {
+    use egui::Key as K;
+    use PlayerAction as A;
+    let mut b = BindingSet::default();
+
+    // Playback
+    b.add(A::PlayPause, combo(K::Space));
+    b.add(A::Stop, combo(K::S));
+    b.add(A::NextMedia, combo(K::N));
+    b.add(A::PreviousMedia, combo(K::P));
+    b.add(A::ToggleRepeatMode, combo(K::L));
+    b.add(A::ToggleAbLoop, combo(K::L).with_shift());
+    b.add(A::FrameStepForward, combo(K::E));
+    b.add(A::SpeedIncrease, combo(K::Plus));
+    b.add(A::SpeedDecrease, combo(K::Minus));
+    b.add(A::SpeedReset, combo(K::Equals));
+    b.add_alt(A::SpeedIncrease, combo(K::CloseBracket));
+    b.add_alt(A::SpeedDecrease, combo(K::OpenBracket));
+
+    // Seeking (VLC granularity ladder)
+    b.add(A::SeekBackwardVeryShort, combo(K::ArrowLeft).with_shift());
+    b.add(A::SeekForwardVeryShort, combo(K::ArrowRight).with_shift());
+    b.add(A::SeekBackwardShort, combo(K::ArrowLeft).with_alt());
+    b.add(A::SeekForwardShort, combo(K::ArrowRight).with_alt());
+    b.add(A::SeekBackwardMedium, combo(K::ArrowLeft).with_ctrl());
+    b.add(A::SeekForwardMedium, combo(K::ArrowRight).with_ctrl());
+    b.add(
+        A::SeekBackwardLong,
+        combo(K::ArrowLeft).with_ctrl().with_alt(),
+    );
+    b.add(
+        A::SeekForwardLong,
+        combo(K::ArrowRight).with_ctrl().with_alt(),
+    );
+    b.add(A::SeekBackwardTenMinutes, combo(K::PageUp).with_shift());
+    b.add(A::SeekForwardTenMinutes, combo(K::PageDown).with_shift());
+    b.add(A::SeekToBeginning, combo(K::Home));
+
+    // Volume
+    b.add(A::VolumeUp, combo(K::ArrowUp).with_ctrl());
+    b.add(A::VolumeDown, combo(K::ArrowDown).with_ctrl());
+    b.add(A::ToggleMute, combo(K::M));
+
+    // Audio
+    b.add(A::CycleAudioTrack, combo(K::B));
+    b.add(A::CycleAudioDevice, combo(K::A).with_shift());
+    b.add(A::AudioDelayIncrease, combo(K::K));
+    b.add(A::AudioDelayDecrease, combo(K::J));
+
+    // Subtitles
+    b.add(A::CycleSubtitleTrack, combo(K::V));
+    b.add(A::CycleSubtitleTrackReverse, combo(K::V).with_alt());
+    b.add(A::ToggleSubtitles, combo(K::V).with_shift());
+    b.add(A::CycleSecondarySubtitle, combo(K::V).with_ctrl());
+    b.add(A::SubtitleDelayIncrease, combo(K::H));
+    b.add(A::SubtitleDelayDecrease, combo(K::G));
+    b.add(A::AddSubtitleFile, combo(K::S).with_ctrl().with_alt());
+
+    // Video
+    b.add(A::CycleAspectRatio, combo(K::A));
+    b.add(A::CycleCropPreset, combo(K::C));
+    b.add(A::CycleScalingMode, combo(K::O));
+    b.add(A::ToggleDeinterlace, combo(K::D));
+    b.add(A::ZoomIn, combo(K::Z));
+    b.add(A::ZoomOut, combo(K::Z).with_shift());
+    b.add(A::Screenshot, combo(K::S).with_shift());
+
+    // Playlist
+    b.add(A::ToggleShuffle, combo(K::R));
+    b.add(A::NextChapter, combo(K::PageDown).with_ctrl());
+    b.add(A::PreviousChapter, combo(K::PageUp).with_ctrl());
+    b.add(A::AddBookmark, combo(K::B).with_ctrl().with_shift());
+    b.add(A::ClearPlaylist, combo(K::W).with_ctrl().with_shift());
+
+    // Navigation / window
+    b.add(A::ToggleFullscreen, combo(K::F));
+    b.add_alt(A::ToggleFullscreen, combo(K::F11));
+    b.add(A::ExitFullscreen, combo(K::Escape));
+    b.add(A::ToggleCinema, combo(K::Enter).with_shift());
+    b.add(A::ToggleControls, combo(K::I));
+    b.add(A::ToggleStatistics, combo(K::I).with_ctrl());
+    b.add(A::ExportDiagnostics, combo(K::I).with_ctrl().with_shift());
+    b.add(A::ToggleAlwaysOnTop, combo(K::T).with_ctrl());
+    b.add(A::ToggleMiniPlayer, combo(K::P).with_alt());
+    b.add(A::TogglePlaylistDrawer, combo(K::L).with_ctrl());
+    b.add(A::ToggleBrowserView, combo(K::B).with_ctrl());
+    b.add(A::OpenFile, combo(K::O).with_ctrl());
+
+    // Advanced
+    b.add(A::ShowShortcutHelp, combo(K::F1));
+    b.add_alt(A::ShowShortcutHelp, combo(K::Questionmark));
+    b.add(A::ReloadMedia, combo(K::R).with_ctrl());
+    b
+}
+
+fn advanced_bindings() -> BindingSet {
+    use egui::Key as K;
+    use PlayerAction as A;
+    let mut b = BindingSet::default();
+
+    // Playback
+    b.add(A::PlayPause, combo(K::Space));
+    b.add_alt(A::PlayPause, combo(K::P));
+    b.add(A::FrameStepForward, combo(K::Period));
+    b.add(A::FrameStepBack, combo(K::Comma));
+    b.add(A::SpeedDecrease, combo(K::OpenBracket));
+    b.add(A::SpeedIncrease, combo(K::CloseBracket));
+    b.add(A::SpeedHalf, combo(K::OpenCurlyBracket));
+    b.add(A::SpeedDouble, combo(K::CloseCurlyBracket));
+    b.add(A::SpeedReset, combo(K::Backspace));
+    b.add(A::ToggleAbLoop, combo(K::L));
+
+    // Seeking
+    b.add(A::SeekBackwardShort, combo(K::ArrowLeft));
+    b.add(A::SeekForwardShort, combo(K::ArrowRight));
+    b.add(A::SeekBackwardLong, combo(K::ArrowDown));
+    b.add(A::SeekForwardLong, combo(K::ArrowUp));
+    b.add(A::SeekBackwardVeryShort, combo(K::ArrowLeft).with_shift());
+    b.add(A::SeekForwardVeryShort, combo(K::ArrowRight).with_shift());
+    b.add(A::SeekBackwardTenMinutes, combo(K::PageUp).with_shift());
+    b.add(A::SeekForwardTenMinutes, combo(K::PageDown).with_shift());
+    b.add(A::SeekToBeginning, combo(K::Home));
+
+    // Volume (mpv 9/0, with slash-star style alternatives)
+    b.add(A::VolumeDown, combo(K::Num9));
+    b.add(A::VolumeUp, combo(K::Num0));
+    b.add_alt(A::VolumeDown, combo(K::Slash));
+    b.add(A::ToggleMute, combo(K::M));
+
+    // Audio
+    b.add(A::CycleAudioTrack, combo(K::A).with_shift());
+    b.add(A::AudioDelayIncrease, combo(K::Plus).with_ctrl());
+    b.add(A::AudioDelayDecrease, combo(K::Minus).with_ctrl());
+
+    // Subtitles
+    b.add(A::ToggleSubtitles, combo(K::V));
+    b.add(A::CycleSubtitleTrack, combo(K::J));
+    b.add(A::CycleSubtitleTrackReverse, combo(K::J).with_shift());
+    b.add(A::CycleSecondarySubtitle, combo(K::V).with_alt());
+    b.add(A::SubtitleDelayIncrease, combo(K::Z));
+    b.add(A::SubtitleDelayDecrease, combo(K::Z).with_shift());
+
+    // Video
+    b.add(A::CycleAspectRatio, combo(K::A));
+    b.add(A::ToggleDeband, combo(K::B));
+    b.add(A::ToggleDeinterlace, combo(K::D));
+    b.add(A::CycleScalingMode, combo(K::W));
+    b.add(A::PanLeft, combo(K::ArrowLeft).with_alt());
+    b.add(A::PanRight, combo(K::ArrowRight).with_alt());
+    b.add(A::PanUp, combo(K::ArrowUp).with_alt());
+    b.add(A::PanDown, combo(K::ArrowDown).with_alt());
+    b.add(A::ZoomIn, combo(K::Plus).with_alt());
+    b.add(A::ZoomOut, combo(K::Minus).with_alt());
+    b.add(A::ResetZoom, combo(K::Backspace).with_alt());
+    b.add(A::ToggleHardwareDecoding, combo(K::H).with_ctrl());
+    b.add(A::Screenshot, combo(K::S));
+    b.add(A::ScreenshotWithoutSubtitles, combo(K::S).with_shift());
+
+    // Playlist / chapters
+    b.add(A::NextMedia, combo(K::Enter));
+    b.add(A::NextChapter, combo(K::PageDown));
+    b.add(A::PreviousChapter, combo(K::PageUp));
+    b.add(A::TogglePlaylistDrawer, combo(K::F8));
+
+    // Navigation / window
+    b.add(A::ToggleFullscreen, combo(K::F));
+    b.add(A::ExitFullscreen, combo(K::Escape));
+    b.add(A::ToggleControls, combo(K::Delete));
+    b.add(A::ToggleStatistics, combo(K::I));
+    b.add(A::ToggleAlwaysOnTop, combo(K::T));
+    b.add(A::OpenFile, combo(K::O).with_ctrl());
+
+    // Advanced
+    b.add(A::ShowShortcutHelp, combo(K::Questionmark));
+    b.add_alt(A::ShowShortcutHelp, combo(K::F1));
+    b.add(A::ReloadMedia, combo(K::R).with_ctrl());
+    b
+}
+
+fn hybrid_bindings() -> BindingSet {
+    use egui::Key as K;
+    use PlayerAction as A;
+    // VLC compatibility is the priority: start with the Classic table.
+    let mut b = classic_bindings();
+
+    // mpv-only actions receive free keys or proposed alternatives.
+    b.try_add(A::SeekBackwardShort, combo(K::ArrowLeft));
+    b.try_add(A::SeekForwardShort, combo(K::ArrowRight));
+    b.try_add(A::SeekBackwardLong, combo(K::ArrowDown));
+    b.try_add(A::SeekForwardLong, combo(K::ArrowUp));
+    b.try_add(A::FrameStepBack, combo(K::Comma));
+    b.try_add(A::SpeedHalf, combo(K::OpenCurlyBracket));
+    b.try_add(A::SpeedDouble, combo(K::CloseCurlyBracket));
+    b.try_add(A::ToggleDeband, combo(K::B).with_ctrl().with_alt());
+    b.try_add(A::CycleAudioTrack, combo(K::A).with_ctrl());
+    b.try_add(A::CycleSubtitleTrack, combo(K::J).with_ctrl());
+    b.try_add(A::ToggleHardwareDecoding, combo(K::H).with_ctrl());
+    b.try_add(A::ZoomIn, combo(K::Plus).with_alt());
+    b.try_add(A::ZoomOut, combo(K::Minus).with_alt());
+    b.try_add(A::ResetZoom, combo(K::Backspace).with_alt());
+    b.try_add(A::PanLeft, combo(K::ArrowLeft).with_alt());
+    b.try_add(A::PanRight, combo(K::ArrowRight).with_alt());
+    b.try_add(A::PanUp, combo(K::ArrowUp).with_alt());
+    b.try_add(A::PanDown, combo(K::ArrowDown).with_alt());
+    b.try_add(A::ToggleStatistics, combo(K::I).with_ctrl());
+    b.try_add(A::ToggleCinema, combo(K::Enter).with_shift());
+    b.try_add(A::ExportDiagnostics, combo(K::I).with_ctrl().with_shift());
+    b.try_add(A::ToggleControls, combo(K::Delete));
+    b.try_add(A::NextChapter, combo(K::PageDown));
+    b.try_add(A::PreviousChapter, combo(K::PageUp));
+    b.try_add(A::TogglePlaylistDrawer, combo(K::F8));
+    b.add_alt(A::NextMedia, combo(K::Enter));
+    b.add_alt(A::VolumeDown, combo(K::Num9));
+    b.add_alt(A::VolumeUp, combo(K::Num0));
+    b.add_alt(A::ShowShortcutHelp, combo(K::Questionmark));
+    b.add_alt(A::ToggleFullscreen, combo(K::F11));
+    b
+}
+
+fn legacy_bindings() -> BindingSet {
+    use egui::Key as K;
+    use PlayerAction as A;
+    let mut b = BindingSet::default();
+
+    b.add(A::PlayPause, combo(K::Space));
+    b.add_alt(A::PlayPause, combo(K::Enter));
+    b.add(A::SeekBackwardShort, combo(K::ArrowLeft));
+    b.add(A::SeekForwardShort, combo(K::ArrowRight));
+    b.add(A::VolumeUp, combo(K::ArrowUp));
+    b.add(A::VolumeDown, combo(K::ArrowDown));
+    b.add(A::FrameStepForward, combo(K::Period));
+    b.add(A::FrameStepBack, combo(K::Comma));
+    b.add(A::ToggleAbLoop, combo(K::L));
+    b.add(A::ToggleMute, combo(K::M));
+    b.add(A::ToggleFullscreen, combo(K::F));
+    b.add_alt(A::ToggleFullscreen, combo(K::F11));
+    b.add(A::ExitFullscreen, combo(K::Escape));
+    b.add(A::ToggleCinema, combo(K::Enter).with_shift());
+    b.add(A::ToggleControls, combo(K::H));
+    b.add(A::ToggleStatistics, combo(K::M).with_alt());
+    b.add(A::ExportDiagnostics, combo(K::I).with_ctrl().with_shift());
+    b.add(A::TogglePlaylistDrawer, combo(K::P));
+    b.add(A::ToggleBrowserView, combo(K::B));
+    b.add(A::ToggleMiniPlayer, combo(K::I));
+    b.add(A::SpeedDecrease, combo(K::OpenBracket));
+    b.add(A::SpeedIncrease, combo(K::CloseBracket));
+    b.add(A::SpeedReset, combo(K::Backspace));
+    b.add(A::OpenFile, combo(K::O).with_ctrl());
+    b.add(A::ShowShortcutHelp, combo(K::F1));
+    b.add_alt(A::ShowShortcutHelp, combo(K::Questionmark));
+    b
+}
+
+type BindingTables = (
+    BTreeMap<PlayerAction, KeyCombination>,
+    BTreeMap<PlayerAction, KeyCombination>,
+);
+
+fn defaults_for(profile: ShortcutProfile) -> BindingTables {
+    let set = match profile {
+        ShortcutProfile::Classic => classic_bindings(),
+        ShortcutProfile::Advanced => advanced_bindings(),
+        ShortcutProfile::Hybrid => hybrid_bindings(),
+        ShortcutProfile::Legacy => legacy_bindings(),
+    };
+    (set.primary, set.alternate)
+}
+
+// ---------------------------------------------------------------------------
+// Registry
+// ---------------------------------------------------------------------------
+
+/// Configurable keybinding registry with profiles, conflict detection,
+/// per-profile overrides, JSON persistence and import/export.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyBindingMap {
-    pub bindings: BTreeMap<ShortcutAction, KeyCombination>,
     #[serde(default)]
-    pub alternates: BTreeMap<ShortcutAction, KeyCombination>,
+    pub profile: ShortcutProfile,
+    pub bindings: BTreeMap<PlayerAction, KeyCombination>,
+    #[serde(default)]
+    pub alternates: BTreeMap<PlayerAction, KeyCombination>,
+    /// Per-profile user edits layered over the profile defaults.
+    #[serde(default)]
+    pub overrides: BTreeMap<ShortcutProfile, BTreeMap<PlayerAction, KeyCombination>>,
 }
 
 impl Default for KeyBindingMap {
     fn default() -> Self {
-        let mut bindings = BTreeMap::new();
-        let mut alternates = BTreeMap::new();
-
-        for &action in ShortcutAction::ALL {
-            bindings.insert(action, action.default_combination());
-            if let Some(alt) = action.default_alternate() {
-                alternates.insert(action, alt);
-            }
-        }
-
-        Self {
-            bindings,
-            alternates,
-        }
+        Self::for_profile(ShortcutProfile::Classic)
     }
 }
 
 impl KeyBindingMap {
-    /// Checks whether an action's bound combination was triggered in this input frame.
-    pub fn matches(&self, action: ShortcutAction, input: &egui::InputState) -> bool {
+    pub fn for_profile(profile: ShortcutProfile) -> Self {
+        let (bindings, alternates) = defaults_for(profile);
+        Self {
+            profile,
+            bindings,
+            alternates,
+            overrides: BTreeMap::new(),
+        }
+    }
+
+    /// Switches profile, preserving edits made in the previous profile.
+    pub fn set_profile(&mut self, profile: ShortcutProfile) {
+        if self.profile == profile {
+            return;
+        }
+        let (mut bindings, mut alternates) = defaults_for(profile);
+        if let Some(edits) = self.overrides.get(&profile) {
+            for (action, combo) in edits {
+                bindings.insert(*action, *combo);
+            }
+            // A customised primary may collide with a default alternate;
+            // drop the stale alternate rather than silently double-fire.
+            alternates.retain(|action, combo| {
+                let taken = bindings.iter().any(|(a, c)| a != action && c == combo);
+                !taken
+            });
+        }
+        self.profile = profile;
+        self.bindings = bindings;
+        self.alternates = alternates;
+    }
+
+    /// Checks whether an action's bound combination was triggered this frame.
+    pub fn matches(&self, action: PlayerAction, input: &egui::InputState) -> bool {
         if let Some(combo) = self.bindings.get(&action) {
             if combo.matches(input) {
                 return true;
@@ -449,66 +862,199 @@ impl KeyBindingMap {
         false
     }
 
-    /// Gets the primary binding for an action.
-    pub fn get(&self, action: ShortcutAction) -> Option<&KeyCombination> {
-        self.bindings.get(&action)
-    }
-
-    /// Rebinds an action to a new combination.
-    pub fn set_binding(&mut self, action: ShortcutAction, combination: KeyCombination) {
-        self.bindings.insert(action, combination);
-    }
-
-    /// Resets all bindings and alternates to their factory defaults.
-    pub fn reset_to_defaults(&mut self) {
-        *self = Self::default();
-    }
-
-    /// Resets a single action to its default combination.
-    pub fn reset_action(&mut self, action: ShortcutAction) {
-        self.bindings.insert(action, action.default_combination());
-        if let Some(alt) = action.default_alternate() {
-            self.alternates.insert(action, alt);
-        } else {
-            self.alternates.remove(&action);
-        }
-    }
-
-    /// Identifies all conflicting pairs of actions sharing the exact same key combination.
-    pub fn find_conflicts(&self) -> Vec<(ShortcutAction, ShortcutAction, KeyCombination)> {
-        let mut conflicts = Vec::new();
-        let list: Vec<(ShortcutAction, KeyCombination)> =
-            self.bindings.iter().map(|(a, c)| (*a, *c)).collect();
-
-        for i in 0..list.len() {
-            for j in (i + 1)..list.len() {
-                let (act_a, combo_a) = list[i];
-                let (act_b, combo_b) = list[j];
-                if combo_a == combo_b {
-                    conflicts.push((act_a, act_b, combo_a));
+    /// Resolves every action triggered this frame, de-duplicating by
+    /// combination so a stray conflict can never fire two actions.
+    pub fn pressed_actions(
+        &self,
+        actions: &[PlayerAction],
+        input: &egui::InputState,
+    ) -> Vec<PlayerAction> {
+        let mut fired: Vec<PlayerAction> = Vec::new();
+        for &action in actions {
+            if !self.matches(action, input) {
+                continue;
+            }
+            let combo = if self.bindings.get(&action).is_some_and(|c| c.matches(input)) {
+                self.bindings.get(&action).copied()
+            } else {
+                self.alternates.get(&action).copied()
+            };
+            if let Some(combo) = combo {
+                let duplicate = fired.iter().any(|other| {
+                    self.bindings.get(other).copied() == Some(combo)
+                        || self.alternates.get(other).copied() == Some(combo)
+                });
+                if !duplicate {
+                    fired.push(action);
                 }
             }
         }
+        fired
+    }
 
+    pub fn get(&self, action: PlayerAction) -> Option<&KeyCombination> {
+        self.bindings.get(&action)
+    }
+
+    pub fn get_alternate(&self, action: PlayerAction) -> Option<&KeyCombination> {
+        self.alternates.get(&action)
+    }
+
+    /// Human-readable shortcut hint for tooltips (`""` when unbound).
+    pub fn hint(&self, action: PlayerAction) -> String {
+        self.get(action)
+            .map(|c| c.display_string())
+            .unwrap_or_default()
+    }
+
+    /// Returns every action/slot currently using `combination`.
+    pub fn conflicting_slots(
+        &self,
+        action: PlayerAction,
+        combination: KeyCombination,
+    ) -> Vec<(PlayerAction, BindingSlot)> {
+        let mut out = Vec::new();
+        for (other, combo) in &self.bindings {
+            if *other != action && *combo == combination {
+                out.push((*other, BindingSlot::Primary));
+            }
+        }
+        for (other, combo) in &self.alternates {
+            if *other != action && *combo == combination {
+                out.push((*other, BindingSlot::Alternate));
+            }
+        }
+        out
+    }
+
+    /// Attempts to bind a combination, reporting conflicts instead of
+    /// silently overwriting another action.
+    pub fn try_bind(&self, action: PlayerAction, combination: KeyCombination) -> BindOutcome {
+        let conflicts = self.conflicting_slots(action, combination);
+        if conflicts.is_empty() {
+            BindOutcome::Bound
+        } else {
+            BindOutcome::Conflict(conflicts)
+        }
+    }
+
+    /// Binds a combination, clearing any conflicting assignment.
+    pub fn bind_replace(&mut self, action: PlayerAction, combination: KeyCombination) {
+        let conflicts = self.conflicting_slots(action, combination);
+        for (other, slot) in conflicts {
+            match slot {
+                BindingSlot::Primary => {
+                    self.bindings.remove(&other);
+                }
+                BindingSlot::Alternate => {
+                    self.alternates.remove(&other);
+                }
+            }
+        }
+        self.set_binding(action, combination);
+    }
+
+    /// Moves the conflicting action onto this action's previous combination.
+    pub fn bind_swap(&mut self, action: PlayerAction, combination: KeyCombination) {
+        let previous = self.bindings.get(&action).copied();
+        let conflicts = self.conflicting_slots(action, combination);
+        if let (Some(previous), Some((other, slot))) = (previous, conflicts.first().copied()) {
+            match slot {
+                BindingSlot::Primary => {
+                    self.bindings.insert(other, previous);
+                }
+                BindingSlot::Alternate => {
+                    self.alternates.insert(other, previous);
+                }
+            }
+        }
+        self.bind_replace(action, combination);
+    }
+
+    /// True when this action's primary binding was customised in this profile.
+    pub fn is_custom(&self, action: PlayerAction) -> bool {
+        self.overrides
+            .get(&self.profile)
+            .is_some_and(|edits| edits.contains_key(&action))
+    }
+
+    /// Records a primary binding as a per-profile override.
+    pub fn set_binding(&mut self, action: PlayerAction, combination: KeyCombination) {
+        self.bindings.insert(action, combination);
+        self.alternates.remove(&action);
+        self.overrides
+            .entry(self.profile)
+            .or_default()
+            .insert(action, combination);
+    }
+
+    pub fn reset_to_defaults(&mut self) {
+        self.overrides.clear();
+        *self = Self::for_profile(self.profile);
+    }
+
+    pub fn reset_action(&mut self, action: PlayerAction) {
+        let (defaults, alternates) = defaults_for(self.profile);
+        if let Some(combo) = defaults.get(&action) {
+            self.bindings.insert(action, *combo);
+        } else {
+            self.bindings.remove(&action);
+        }
+        if let Some(alt) = alternates.get(&action) {
+            self.alternates.insert(action, *alt);
+        } else {
+            self.alternates.remove(&action);
+        }
+        if let Some(edits) = self.overrides.get_mut(&self.profile) {
+            edits.remove(&action);
+        }
+    }
+
+    /// Identifies all conflicting bindings across primary and alternate slots.
+    pub fn find_conflicts(&self) -> Vec<KeyConflict> {
+        let mut list: Vec<(PlayerAction, KeyCombination, BindingSlot)> = Vec::new();
+        list.extend(
+            self.bindings
+                .iter()
+                .map(|(a, c)| (*a, *c, BindingSlot::Primary)),
+        );
+        list.extend(
+            self.alternates
+                .iter()
+                .map(|(a, c)| (*a, *c, BindingSlot::Alternate)),
+        );
+
+        let mut conflicts = Vec::new();
+        for i in 0..list.len() {
+            for j in (i + 1)..list.len() {
+                let (action_a, combo_a, slot_a) = list[i];
+                let (action_b, combo_b, slot_b) = list[j];
+                if combo_a == combo_b {
+                    conflicts.push(KeyConflict {
+                        action_a,
+                        slot_a,
+                        action_b,
+                        slot_b,
+                        combination: combo_a,
+                    });
+                }
+            }
+        }
         conflicts
     }
 
-    /// Serializes keybindings map to formatted JSON string.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
 
-    /// Deserializes keybindings map from JSON string.
     pub fn from_json(json_str: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json_str)
     }
 
-    /// Configuration file path for persisting user custom keybindings.
     pub fn config_path() -> std::path::PathBuf {
         crate::config_editor::config_dir().join("shortcuts.json")
     }
 
-    /// Loads custom keybindings from disk, or falls back to defaults.
     pub fn load_from_disk() -> Self {
         let path = Self::config_path();
         if path.exists() {
@@ -521,7 +1067,6 @@ impl KeyBindingMap {
         Self::default()
     }
 
-    /// Saves keybindings map to disk in the Muvrix config directory.
     pub fn save_to_disk(&self) -> std::io::Result<()> {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {
@@ -532,18 +1077,38 @@ impl KeyBindingMap {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(path, json)
     }
+
+    /// Exports the active profile + bindings to an arbitrary JSON file.
+    pub fn export_to(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let json = self
+            .to_json()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(path, json)
+    }
+
+    /// Imports a JSON configuration. Invalid files leave the registry untouched.
+    pub fn import_from(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Could not read {}: {e}", path.display()))?;
+        let imported = Self::from_json(&content)
+            .map_err(|e| format!("Invalid shortcut configuration: {e}"))?;
+        *self = imported;
+        Ok(())
+    }
 }
 
 impl MuvrixApp {
-    /// Checks `ctx.wants_keyboard_input()` to ensure shortcuts do not trigger
-    /// while the user is actively typing in a text field, then dispatches configured actions.
+    /// Dispatches configured shortcuts for this frame.
+    ///
+    /// Text entry always wins: when an editable widget has keyboard focus the
+    /// registry is skipped entirely, so typing in a search box or file field
+    /// is never intercepted.
     pub(crate) fn handle_keyboard_inputs(&mut self, ctx: &egui::Context) {
-        // Do NOT intercept shortcuts if user is typing into an active text field!
         if ctx.wants_keyboard_input() {
             return;
         }
 
-        // If recording a shortcut in Settings view, capture key press directly
+        // Shortcut recording mode owns the keyboard until a key or Esc arrives.
         if let Some(target_action) = self.recording_shortcut {
             let mut captured = None;
             ctx.input(|i| {
@@ -555,17 +1120,15 @@ impl MuvrixApp {
                         ..
                     } = event
                     {
-                        // Escape cancels recording without rebind
                         if *key == egui::Key::Escape {
                             captured = Some(None);
                         } else {
-                            let combo = KeyCombination {
+                            captured = Some(Some(KeyCombination {
                                 key: *key,
                                 ctrl: modifiers.command || modifiers.ctrl,
                                 alt: modifiers.alt,
                                 shift: modifiers.shift,
-                            };
-                            captured = Some(Some(combo));
+                            }));
                         }
                         break;
                     }
@@ -574,300 +1137,341 @@ impl MuvrixApp {
 
             if let Some(res) = captured {
                 if let Some(combo) = res {
-                    self.keybindings.set_binding(target_action, combo);
-                    let _ = self.keybindings.save_to_disk();
+                    match self.keybindings.try_bind(target_action, combo) {
+                        BindOutcome::Bound => {
+                            self.keybindings.set_binding(target_action, combo);
+                            let _ = self.keybindings.save_to_disk();
+                            self.pending_shortcut_conflict = None;
+                        }
+                        BindOutcome::Conflict(conflicts) => {
+                            self.pending_shortcut_conflict = Some(PendingShortcutConflict {
+                                action: target_action,
+                                combination: combo,
+                                conflicts,
+                            });
+                        }
+                    }
                 }
                 self.recording_shortcut = None;
                 return;
             }
+            return;
         }
 
-        // 1. Play / Pause
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::PlayPause, i)) {
-            self.toggle_pause();
-        }
-
-        // 2. Relative Seek (-5s / +5s)
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::SeekBackward, i)) {
-            let _ = self.controller.seek_relative(-5.0);
-        }
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::SeekForward, i)) {
-            let _ = self.controller.seek_relative(5.0);
-        }
-
-        // 3. Volume Adjustments (+5% / -5%)
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::VolumeUp, i)) {
-            let _ = self.controller.adjust_volume(5.0);
-        }
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::VolumeDown, i)) {
-            let _ = self.controller.adjust_volume(-5.0);
-        }
-
-        // 4. Frame Stepping (. / ,)
-        if ctx.input(|i| {
-            self.keybindings
-                .matches(ShortcutAction::FrameStepForward, i)
-        }) {
-            self.frame_step();
-        }
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::FrameStepBack, i)) {
-            self.frame_back_step();
-        }
-
-        // 5. A-B Loop
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::CycleAbLoop, i)) {
-            self.cycle_ab_loop();
-        }
-
-        // 6. Mute Toggle
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::ToggleMute, i)) {
-            let _ = self.controller.toggle_mute();
-        }
-
-        // 7. Fullscreen Toggle
-        if ctx.input(|i| {
-            self.keybindings
-                .matches(ShortcutAction::ToggleFullscreen, i)
-        }) {
-            self.toggle_fullscreen(ctx);
-        }
-
-        // 8. Escape: Exit Fullscreen or dismiss modals
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::Escape, i)) {
-            if self.player_more_overflow_open {
-                self.player_more_overflow_open = false;
-            } else if self.player_empty_url_input_open {
-                self.player_empty_url_input_open = false;
-            } else if self.show_shortcuts {
-                self.show_shortcuts = false;
-            } else if self.is_fullscreen {
-                self.exit_fullscreen(ctx);
+        // Escape dismisses transient UI before it reaches the binding table.
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            let dismissed = self.dismiss_transient_ui();
+            if dismissed {
+                return;
             }
         }
 
-        // 9. Overflow Menu Toggle
-        if ctx.input(|i| {
-            self.keybindings
-                .matches(ShortcutAction::TogglePlayerMore, i)
-        }) {
-            self.player_more_overflow_open = !self.player_more_overflow_open;
-        }
+        let actions = self
+            .keybindings
+            .pressed_actions(PlayerAction::ALL, &ctx.input(|i| i.clone()));
 
-        // 10. Secondary Controls Deck Toggle
-        if ctx.input(|i| {
-            self.keybindings
-                .matches(ShortcutAction::ToggleSecondaryDeck, i)
-        }) {
-            let screen_w = ctx.screen_rect().width();
-            if screen_w >= 1300.0 {
-                self.player_secondary_deck_collapsed_wide =
-                    !self.player_secondary_deck_collapsed_wide;
-            } else {
-                self.player_secondary_deck_expanded = !self.player_secondary_deck_expanded;
-            }
-        }
-
-        // 11. URL Streaming Input Toggle
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::ToggleUrlInput, i)) {
-            self.player_empty_url_input_open = !self.player_empty_url_input_open;
-        }
-
-        // 12. Speed Adjustment (-0.25x / +0.25x / Reset)
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::SpeedDecrease, i)) {
-            let _ = self.controller.adjust_speed(-0.25);
-        }
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::SpeedIncrease, i)) {
-            let _ = self.controller.adjust_speed(0.25);
-        }
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::SpeedReset, i)) {
-            let _ = self.controller.reset_speed();
-        }
-
-        // 13. Open File Dialog
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::OpenFile, i)) {
-            self.open_file_dialog();
-        }
-
-        // 14. Toggle UI overlay / OSD
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::ToggleOsd, i)) {
-            self.ui_overlay_visible = !self.ui_overlay_visible;
-            self.osd_manually_hidden = !self.ui_overlay_visible;
-            self.last_mouse_activity = Instant::now();
-        }
-
-        // 15. Toggle Playlist Drawer
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::TogglePlaylist, i)) {
-            self.show_playlist_drawer = !self.show_playlist_drawer;
-        }
-
-        // 16. Toggle Media Browser View
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::ToggleBrowser, i)) {
-            self.current_view = if self.current_view == AppView::Browser {
-                AppView::Player
-            } else {
-                AppView::Browser
-            };
-        }
-
-        // 17. Toggle Picture-in-Picture
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::TogglePip, i)) {
-            self.toggle_pip(ctx);
-        }
-
-        // 18. Toggle Shortcuts Help Dialog
-        if ctx.input(|i| self.keybindings.matches(ShortcutAction::ShowHelp, i)) {
-            self.show_shortcuts = !self.show_shortcuts;
+        for action in actions {
+            self.execute_player_action(action, ctx);
         }
     }
 
-    /// Automatically hides on-screen playback controls during uninterrupted playback.
+    fn dismiss_transient_ui(&mut self) -> bool {
+        if self.pending_shortcut_conflict.is_some() {
+            self.pending_shortcut_conflict = None;
+            return true;
+        }
+        if self.recording_shortcut.is_some() {
+            self.recording_shortcut = None;
+            return true;
+        }
+        if self.player_view_menu_open {
+            self.player_view_menu_open = false;
+            return true;
+        }
+        if self.player_more_overflow_open {
+            self.player_more_overflow_open = false;
+            return true;
+        }
+        if self.player_empty_url_input_open {
+            self.player_empty_url_input_open = false;
+            return true;
+        }
+        if self.show_shortcuts {
+            self.show_shortcuts = false;
+            return true;
+        }
+        false
+    }
+
+    /// Drives the single overlay-visibility state machine for the player HUD.
+    ///
+    /// One target state is computed per frame from the *actual* HUD rectangles
+    /// captured during the previous frame, not from guessed screen bands, then
+    /// a short fade is applied. That removes the old failure modes: controls
+    /// vanishing while the pointer sat on them, popovers auto-hiding, and the
+    /// window resizing during hover transitions.
     pub(crate) fn update_osd_autohide(&mut self, ctx: &egui::Context) {
+        let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.1);
+        let on_player = self.current_view == AppView::Player;
+
         let modal_active = self.show_shortcuts
-            || self.show_diagnostics
+            || self.show_playback_stats
+            || self.sync_panel_open
             || self.show_playlist_drawer
             || self.add_root_dialog_open
             || self.pending_resume_prompt.is_some()
             || self.crash_notice.is_some()
-            || self.player_more_overflow_open;
+            || self.player_more_overflow_open
+            || self.player_view_menu_open
+            || self.shortcut_help_open();
 
-        if modal_active {
-            self.last_mouse_activity = Instant::now();
-            self.ui_overlay_visible = true;
-            return;
-        }
-
-        if self.current_view != AppView::Player {
-            self.ui_overlay_visible = true;
-            return;
-        }
-
-        if std::env::var("MUVRIX_FORCE_OSD")
-            .map(|v| v == "0")
-            .unwrap_or(false)
-        {
-            self.ui_overlay_visible = false;
-            return;
-        }
-        if std::env::var("MUVRIX_FORCE_OSD")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
-            self.ui_overlay_visible = true;
-            return;
-        }
-
-        let is_playing =
-            *self.controller.state() == PlaybackState::Playing && !self.controller.is_paused();
-
-        let current_mouse_pos = ctx.input(|i| i.pointer.hover_pos());
-        let mouse_moved = match (self.last_mouse_pos, current_mouse_pos) {
-            (Some(last), Some(cur)) => last.distance(cur) > 2.0,
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        let pointer_active = ctx
+            .input(|i| i.pointer.any_down() || i.pointer.any_pressed() || i.pointer.any_released());
+        let moved = match (self.last_mouse_pos, pointer) {
+            (Some(last), Some(cur)) => last.distance(cur) > 1.5,
             (None, Some(_)) => true,
             _ => false,
         };
-        let mouse_active = ctx
-            .input(|i| i.pointer.any_down() || i.pointer.any_pressed() || i.pointer.any_released());
 
-        let screen_h = ctx.screen_rect().height();
-        let cursor_over_controls = current_mouse_pos
-            .is_some_and(|pos| pos.y <= 52.0 || pos.y >= (screen_h - 110.0).max(0.0));
+        // A popover or deck that owns the pointer keeps the HUD alive even if
+        // the pointer sits still for minutes.
+        let over_hud = pointer.is_some_and(|p| {
+            self.deck_rect.is_some_and(|r| r.expand(8.0).contains(p))
+                || self
+                    .top_overlay_rect
+                    .is_some_and(|r| r.expand(8.0).contains(p))
+        });
 
-        if mouse_moved || mouse_active {
+        let playing =
+            *self.controller.state() == PlaybackState::Playing && !self.controller.is_paused();
+
+        if moved || pointer_active || over_hud {
             self.last_mouse_activity = Instant::now();
-            self.last_mouse_pos = current_mouse_pos;
-            self.ui_overlay_visible = true;
+            self.last_mouse_pos = pointer;
+            // Any deliberate input revives a manually hidden HUD.
             self.osd_manually_hidden = false;
-        } else if cursor_over_controls && self.ui_overlay_visible {
-            self.last_mouse_activity = Instant::now();
         }
 
-        if is_playing {
-            if !self.osd_manually_hidden && !cursor_over_controls {
-                let elapsed = self.last_mouse_activity.elapsed();
-                if elapsed >= self.osd_autohide_delay {
-                    self.ui_overlay_visible = false;
-                } else {
-                    let remaining = self.osd_autohide_delay.saturating_sub(elapsed);
-                    ctx.request_repaint_after(remaining);
-                }
+        let forced = std::env::var("MUVRIX_FORCE_OSD").ok();
+        let visible = match forced.as_deref() {
+            Some("0") => false,
+            Some("1") => true,
+            _ if !on_player => true,
+            _ if self.osd_manually_hidden => false,
+            _ if modal_active || over_hud => true,
+            // Paused playback keeps controls reachable; this is the documented
+            // default and can be turned off by the user hiding them manually.
+            _ if !playing => true,
+            _ => self.last_mouse_activity.elapsed() < self.osd_autohide_delay,
+        };
+
+        if visible {
+            if let Some(remaining) = self
+                .osd_autohide_delay
+                .checked_sub(self.last_mouse_activity.elapsed())
+            {
+                ctx.request_repaint_after(remaining);
             }
-        } else if !self.osd_manually_hidden {
-            self.ui_overlay_visible = true;
+        }
+
+        self.ui_overlay_visible = visible;
+        let target = if visible { 1.0 } else { 0.0 };
+        let step = dt / 0.16;
+        let next = if (target - self.overlay_alpha).abs() <= step {
+            target
+        } else if target > self.overlay_alpha {
+            self.overlay_alpha + step
+        } else {
+            self.overlay_alpha - step
+        };
+        if (next - self.overlay_alpha).abs() > f32::EPSILON {
+            self.overlay_alpha = next;
+            ctx.request_repaint();
+        }
+
+        // Immersive playback hides the cursor together with the HUD and brings
+        // it back on the first mouse movement.
+        let immersive = (self.is_fullscreen || self.is_cinema_mode) && on_player;
+        let want_hidden = immersive && self.overlay_alpha <= 0.01 && playing;
+        if want_hidden != self.cursor_hidden {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(!want_hidden));
+            self.cursor_hidden = want_hidden;
         }
     }
 
-    /// Renders the keyboard shortcuts modal populated directly from the active `KeyBindingMap`.
+    /// True when the keyboard help overlay is on screen.
+    pub(crate) fn shortcut_help_open(&self) -> bool {
+        self.show_shortcuts
+    }
+
+    /// Renders the searchable shortcut help overlay from the active registry.
     pub(crate) fn render_shortcuts_modal(&mut self, ctx: &egui::Context) {
-        if self.show_shortcuts {
-            let mut open = true;
-            let mut close_requested = false;
-            let mut configure_clicked = false;
+        if !self.show_shortcuts {
+            return;
+        }
 
-            egui::Window::new("Keyboard Shortcuts")
-                .open(&mut open)
-                .resizable(false)
-                .collapsible(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.set_width(420.0);
-                    egui::ScrollArea::vertical()
-                        .max_height(480.0)
-                        .show(ui, |ui| {
-                            egui::Grid::new("shortcuts_grid")
+        let mut open = true;
+        let mut close_clicked = false;
+        let mut configure_clicked = false;
+        let mut category = self.shortcut_category;
+        let query = self.shortcut_help_search.to_ascii_lowercase();
+
+        egui::Window::new("Keyboard Shortcuts")
+            .open(&mut open)
+            .resizable(true)
+            .collapsible(false)
+            .default_width(560.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(self.keybindings.profile.label())
+                            .strong()
+                            .color(BrandPalette::ELECTRIC_LIME),
+                    );
+                    ui.label(
+                        RichText::new(self.keybindings.profile.description())
+                            .size(11.5)
+                            .color(BrandPalette::SECONDARY_TEXT),
+                    );
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.shortcut_help_search)
+                            .hint_text("Search actions or keys…")
+                            .desired_width(240.0),
+                    );
+                    ui.label(
+                        RichText::new(format!("{} actions", PlayerAction::ALL.len()))
+                            .size(11.0)
+                            .color(BrandPalette::MUTED_TEXT),
+                    );
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .selectable_label(category.is_none(), "All")
+                        .clicked()
+                    {
+                        category = None;
+                    }
+                    for cat in ShortcutCategory::ALL {
+                        if ui
+                            .selectable_label(category == Some(*cat), cat.label())
+                            .clicked()
+                        {
+                            category = Some(*cat);
+                        }
+                    }
+                });
+                ui.separator();
+
+                egui::ScrollArea::vertical()
+                    .max_height(460.0)
+                    .show(ui, |ui| {
+                        let mut any = false;
+                        for cat in ShortcutCategory::ALL {
+                            if category.is_some() && category != Some(*cat) {
+                                continue;
+                            }
+                            let mut rows: Vec<(String, String, PlayerAction)> = Vec::new();
+                            for &action in PlayerAction::ALL {
+                                if action.category() != *cat {
+                                    continue;
+                                }
+                                let primary = self.keybindings.hint(action);
+                                let alt = self
+                                    .keybindings
+                                    .get_alternate(action)
+                                    .map(|c| c.display_string())
+                                    .unwrap_or_default();
+                                let label = action.display_name().to_string();
+                                let hay = format!("{label} {primary} {alt}").to_ascii_lowercase();
+                                if !query.is_empty() && !hay.contains(&query) {
+                                    continue;
+                                }
+                                if primary.is_empty() && alt.is_empty() {
+                                    continue;
+                                }
+                                rows.push((label, primary, action));
+                            }
+                            if rows.is_empty() {
+                                continue;
+                            }
+                            any = true;
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(cat.label())
+                                    .strong()
+                                    .size(12.0)
+                                    .color(BrandPalette::ELECTRIC_LIME),
+                            );
+                            egui::Grid::new(format!("help_grid_{}", cat.label()))
+                                .num_columns(2)
+                                .spacing([16.0, 6.0])
                                 .striped(true)
-                                .spacing([20.0, 6.0])
                                 .show(ui, |ui| {
-                                    for &action in ShortcutAction::ALL {
-                                        let primary = self
-                                            .keybindings
-                                            .get(action)
-                                            .map(|c| c.display_string())
-                                            .unwrap_or_else(|| "-".to_string());
-                                        let alt_str = self
-                                            .keybindings
-                                            .alternates
-                                            .get(&action)
-                                            .map(|a| format!(" / {}", a.display_string()))
-                                            .unwrap_or_default();
-
+                                    for (label, primary, action) in rows {
+                                        let mut keys = primary;
+                                        if let Some(alt) = self.keybindings.get_alternate(action) {
+                                            if !alt.display_string().is_empty() {
+                                                keys = format!("{keys}  /  {}", alt.display_string());
+                                            }
+                                        }
                                         ui.label(
-                                            RichText::new(format!("{primary}{alt_str}"))
-                                                .strong()
+                                            RichText::new(keys)
                                                 .monospace()
-                                                .color(BrandPalette::ELECTRIC_LIME),
+                                                .strong()
+                                                .color(BrandPalette::PRIMARY_TEXT),
                                         );
-                                        ui.label(action.display_name());
+                                        ui.label(
+                                            RichText::new(label)
+                                                .size(12.0)
+                                                .color(BrandPalette::SECONDARY_TEXT),
+                                        );
                                         ui.end_row();
                                     }
-
-                                    ui.label(RichText::new("Double Click").strong().monospace());
-                                    ui.label("Toggle Fullscreen");
-                                    ui.end_row();
-
-                                    ui.label(RichText::new("Single Click").strong().monospace());
-                                    ui.label("Play / Pause (Video)");
-                                    ui.end_row();
                                 });
-                        });
-
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Customize Shortcuts in Settings...").clicked() {
-                            configure_clicked = true;
                         }
-                        if ui.button("Close").clicked() {
-                            close_requested = true;
+                        if !any {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new("No shortcuts match this search.")
+                                    .color(BrandPalette::MUTED_TEXT),
+                            );
                         }
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(
+                                "Mouse: double-click video toggles fullscreen · right-click opens the player menu · wheel changes volume",
+                            )
+                            .size(11.0)
+                            .color(BrandPalette::MUTED_TEXT),
+                        );
                     });
-                });
 
-            if configure_clicked {
-                self.show_shortcuts = false;
-                self.current_view = AppView::Settings;
-                self.settings_tab = crate::views::SettingsTab::Shortcuts;
-            } else {
-                self.show_shortcuts = open && !close_requested;
-            }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Customize Shortcuts…").clicked() {
+                        configure_clicked = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close_clicked = true;
+                    }
+                });
+            });
+
+        self.shortcut_category = category;
+        if close_clicked {
+            open = false;
+        }
+        if configure_clicked {
+            self.show_shortcuts = false;
+            self.current_view = AppView::Settings;
+            self.settings_tab = crate::views::SettingsTab::Shortcuts;
+        } else if !open {
+            self.show_shortcuts = false;
         }
     }
 }
@@ -877,44 +1481,136 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_custom_keybinding_dispatch() {
-        let mut keybindings = KeyBindingMap::default();
+    fn classic_profile_has_no_conflicts() {
+        for profile in ShortcutProfile::ALL {
+            let map = KeyBindingMap::for_profile(*profile);
+            let conflicts = map.find_conflicts();
+            assert!(
+                conflicts.is_empty(),
+                "{} has conflicts: {conflicts:?}",
+                profile.label()
+            );
+        }
+    }
 
-        // 1. Verify default PlayPause is Space
-        let play_pause_combo = keybindings.get(ShortcutAction::PlayPause).unwrap();
-        assert_eq!(play_pause_combo.key, egui::Key::Space);
-        assert!(!play_pause_combo.ctrl);
-        assert_eq!(play_pause_combo.display_string(), "Space");
+    #[test]
+    fn profiles_preserve_common_shortcuts() {
+        for profile in ShortcutProfile::ALL {
+            let map = KeyBindingMap::for_profile(*profile);
+            assert_eq!(
+                map.get(PlayerAction::PlayPause).unwrap().key,
+                egui::Key::Space,
+                "{} should keep Space for play/pause",
+                profile.label()
+            );
+            assert_eq!(
+                map.get(PlayerAction::ToggleFullscreen).unwrap().key,
+                egui::Key::F
+            );
+        }
+    }
 
-        // 2. Rebind PlayPause to 'K'
-        keybindings.set_binding(ShortcutAction::PlayPause, KeyCombination::new(egui::Key::K));
-        let updated = keybindings.get(ShortcutAction::PlayPause).unwrap();
-        assert_eq!(updated.key, egui::Key::K);
-        assert_eq!(updated.display_string(), "K");
+    #[test]
+    fn vlc_and_mpv_conflicts_are_resolved_by_priority() {
+        // S: VLC Stop and mpv Screenshot must never share a slot.
+        let classic = KeyBindingMap::for_profile(ShortcutProfile::Classic);
+        assert_eq!(classic.get(PlayerAction::Stop).unwrap().key, egui::Key::S);
+        assert!(classic.get(PlayerAction::Screenshot).unwrap().shift);
 
-        // 3. Create a deliberate conflict: bind VolumeUp also to 'K'
-        keybindings.set_binding(ShortcutAction::VolumeUp, KeyCombination::new(egui::Key::K));
-        let conflicts = keybindings.find_conflicts();
-        assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].0, ShortcutAction::PlayPause);
-        assert_eq!(conflicts[0].1, ShortcutAction::VolumeUp);
-        assert_eq!(conflicts[0].2.key, egui::Key::K);
-
-        // 4. Reset to defaults clears conflict
-        keybindings.reset_to_defaults();
-        assert!(keybindings.find_conflicts().is_empty());
+        // In the Advanced profile the same key is the mpv screenshot.
+        let advanced = KeyBindingMap::for_profile(ShortcutProfile::Advanced);
         assert_eq!(
-            keybindings.get(ShortcutAction::PlayPause).unwrap().key,
-            egui::Key::Space
-        );
-        assert_eq!(
-            keybindings.get(ShortcutAction::VolumeUp).unwrap().key,
-            egui::Key::ArrowUp
+            advanced.get(PlayerAction::Screenshot).unwrap().key,
+            egui::Key::S
         );
 
-        // 5. Test JSON roundtrip serialization
-        let json = keybindings.to_json().expect("Serialization failed");
-        let deserialized = KeyBindingMap::from_json(&json).expect("Deserialization failed");
-        assert_eq!(keybindings, deserialized);
+        // Hybrid keeps VLC's Stop on S.
+        let hybrid = KeyBindingMap::for_profile(ShortcutProfile::Hybrid);
+        assert_eq!(hybrid.get(PlayerAction::Stop).unwrap().key, egui::Key::S);
+    }
+
+    #[test]
+    fn hybrid_uses_alternatives_for_mpv_only_actions() {
+        let hybrid = KeyBindingMap::for_profile(ShortcutProfile::Hybrid);
+        assert!(hybrid.get(PlayerAction::CycleAspectRatio).is_some());
+        assert!(hybrid.get(PlayerAction::ToggleDeband).is_some());
+        assert_eq!(
+            hybrid.get(PlayerAction::CycleAudioDevice).unwrap(),
+            &KeyCombination::new(egui::Key::A).with_shift(),
+            "VLC priority keeps Shift+A on audio-device cycling"
+        );
+    }
+
+    #[test]
+    fn binding_a_conflict_reports_it_instead_of_overwriting() {
+        let map = KeyBindingMap::for_profile(ShortcutProfile::Classic);
+        let outcome = map.try_bind(PlayerAction::VolumeUp, KeyCombination::new(egui::Key::M));
+        match outcome {
+            BindOutcome::Conflict(list) => {
+                assert!(list.iter().any(|(a, _)| *a == PlayerAction::ToggleMute));
+            }
+            BindOutcome::Bound => panic!("expected a conflict"),
+        }
+    }
+
+    #[test]
+    fn replace_and_swap_resolve_conflicts() {
+        let mut map = KeyBindingMap::for_profile(ShortcutProfile::Classic);
+        map.bind_replace(PlayerAction::VolumeUp, KeyCombination::new(egui::Key::M));
+        assert_eq!(map.get(PlayerAction::VolumeUp).unwrap().key, egui::Key::M);
+        assert!(map.get(PlayerAction::ToggleMute).is_none());
+
+        let mut map = KeyBindingMap::for_profile(ShortcutProfile::Classic);
+        map.bind_swap(PlayerAction::VolumeUp, KeyCombination::new(egui::Key::M));
+        assert_eq!(
+            map.get(PlayerAction::ToggleMute).unwrap().key,
+            egui::Key::ArrowUp,
+            "ToggleMute should inherit VolumeUp's previous binding"
+        );
+    }
+
+    #[test]
+    fn switch_profile_preserves_custom_overrides() {
+        let mut map = KeyBindingMap::for_profile(ShortcutProfile::Classic);
+        map.set_binding(PlayerAction::ToggleMute, KeyCombination::new(egui::Key::Q));
+        map.set_profile(ShortcutProfile::Advanced);
+        map.set_profile(ShortcutProfile::Classic);
+        assert_eq!(map.get(PlayerAction::ToggleMute).unwrap().key, egui::Key::Q);
+    }
+
+    #[test]
+    fn json_roundtrip_includes_profile_and_overrides() {
+        let mut map = KeyBindingMap::for_profile(ShortcutProfile::Hybrid);
+        map.set_binding(PlayerAction::ZoomIn, KeyCombination::new(egui::Key::X));
+        let json = map.to_json().expect("serialize");
+        let back = KeyBindingMap::from_json(&json).expect("deserialize");
+        assert_eq!(map, back);
+        assert_eq!(back.profile, ShortcutProfile::Hybrid);
+    }
+
+    #[test]
+    fn reset_restores_profile_defaults() {
+        let mut map = KeyBindingMap::for_profile(ShortcutProfile::Classic);
+        map.set_binding(PlayerAction::ToggleMute, KeyCombination::new(egui::Key::Q));
+        map.reset_to_defaults();
+        assert_eq!(map.get(PlayerAction::ToggleMute).unwrap().key, egui::Key::M);
+        assert!(map.overrides.is_empty());
+    }
+
+    #[test]
+    fn key_strings_roundtrip() {
+        for text in [
+            "Space",
+            "Ctrl+O",
+            "Alt+Shift+V",
+            "Ctrl+Alt+Left",
+            "PageUp",
+            "−",
+            "?",
+        ] {
+            let combo =
+                KeyCombination::parse_str(text).unwrap_or_else(|| panic!("failed to parse {text}"));
+            assert_eq!(combo.display_string(), text);
+        }
     }
 }

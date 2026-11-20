@@ -17,7 +17,7 @@ use crate::shader::{
 use crate::stream::{MpvStreamBridge, RecoveryState, SeekableStream, StreamTelemetry};
 use crate::subsystems::audio::AudioSubsystem;
 use crate::subsystems::track::TrackSubsystem;
-use crate::subsystems::video::VideoSubsystem;
+use crate::subsystems::video::{CropPreset, ScalingMode, ScreenshotMode, VideoSubsystem};
 use crate::track::{ChapterInfo, SubtitleStyling, TrackInfo, TrackType};
 
 pub use crate::spectrum::SpectrumTelemetry;
@@ -55,6 +55,9 @@ pub const PROP_MPVEX_SEEK_TO: u64 = 24;
 pub const PROP_AB_LOOP_A: u64 = 25;
 pub const PROP_AB_LOOP_B: u64 = 26;
 pub const PROP_AUDIO_DEVICE_LIST: u64 = 27;
+/// `frame-drop-count`, observed with an inline `Int64` so the decoder watchdog
+/// can be fed on the event path instead of polling the engine from a paint.
+pub const PROP_FRAME_DROP_COUNT: u64 = 28;
 
 /// A-B loop state for the current media item.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -195,6 +198,14 @@ impl PlaybackController {
         handle.observe_property(PROP_CHAPTER_LIST, "chapter-list", PropertyFormat::None)?;
         handle.observe_property(PROP_HWDEC_CURRENT, "hwdec-current", PropertyFormat::None)?;
         handle.observe_property(PROP_CURRENT_AO, "current-ao", PropertyFormat::None)?;
+        // Typed so the value arrives inline in the event. The decoder watchdog
+        // consumes this instead of performing its own `frame-drop-count` read on
+        // whatever thread drains events (which is the paint thread).
+        handle.observe_property(
+            PROP_FRAME_DROP_COUNT,
+            "frame-drop-count",
+            PropertyFormat::Int64,
+        )?;
         handle.observe_property(PROP_EOF_REACHED, "eof-reached", PropertyFormat::Flag)?;
         handle.observe_property(PROP_SUB_DELAY, "sub-delay", PropertyFormat::Double)?;
         handle.observe_property(PROP_SUB_VISIBILITY, "sub-visibility", PropertyFormat::Flag)?;
@@ -687,6 +698,96 @@ impl PlaybackController {
 
     pub fn set_panscan_crop(&mut self) -> Result<(), MpvError> {
         self.video.set_panscan_crop(&self.handle)
+    }
+
+    /// Returns the effective aspect override (`"auto"` when unset).
+    pub fn aspect_override(&self) -> String {
+        self.video.aspect_override(&self.handle)
+    }
+
+    /// Applies an aspect override; `"auto"` restores the source ratio.
+    pub fn set_aspect_override(&mut self, aspect: &str) -> Result<(), MpvError> {
+        self.video.set_aspect_override(&self.handle, aspect)
+    }
+
+    /// Returns the current `video-zoom` factor.
+    pub fn video_zoom(&self) -> f64 {
+        self.video.video_zoom(&self.handle)
+    }
+
+    /// Sets the `video-zoom` factor.
+    pub fn set_video_zoom(&mut self, zoom: f64) -> Result<(), MpvError> {
+        self.video.set_video_zoom(&self.handle, zoom)
+    }
+
+    /// Adjusts the `video-zoom` factor by `delta`.
+    pub fn adjust_video_zoom(&mut self, delta: f64) -> Result<(), MpvError> {
+        self.video.adjust_video_zoom(&self.handle, delta)
+    }
+
+    /// Returns the current `(x, y)` video pan offsets.
+    pub fn video_pan(&self) -> (f64, f64) {
+        self.video.video_pan(&self.handle)
+    }
+
+    /// Sets the video pan offsets.
+    pub fn set_video_pan(&mut self, x: f64, y: f64) -> Result<(), MpvError> {
+        self.video.set_video_pan(&self.handle, x, y)
+    }
+
+    /// Recentres the video.
+    pub fn reset_video_pan(&mut self) -> Result<(), MpvError> {
+        self.video.reset_video_pan(&self.handle)
+    }
+
+    /// Applies a fit/fill/stretch/original scaling mode.
+    pub fn set_scaling_mode(&mut self, mode: ScalingMode) -> Result<(), MpvError> {
+        self.video.apply_scaling_mode(&self.handle, mode)
+    }
+
+    /// Returns the scaling mode derived from the live engine properties.
+    pub fn scaling_mode(&self) -> ScalingMode {
+        self.video.scaling_mode(&self.handle)
+    }
+
+    /// Returns the decoded frame dimensions in pixels.
+    pub fn video_pixel_size(&self) -> (i64, i64) {
+        self.video.video_pixel_size(&self.handle)
+    }
+
+    /// Applies a centred crop preset.
+    pub fn set_crop_preset(&mut self, preset: CropPreset) -> Result<(), MpvError> {
+        self.video.apply_crop_preset(&self.handle, preset)
+    }
+
+    /// Returns the active `video-crop` rectangle, empty when uncropped.
+    pub fn video_crop(&self) -> String {
+        self.video.video_crop(&self.handle)
+    }
+
+    /// Toggles deinterlacing.
+    pub fn set_deinterlace(&mut self, enabled: bool) -> Result<(), MpvError> {
+        self.video.set_deinterlace(&self.handle, enabled)
+    }
+
+    /// Returns whether deinterlacing is enabled.
+    pub fn deinterlace(&self) -> bool {
+        self.video.deinterlace(&self.handle)
+    }
+
+    /// Toggles debanding.
+    pub fn set_deband_enabled(&mut self, enabled: bool) -> Result<(), MpvError> {
+        self.video.set_deband_enabled(&self.handle, enabled)
+    }
+
+    /// Returns whether debanding is enabled.
+    pub fn deband_enabled(&self) -> bool {
+        self.video.deband_enabled(&self.handle)
+    }
+
+    /// Captures a screenshot through the engine to an explicit path.
+    pub fn screenshot_to_file(&self, path: &str, mode: ScreenshotMode) -> Result<(), MpvError> {
+        self.video.screenshot(&self.handle, path, mode)
     }
 
     pub fn frame_step(&mut self) -> Result<(), MpvError> {
@@ -1302,10 +1403,17 @@ impl PlaybackController {
             events.push(event);
         }
 
-        // Active decoder watchdog check during playback
+        // Active decoder watchdog check during playback. The drop count is the
+        // last value delivered by the observed `frame-drop-count` property; the
+        // watchdog must not read the engine here, because this runs on the paint
+        // thread and the round trip costs 6-35 ms under 4K decode load.
         let is_playing = self.state == PlaybackState::Playing;
-        self.video
-            .check_watchdog(&self.handle, is_playing, self.is_buffering, self.time_pos);
+        self.video.check_watchdog_observed(
+            &self.handle,
+            is_playing,
+            self.is_buffering,
+            self.time_pos,
+        );
 
         // Audio hotplug maintenance
         self.audio.poll_recovery(&self.handle);
@@ -1543,6 +1651,12 @@ impl PlaybackController {
             }
             PROP_AUDIO_DEVICE_LIST => {
                 self.audio.on_device_list_changed(&self.handle);
+            }
+            PROP_FRAME_DROP_COUNT => {
+                // Inline value from the observation; no engine re-read.
+                if let Some(crate::event::PropertyChangeValue::Int64(v)) = value {
+                    self.video.on_frame_drop_count_changed(*v);
+                }
             }
             PROP_SUB_DELAY => {
                 let delay = match value {

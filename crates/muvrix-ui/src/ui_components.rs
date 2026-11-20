@@ -84,6 +84,33 @@ pub fn secondary_button(ui: &mut Ui, label: &str, tooltip: Option<&str>) -> Resp
     }
 }
 
+/// Renders a keyboard keycap used in shortcut lists, tooltips and help overlays.
+///
+/// Keycaps are monospaced, outlined, and sized to stay legible at 10.5pt while
+/// remaining visually secondary to the action label beside them.
+pub fn keycap(ui: &mut Ui, text: &str) -> Response {
+    keycap_with_color(ui, text, BrandPalette::PRIMARY_TEXT)
+}
+
+/// Keycap variant with an explicit label colour (e.g. accent for a recording state).
+pub fn keycap_with_color(ui: &mut Ui, text: &str, color: Color32) -> Response {
+    Frame::new()
+        .fill(BrandPalette::ELEVATED_CARD)
+        .stroke(Stroke::new(1.0_f32, BrandPalette::BORDER_SLATE))
+        .corner_radius(4.0_f32)
+        .inner_margin(Margin::symmetric(6, 2))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(text)
+                    .monospace()
+                    .size(10.5)
+                    .strong()
+                    .color(color),
+            )
+        })
+        .response
+}
+
 /// Renders a small metadata or status badge pill (e.g. "4K", "1080p", "Active").
 pub fn badge_pill(ui: &mut Ui, text: &str, bg_color: Color32, text_color: Color32) -> Response {
     Frame::new()

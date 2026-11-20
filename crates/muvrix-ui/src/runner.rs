@@ -195,6 +195,7 @@ impl WakeSignal {
     }
 
     fn request_deadline_from(&self, at: Instant, source: &'static str) {
+
         use std::sync::atomic::Ordering::Relaxed;
         self.deadlines_set.fetch_add(1, Relaxed);
         let mut replaced = false;
@@ -1351,11 +1352,20 @@ impl Shell {
         }
         if !self.monitor_reported {
             if let Some(monitor) = self.window.current_monitor() {
+                let hz = monitor
+                    .refresh_rate_millihertz()
+                    .map(|mhz| mhz as f64 / 1000.0)
+                    .filter(|hz| *hz > 1.0 && hz.is_finite());
                 log::info!(
                     "monitor: name={:?} refresh_millihertz={:?}",
                     monitor.name(),
                     monitor.refresh_rate_millihertz()
                 );
+                // Publish the panel refresh to the app. libmpv's `display-fps` is
+                // permanently unavailable through the embedded render API (it has
+                // no VO owning a display), so this winit value is the only real
+                // refresh-rate source the statistics overlay can show.
+                self.app.set_display_refresh_hz(hz);
                 self.monitor_reported = true;
             }
         }
@@ -1501,6 +1511,8 @@ impl Shell {
             height as i64,
             "ui_layer",
         );
+        self.app
+            .set_ui_paint_us(ui_paint_started.elapsed().as_micros() as u64);
 
         // The egui paint callback has now executed the engine's `paint()`. A
         // token exists only when libmpv actually rendered a new frame, which is
@@ -1586,6 +1598,30 @@ impl Shell {
                     }
                 }
             }
+        }
+
+        // --- Scripted UI capture (development only): the app asks for a
+        //     readback after it has rendered a specific HUD state. Synchronous
+        //     and gated by MUVRIX_CAPTURE_DIR, never active in playback.
+        if let Some((dir, name)) = self.app.take_pending_capture() {
+            let mut pixels = vec![0u8; (width * height * 4) as usize];
+            unsafe {
+                self.gl.read_pixels(
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelPackData::Slice(Some(&mut pixels)),
+                );
+            }
+            let stride = (width * 4) as usize;
+            let mut flipped = Vec::with_capacity(pixels.len());
+            for row in pixels.chunks_exact(stride).rev() {
+                flipped.extend_from_slice(row);
+            }
+            self.app.save_capture(&dir, &name, &flipped, width, height);
         }
 
         // --- WP4 chain: count frames the engine actually rendered into the
@@ -1729,6 +1765,7 @@ impl Shell {
             .map(|v| v.repaint_delay)
             .min()
             .unwrap_or(Duration::from_millis(16));
+
         if repaint_after < Duration::from_millis(1000) {
             self.wake
                 .request_deadline_from(Instant::now() + repaint_after, "draw_end");

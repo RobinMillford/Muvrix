@@ -1,6 +1,9 @@
 //! Desktop application window and playback UI implemented with eframe and egui_glow.
 
+pub mod actions;
+pub mod capture;
 pub mod commands;
+pub mod diagnostics;
 pub mod formatting;
 pub mod init;
 pub mod navigation_bar;
@@ -49,7 +52,15 @@ impl MuvrixApp {
     /// Identical for both shells. `eframe::App::update` and the native runner
     /// both call this; only the surrounding window/swap ownership differs.
     pub fn frame_update(&mut self, ctx: &egui::Context) {
+        let __hud_t0 = std::time::Instant::now();
         self.update_count = self.update_count.wrapping_add(1);
+        // Unattended harness hooks: the scripted capture timeline and the
+        // timed diagnostics export both run from here because the native runner
+        // bypasses `eframe::App::update`. Both are inert unless their environment
+        // variables are set.
+        self.drive_capture(ctx);
+        self.drive_auto_diagnostics(ctx);
+        self.drive_interaction_script();
         // Test-only: an unattended harness launches the window without user
         // interaction, and GNOME will leave it behind other windows, where the
         // compositor throttles it. Going fullscreen on the first frame is the
@@ -95,8 +106,6 @@ impl MuvrixApp {
         self.update_osd_autohide(ctx);
         self.sync_seeded_ab_loop();
         self.update_spectrum_visualizer(ctx);
-        self.slow_metrics
-            .refresh_status(&self.controller, std::time::Instant::now());
 
         // Handle drag and drop media files into the application
         ctx.input(|i| {
@@ -167,8 +176,19 @@ impl MuvrixApp {
             });
         }
 
-        // Keep UI animating during active playback
-        if *self.controller.state() == PlaybackState::Playing {
+        // Keep the HUD/OSD animating, but do not repaint at display rate just
+        // because the engine is playing.
+        //
+        // The render loop is already driven by the engine's own frame
+        // notifications at the source cadence (23.976 fps for film content).
+        // A blanket `request_repaint_after(16 ms)` forced a full HUD rebuild 60
+        // times a second regardless: on 4K HEVC the HUD build is the most
+        // expensive thing on the paint thread (~21–25 ms in spikes), so it
+        // repeatedly overran the 41.7 ms video frame period and the engine
+        // dropped the frame to stay in sync with audio — the simultaneous
+        // audio/video stutter. Repaint only while a transient UI state is
+        // actually animating.
+        if self.ui_needs_animation() {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
 
@@ -282,6 +302,10 @@ impl MuvrixApp {
         }
 
         self.render_shortcuts_modal(ctx);
+
+        // Publish the measured paint cost for the statistics overlay. This is a
+        // real measurement of this pass, not an estimate.
+        self.hud_build_us = Some(__hud_t0.elapsed().as_micros() as u64);
     }
 
     pub fn shutdown(&mut self, gl: Option<&glow::Context>) {
@@ -371,23 +395,178 @@ impl MuvrixApp {
         }
     }
 
-    /// Queries real-time audio spectrum telemetry and updates 32-band visualizer at 60 FPS.
-    pub fn update_spectrum_visualizer(&mut self, ctx: &egui::Context) {
+    /// Test-only interaction driver, used to prove audio continuity and frame
+    /// pacing survive real user actions rather than only idle playback.
+    ///
+    /// Reads `MUVRIX_TEST_INTERACT` as a comma-separated schedule of
+    /// `<seconds>:<action>` entries, e.g. `5:seek,8:pause,10:resume,12:sub`.
+    /// Inert unless the variable is set, and every action goes through the same
+    /// `controller` calls the UI uses.
+    pub(crate) fn drive_interaction_script(&mut self) {
+        let Some(script) = self.test_interact.clone() else {
+            return;
+        };
+        let elapsed = self.session_start.elapsed().as_secs_f64();
+        while self.test_interact_next < script.len() {
+            let (due, ref action) = script[self.test_interact_next];
+            if elapsed < due {
+                break;
+            }
+            match action.as_str() {
+                "seek" => {
+                    // Jump to a position derived from the action index so
+
+                    // repeated seeks land in different places.
+                    let target = 60.0 + (self.test_interact_next as f64) * 17.0;
+                    let _ = self
+                        .controller
+                        .seek(target, muvrix_player::SeekMode::Absolute);
+                    log::warn!("TEST-ONLY interaction: seek -> {target:.0}s");
+                }
+                "pause" => {
+                    let _ = self.controller.pause();
+                    log::warn!("TEST-ONLY interaction: pause");
+                }
+                "resume" => {
+                    let _ = self.controller.play();
+                    log::warn!("TEST-ONLY interaction: resume");
+                }
+                "sub" => {
+                    let ids: Vec<i64> = self
+                        .controller
+                        .tracks_by_type(muvrix_player::TrackType::Subtitle)
+                        .iter()
+                        .map(|t| t.id)
+                        .collect();
+                    if let Some(&id) = ids.first() {
+                        let _ = self.controller.set_subtitle_track(Some(id));
+                        log::warn!("TEST-ONLY interaction: subtitle -> {id}");
+                    }
+                }
+                "audio" => {
+                    let ids: Vec<i64> = self
+                        .controller
+                        .tracks_by_type(muvrix_player::TrackType::Audio)
+                        .iter()
+                        .map(|t| t.id)
+                        .collect();
+                    if ids.len() > 1 {
+                        let id = ids[1];
+                        let _ = self.controller.set_audio_track(Some(id));
+                        log::warn!("TEST-ONLY interaction: audio track -> {id}");
+                    }
+                }
+                other => log::warn!("TEST-ONLY interaction: unknown action '{other}'"),
+            }
+            self.test_interact_next += 1;
+        }
+    }
+
+    /// Unattended measurement: after `MUVRIX_AUTOPLAY_DIAG_SECS`, export a real
+    /// diagnostics report and keep playing. Inert unless the variable is set.
+    pub(crate) fn drive_auto_diagnostics(&mut self, ctx: &egui::Context) {
+        let Some(deadline) = self.auto_diag_deadline else {
+            return;
+        };
+        if std::time::Instant::now() < deadline {
+            ctx.request_repaint_after(Duration::from_millis(250));
+            return;
+        }
+        self.auto_diag_deadline = None;
+        if let Some(probe) = &self.diagnostics {
+            match probe.export_report() {
+                Ok(path) => log::info!("autoplay diagnostics written to {}", path.display()),
+                Err(e) => log::warn!("autoplay diagnostics export failed: {e}"),
+            }
+        }
+    }
+
+    /// True when a transient, time-based UI element is still animating and
+    /// therefore needs a repaint sooner than the next engine frame.
+    ///
+    /// Only genuinely time-varying overlays qualify: the fading OSD notice, the
+    /// buffering spinner, the scripted capture harness, and the statistics
+    /// overlay (which shows a live-updating sample). A steady HUD needs no
+    /// repaint of its own — the engine already wakes the loop for each video
+    /// frame.
+    fn ui_needs_animation(&self) -> bool {
+        let osd_active = self
+            .osd_notice
+            .as_ref()
+            .map(|(_, shown_at)| shown_at.elapsed() < Duration::from_millis(2200))
+            .unwrap_or(false);
+        // A spinner only exists while a load is in flight with no frames yet;
+        // once frames arrive the engine drives the loop itself.
+        let buffering_spinner = matches!(
+            self.controller.state(),
+            PlaybackState::Loading | PlaybackState::Buffering
+        );
+        osd_active
+            || buffering_spinner
+            || self.capture.enabled()
+            || self.show_playback_stats
+            || self.sync_panel_open
+            || self.player_view_menu_open
+            || self.player_more_overflow_open
+    }
+
+    /// True when the player is showing the audio experience, i.e. the 32-band
+    /// spectrum is actually on screen.
+    ///
+    /// The spectrum is only ever drawn by `render_audio_player_viewport`, which
+    /// the player view selects for audio-only media (or when the audio mode is
+    /// forced). During normal video playback nothing consumes the spectrum, so
+    /// there is no reason to probe for it or to drive a 60 Hz repaint — doing so
+    /// previously kept the paint loop busy at display rate *and* queued seven
+    /// blocking engine reads per interval for a visualizer nobody could see.
+    fn spectrum_is_visible(&self) -> bool {
         if !self.equalizer_settings.spectrum_visualizer_enabled
             || self.current_view != crate::views::AppView::Player
         {
+            return false;
+        }
+        let forced = std::env::var("MUVRIX_AUDIO_PLAYBACK_MODE").is_ok()
+            || std::env::var("MUVRIX_SHOW_SPECTRUM").is_ok();
+        if forced {
+            return true;
+        }
+        !self.has_video_track()
+    }
+
+    /// True when the loaded media carries a real (non-picture) video track.
+    pub(crate) fn has_video_track(&self) -> bool {
+        self.controller.track().tracks().iter().any(|t| {
+            t.track_type == muvrix_player::TrackType::Video
+                && !matches!(
+                    t.codec
+                        .as_deref()
+                        .map(|s| s.to_ascii_lowercase())
+                        .as_deref(),
+                    Some("mjpeg" | "png" | "jpeg" | "jpg")
+                )
+        })
+    }
+
+    /// Updates the 32-band visualizer from the off-thread probe snapshot.
+    ///
+    /// The engine read happens on the sampler thread; this only consumes the
+    /// published sample, so it can never stall a presented frame. The spectrum
+    /// probe and the extra repaint are enabled only while the visualizer is
+    /// actually on screen.
+    pub fn update_spectrum_visualizer(&mut self, ctx: &egui::Context) {
+        let wanted = self.spectrum_is_visible();
+        self.slow_metrics.set_spectrum_enabled(wanted);
+        if !wanted {
             return;
         }
 
-        // The engine probe blocks under decode pressure; serve the cached
-        // sample and let the adaptive refresh decide when the next probe is
-        // safe to perform.
-        self.slow_metrics
-            .refresh_spectrum(&self.controller, std::time::Instant::now());
-        let telemetry = self.slow_metrics.spectrum.clone();
+        let telemetry = self.slow_metrics.snapshot().spectrum;
         self.spectrum_visualizer.update(&telemetry);
 
-        // Continuous repaint during active audio playback for smooth 60 FPS animation
+        // Continuous repaint for smooth animation — but only for the audio
+        // experience. During video playback the render loop is already paced by
+        // the engine's own frame timing, and an extra unconditional repaint at
+        // display rate competes with it and costs frames.
         if telemetry.is_playing && !telemetry.is_paused {
             ctx.request_repaint();
         }

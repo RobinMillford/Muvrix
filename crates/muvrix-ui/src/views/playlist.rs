@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
+use eframe::egui::{self, Color32, Rect, RichText, Sense, Stroke, Vec2};
 
 use crate::app::MuvrixApp;
 use crate::branding::BrandPalette;
@@ -872,203 +872,256 @@ impl MuvrixApp {
         if !self.show_playlist_drawer {
             return;
         }
+        // Cinema and native fullscreen are video-only: the queue stays hidden
+        // (its open/closed state is remembered for when chrome returns).
+        if self.is_cinema_mode || self.is_fullscreen {
+            return;
+        }
 
-        egui::SidePanel::right("playlist_side_drawer")
-            .resizable(false)
-            .exact_width(280.0)
+        // Overlay drawer. A SidePanel would shrink the video and reflow the
+        // transport cluster every time the queue opens; an Area floats above
+        // the picture and leaves the canvas geometry untouched.
+        let mut width = self.playlist_drawer_width.clamp(240.0, 560.0);
+        egui::Area::new(egui::Id::new("playlist_overlay_drawer"))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 56.0))
+            .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                ui.add_space(4.0);
-
-                let playlist_count = self.controller.playlist_count();
-                let current_pos = self.controller.playlist_pos();
-
-                ui.horizontal(|ui| {
-                    icons::icon_label(ui, Icon::Playlist, 16.0, Color32::from_rgb(85, 175, 255));
-                    ui.label(RichText::new(format!("Queue ({playlist_count})")).strong());
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icons::icon_button(ui, Icon::Close, "Close queue drawer (P)").clicked() {
-                            self.show_playlist_drawer = false;
-                        }
-                        if icons::icon_button(ui, Icon::Shuffle, "Shuffle queue").clicked() {
-                            self.execute_shuffle();
-                        }
-                    });
-                });
-
-                ui.add_space(4.0);
-                ui.separator();
-                ui.add_space(4.0);
-
-                if playlist_count == 0 {
-                    ui.add_space(20.0);
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            RichText::new("Queue is empty")
-                                .size(13.0)
-                                .color(Color32::from_gray(160)),
-                        );
-                        ui.add_space(8.0);
-                        if ui.button("Add Files...").clicked() {
-                            self.open_file_dialog();
-                        }
-                    });
-                    return;
-                }
-
-                let playlist_items = self.controller.playlist().to_vec();
-                let mut play_idx: Option<usize> = None;
-                let mut remove_idx: Option<usize> = None;
-                let mut play_next_idx: Option<usize> = None;
-
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
+                egui::Frame::NONE
+                    .fill(BrandPalette::ELEVATED_CARD.gamma_multiply(0.97))
+                    .stroke(egui::Stroke::new(1.0_f32, BrandPalette::BORDER_SLATE))
+                    .corner_radius(8.0_f32)
+                    .inner_margin(egui::Margin::symmetric(8, 6))
                     .show(ui, |ui| {
-                        for (idx, item) in playlist_items.iter().enumerate() {
-                            let is_active =
-                                current_pos == Some(idx) || item.is_playing || item.is_current;
-                            let is_drag_source = self.playlist_drag_source_idx == Some(idx);
-                            let is_drag_target = self.playlist_drag_target_idx == Some(idx);
-
-                            let bg_color = if is_active {
-                                Color32::from_rgba_premultiplied(30, 60, 110, 240)
-                            } else if is_drag_source {
-                                Color32::from_rgba_premultiplied(45, 65, 85, 200)
-                            } else {
-                                Color32::from_rgba_premultiplied(22, 25, 32, 180)
-                            };
-
-                            let border_stroke = if is_drag_target {
-                                Stroke::new(2.0_f32, BrandPalette::ELECTRIC_LIME)
-                            } else {
-                                Stroke::NONE
-                            };
-
-                            let row_resp = egui::Frame::NONE
-                                .fill(bg_color)
-                                .stroke(border_stroke)
-                                .corner_radius(3.0)
-                                .inner_margin(egui::Margin::symmetric(6, 4))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        // Visual Drag Handle
-                                        let handle_resp = ui
-                                            .add(
-                                                egui::Label::new(
-                                                    RichText::new("≡").strong().size(14.0).color(
-                                                        if is_drag_source {
-                                                            BrandPalette::ELECTRIC_LIME
-                                                        } else {
-                                                            Color32::from_gray(150)
-                                                        },
-                                                    ),
-                                                )
-                                                .sense(egui::Sense::click_and_drag()),
-                                            )
-                                            .on_hover_text("Drag to reorder in queue")
-                                            .on_hover_cursor(egui::CursorIcon::Grab);
-
-                                        if handle_resp.drag_started() {
-                                            self.playlist_drag_source_idx = Some(idx);
-                                        }
-
-                                        if is_active {
-                                            icons::icon_label(
-                                                ui,
-                                                Icon::Play,
-                                                12.0,
-                                                Color32::from_rgb(80, 190, 255),
-                                            );
-                                        } else {
-                                            ui.label(
-                                                RichText::new(format!("{}", idx + 1))
-                                                    .monospace()
-                                                    .size(11.0)
-                                                    .color(Color32::from_gray(140)),
-                                            );
-                                        }
-
-                                        let filename = std::path::Path::new(&item.filename)
-                                            .file_name()
-                                            .and_then(|n| n.to_str())
-                                            .unwrap_or(&item.filename);
-
-                                        let text_color = if is_active {
-                                            Color32::WHITE
-                                        } else {
-                                            Color32::from_gray(215)
-                                        };
-
-                                        let btn = ui.link(
-                                            RichText::new(filename).size(11.5).color(text_color),
-                                        );
-                                        if btn.clicked() {
-                                            play_idx = Some(idx);
-                                        }
-
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if icons::icon_button_sized(
-                                                    ui,
-                                                    Icon::Close,
-                                                    Vec2::splat(18.0),
-                                                    "Remove",
-                                                )
-                                                .clicked()
-                                                {
-                                                    remove_idx = Some(idx);
-                                                }
-
-                                                if ui
-                                                    .small_button("Next")
-                                                    .on_hover_text("Play next")
-                                                    .clicked()
-                                                {
-                                                    play_next_idx = Some(idx);
-                                                }
-                                            },
-                                        );
-                                    });
-                                })
-                                .response;
-
-                            if self.playlist_drag_source_idx.is_some() && row_resp.hovered() {
-                                self.playlist_drag_target_idx = Some(idx);
-                            }
-
-                            ui.add_space(2.0);
+                        ui.set_width(width);
+                        // Resize grip: drag left to widen, right to narrow.
+                        let drag = ui.allocate_response(egui::vec2(width, 8.0), Sense::drag());
+                        if drag.dragged() {
+                            self.playlist_drawer_width = (self.playlist_drawer_width
+                                - drag.drag_delta().x)
+                                .clamp(240.0, 560.0);
+                            width = self.playlist_drawer_width;
                         }
-                    });
+                        if drag.hovered() || drag.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                        }
+                        let grip =
+                            Rect::from_center_size(drag.rect.center(), egui::vec2(36.0, 2.0));
+                        ui.painter().line_segment(
+                            [grip.left_center(), grip.right_center()],
+                            Stroke::new(2.0_f32, BrandPalette::BORDER_SLATE),
+                        );
+                        ui.add_space(4.0);
 
-                if ui.input(|i| i.pointer.any_released()) {
-                    if let (Some(src), Some(tgt)) = (
-                        self.playlist_drag_source_idx.take(),
-                        self.playlist_drag_target_idx.take(),
-                    ) {
-                        if src != tgt {
-                            let target_pos = if tgt > src { tgt + 1 } else { tgt };
-                            let _ = self.controller.playlist_move(src, target_pos);
+                        let playlist_count = self.controller.playlist_count();
+                        let current_pos = self.controller.playlist_pos();
+
+                        ui.horizontal(|ui| {
+                            icons::icon_label(
+                                ui,
+                                Icon::Playlist,
+                                16.0,
+                                Color32::from_rgb(85, 175, 255),
+                            );
+                            ui.label(RichText::new(format!("Queue ({playlist_count})")).strong());
+
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if icons::icon_button(ui, Icon::Close, "Close queue drawer (P)")
+                                        .clicked()
+                                    {
+                                        self.show_playlist_drawer = false;
+                                    }
+                                    if icons::icon_button(ui, Icon::Shuffle, "Shuffle queue")
+                                        .clicked()
+                                    {
+                                        self.execute_shuffle();
+                                    }
+                                },
+                            );
+                        });
+
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        if playlist_count == 0 {
+                            ui.add_space(20.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    RichText::new("Queue is empty")
+                                        .size(13.0)
+                                        .color(Color32::from_gray(160)),
+                                );
+                                ui.add_space(8.0);
+                                if ui.button("Add Files...").clicked() {
+                                    self.open_file_dialog();
+                                }
+                            });
+                            return;
+                        }
+
+                        let playlist_items = self.controller.playlist().to_vec();
+                        let mut play_idx: Option<usize> = None;
+                        let mut remove_idx: Option<usize> = None;
+                        let mut play_next_idx: Option<usize> = None;
+
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for (idx, item) in playlist_items.iter().enumerate() {
+                                    let is_active = current_pos == Some(idx)
+                                        || item.is_playing
+                                        || item.is_current;
+                                    let is_drag_source = self.playlist_drag_source_idx == Some(idx);
+                                    let is_drag_target = self.playlist_drag_target_idx == Some(idx);
+
+                                    let bg_color = if is_active {
+                                        Color32::from_rgba_premultiplied(30, 60, 110, 240)
+                                    } else if is_drag_source {
+                                        Color32::from_rgba_premultiplied(45, 65, 85, 200)
+                                    } else {
+                                        Color32::from_rgba_premultiplied(22, 25, 32, 180)
+                                    };
+
+                                    let border_stroke = if is_drag_target {
+                                        Stroke::new(2.0_f32, BrandPalette::ELECTRIC_LIME)
+                                    } else {
+                                        Stroke::NONE
+                                    };
+
+                                    let row_resp = egui::Frame::NONE
+                                        .fill(bg_color)
+                                        .stroke(border_stroke)
+                                        .corner_radius(3.0)
+                                        .inner_margin(egui::Margin::symmetric(6, 4))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                // Visual Drag Handle
+                                                let handle_resp = ui
+                                                    .add(
+                                                        egui::Label::new(
+                                                            RichText::new("≡")
+                                                                .strong()
+                                                                .size(14.0)
+                                                                .color(if is_drag_source {
+                                                                    BrandPalette::ELECTRIC_LIME
+                                                                } else {
+                                                                    Color32::from_gray(150)
+                                                                }),
+                                                        )
+                                                        .sense(egui::Sense::click_and_drag()),
+                                                    )
+                                                    .on_hover_text("Drag to reorder in queue")
+                                                    .on_hover_cursor(egui::CursorIcon::Grab);
+
+                                                if handle_resp.drag_started() {
+                                                    self.playlist_drag_source_idx = Some(idx);
+                                                }
+
+                                                if is_active {
+                                                    icons::icon_label(
+                                                        ui,
+                                                        Icon::Play,
+                                                        12.0,
+                                                        Color32::from_rgb(80, 190, 255),
+                                                    );
+                                                } else {
+                                                    ui.label(
+                                                        RichText::new(format!("{}", idx + 1))
+                                                            .monospace()
+                                                            .size(11.0)
+                                                            .color(Color32::from_gray(140)),
+                                                    );
+                                                }
+
+                                                let filename = std::path::Path::new(&item.filename)
+                                                    .file_name()
+                                                    .and_then(|n| n.to_str())
+                                                    .unwrap_or(&item.filename);
+
+                                                let text_color = if is_active {
+                                                    Color32::WHITE
+                                                } else {
+                                                    Color32::from_gray(215)
+                                                };
+
+                                                let btn = ui.link(
+                                                    RichText::new(filename)
+                                                        .size(11.5)
+                                                        .color(text_color),
+                                                );
+                                                if btn.clicked() {
+                                                    play_idx = Some(idx);
+                                                }
+
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| {
+                                                        if icons::icon_button_sized(
+                                                            ui,
+                                                            Icon::Close,
+                                                            Vec2::splat(18.0),
+                                                            "Remove",
+                                                        )
+                                                        .clicked()
+                                                        {
+                                                            remove_idx = Some(idx);
+                                                        }
+
+                                                        if ui
+                                                            .small_button("Next")
+                                                            .on_hover_text("Play next")
+                                                            .clicked()
+                                                        {
+                                                            play_next_idx = Some(idx);
+                                                        }
+                                                    },
+                                                );
+                                            });
+                                        })
+                                        .response;
+
+                                    if self.playlist_drag_source_idx.is_some() && row_resp.hovered()
+                                    {
+                                        self.playlist_drag_target_idx = Some(idx);
+                                    }
+
+                                    ui.add_space(2.0);
+                                }
+                            });
+
+                        if ui.input(|i| i.pointer.any_released()) {
+                            if let (Some(src), Some(tgt)) = (
+                                self.playlist_drag_source_idx.take(),
+                                self.playlist_drag_target_idx.take(),
+                            ) {
+                                if src != tgt {
+                                    let target_pos = if tgt > src { tgt + 1 } else { tgt };
+                                    let _ = self.controller.playlist_move(src, target_pos);
+                                    self.sync_active_queue_to_db();
+                                }
+                            }
+                        }
+
+                        if let Some(idx) = play_next_idx {
+                            let cur = current_pos.unwrap_or(0);
+                            let target = (cur + 1).min(playlist_count);
+                            let target_pos = if target > idx { target + 1 } else { target };
+                            let _ = self.controller.playlist_move(idx, target_pos);
                             self.sync_active_queue_to_db();
                         }
-                    }
-                }
-
-                if let Some(idx) = play_next_idx {
-                    let cur = current_pos.unwrap_or(0);
-                    let target = (cur + 1).min(playlist_count);
-                    let target_pos = if target > idx { target + 1 } else { target };
-                    let _ = self.controller.playlist_move(idx, target_pos);
-                    self.sync_active_queue_to_db();
-                }
-                if let Some(idx) = play_idx {
-                    let _ = self.controller.playlist_play_index(idx);
-                    self.sync_active_queue_to_db();
-                }
-                if let Some(idx) = remove_idx {
-                    let _ = self.controller.playlist_remove(idx);
-                    self.sync_active_queue_to_db();
-                }
+                        if let Some(idx) = play_idx {
+                            let _ = self.controller.playlist_play_index(idx);
+                            self.sync_active_queue_to_db();
+                        }
+                        if let Some(idx) = remove_idx {
+                            let _ = self.controller.playlist_remove(idx);
+                            self.sync_active_queue_to_db();
+                        }
+                    });
             });
     }
 

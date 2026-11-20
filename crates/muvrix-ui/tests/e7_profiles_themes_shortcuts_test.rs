@@ -2,7 +2,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use muvrix_core::database::{DatabaseManager, PlaybackProfile};
-use muvrix_ui::app::shortcuts::{KeyBindingMap, KeyCombination, ShortcutAction};
+use muvrix_ui::app::actions::PlayerAction;
+use muvrix_ui::app::shortcuts::{KeyBindingMap, KeyCombination};
 use muvrix_ui::theme::CustomTheme;
 
 #[test]
@@ -206,34 +207,35 @@ fn test_custom_keybinding_dispatch() {
     let mut keybindings = KeyBindingMap::default();
 
     // 1. Verify default PlayPause is Space
-    let play_pause_combo = keybindings.get(ShortcutAction::PlayPause).unwrap();
+    let play_pause_combo = keybindings.get(PlayerAction::PlayPause).unwrap();
     assert_eq!(play_pause_combo.key, egui::Key::Space);
     assert!(!play_pause_combo.ctrl);
     assert_eq!(play_pause_combo.display_string(), "Space");
 
     // 2. Rebind PlayPause to 'K'
-    keybindings.set_binding(ShortcutAction::PlayPause, KeyCombination::new(egui::Key::K));
-    let updated = keybindings.get(ShortcutAction::PlayPause).unwrap();
+    keybindings.set_binding(PlayerAction::PlayPause, KeyCombination::new(egui::Key::K));
+    let updated = keybindings.get(PlayerAction::PlayPause).unwrap();
     assert_eq!(updated.key, egui::Key::K);
     assert_eq!(updated.display_string(), "K");
 
     // 3. Create a deliberate conflict: bind VolumeUp also to 'K'
-    keybindings.set_binding(ShortcutAction::VolumeUp, KeyCombination::new(egui::Key::K));
+    keybindings.set_binding(PlayerAction::VolumeUp, KeyCombination::new(egui::Key::K));
     let conflicts = keybindings.find_conflicts();
-    assert_eq!(conflicts.len(), 1);
-    assert_eq!(conflicts[0].0, ShortcutAction::PlayPause);
-    assert_eq!(conflicts[0].1, ShortcutAction::VolumeUp);
-    assert_eq!(conflicts[0].2.key, egui::Key::K);
+    assert!(conflicts.iter().any(|c| {
+        (c.action_a == PlayerAction::PlayPause && c.action_b == PlayerAction::VolumeUp)
+            || (c.action_a == PlayerAction::VolumeUp && c.action_b == PlayerAction::PlayPause)
+    }));
+    assert!(conflicts.iter().all(|c| c.combination.key == egui::Key::K));
 
     // 4. Reset to defaults clears conflict
     keybindings.reset_to_defaults();
     assert!(keybindings.find_conflicts().is_empty());
     assert_eq!(
-        keybindings.get(ShortcutAction::PlayPause).unwrap().key,
+        keybindings.get(PlayerAction::PlayPause).unwrap().key,
         egui::Key::Space
     );
     assert_eq!(
-        keybindings.get(ShortcutAction::VolumeUp).unwrap().key,
+        keybindings.get(PlayerAction::VolumeUp).unwrap().key,
         egui::Key::ArrowUp
     );
 
@@ -261,13 +263,13 @@ fn test_actual_keyboard_event_dispatch_with_modifiers() {
     };
     let _ = ctx.run(raw_space, |ctx| {
         ctx.input(|i| {
-            assert!(keybindings.matches(ShortcutAction::PlayPause, i));
-            assert!(!keybindings.matches(ShortcutAction::VolumeUp, i));
+            assert!(keybindings.matches(PlayerAction::PlayPause, i));
+            assert!(!keybindings.matches(PlayerAction::VolumeUp, i));
         });
     });
 
     // 2. Rebind PlayPause to K -> Space no longer matches, K matches
-    keybindings.set_binding(ShortcutAction::PlayPause, KeyCombination::new(egui::Key::K));
+    keybindings.set_binding(PlayerAction::PlayPause, KeyCombination::new(egui::Key::K));
 
     let raw_space2 = egui::RawInput {
         events: vec![egui::Event::Key {
@@ -281,7 +283,7 @@ fn test_actual_keyboard_event_dispatch_with_modifiers() {
     };
     let _ = ctx.run(raw_space2, |ctx| {
         ctx.input(|i| {
-            assert!(!keybindings.matches(ShortcutAction::PlayPause, i));
+            assert!(!keybindings.matches(PlayerAction::PlayPause, i));
         });
     });
 
@@ -297,7 +299,7 @@ fn test_actual_keyboard_event_dispatch_with_modifiers() {
     };
     let _ = ctx.run(raw_k, |ctx| {
         ctx.input(|i| {
-            assert!(keybindings.matches(ShortcutAction::PlayPause, i));
+            assert!(keybindings.matches(PlayerAction::PlayPause, i));
         });
     });
 
@@ -314,7 +316,7 @@ fn test_actual_keyboard_event_dispatch_with_modifiers() {
     };
     let _ = ctx.run(raw_o_no_ctrl, |ctx| {
         ctx.input(|i| {
-            assert!(!keybindings.matches(ShortcutAction::OpenFile, i));
+            assert!(!keybindings.matches(PlayerAction::OpenFile, i));
         });
     });
 
@@ -331,15 +333,15 @@ fn test_actual_keyboard_event_dispatch_with_modifiers() {
     };
     let _ = ctx.run(raw_ctrl_o, |ctx| {
         ctx.input(|i| {
-            assert!(keybindings.matches(ShortcutAction::OpenFile, i));
+            assert!(keybindings.matches(PlayerAction::OpenFile, i));
         });
     });
 
-    // 4. Modifier dispatch: Alt+D for ToggleSecondaryDeck
-    let raw_alt_d = egui::RawInput {
+    // 4. Modifier dispatch: Alt+V cycles subtitle tracks in reverse
+    let raw_alt_v = egui::RawInput {
         modifiers: egui::Modifiers::ALT,
         events: vec![egui::Event::Key {
-            key: egui::Key::D,
+            key: egui::Key::V,
             physical_key: None,
             pressed: true,
             repeat: false,
@@ -347,9 +349,9 @@ fn test_actual_keyboard_event_dispatch_with_modifiers() {
         }],
         ..Default::default()
     };
-    let _ = ctx.run(raw_alt_d, |ctx| {
+    let _ = ctx.run(raw_alt_v, |ctx| {
         ctx.input(|i| {
-            assert!(keybindings.matches(ShortcutAction::ToggleSecondaryDeck, i));
+            assert!(keybindings.matches(PlayerAction::CycleSubtitleTrackReverse, i));
         });
     });
 }

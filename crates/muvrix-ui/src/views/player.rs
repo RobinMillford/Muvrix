@@ -122,12 +122,12 @@ impl MuvrixApp {
                         }
 
                         ui.separator();
-                        let source_fps = self
-                            .slow_metrics
+                        let metrics = self.slow_metrics.snapshot();
+                        let source_fps = metrics
                             .container_fps
-                            .or(self.slow_metrics.estimated_vf_fps)
+                            .or(metrics.estimated_vf_fps)
                             .unwrap_or(0.0);
-                        let drops = self.slow_metrics.frame_drops;
+                        let drops = metrics.frame_drops;
                         ui.label(
                             RichText::new(format!(
                                 "UI: {:.1} FPS ({:.1} ms) | Video: {:.1} fps ({} drops)",
@@ -606,7 +606,7 @@ impl MuvrixApp {
                             }
 
                             // Draw demuxer/stream buffer range on slider track
-                            let cache_time = self.slow_metrics.demuxer_cache_time;
+                            let cache_time = self.slow_metrics.snapshot().demuxer_cache_time;
                             if duration > 0.0 && cache_time > time_pos {
                                 let painter = ui.painter();
                                 let frac_cur = (time_pos / max_dur).clamp(0.0, 1.0) as f32;
@@ -935,7 +935,9 @@ impl MuvrixApp {
 
                                     if !compact {
                                         let view_open = self.player_view_menu_open;
-                                        let aspect_label = self.current_aspect_label();
+                                        let aspect_label = crate::app::actions::aspect_label_from_raw(
+                                            &self.slow_metrics.snapshot().aspect_override,
+                                        );
                                         if icons::icon_button_sized(
                                             ui,
                                             Icon::AspectRatio,
@@ -1489,21 +1491,10 @@ impl MuvrixApp {
                         });
                     }
                     PlaybackState::Playing | PlaybackState::Paused => {
-                        let has_video = self.controller.track().tracks().iter().any(|t| {
-                            t.track_type == TrackType::Video
-                                && !matches!(
-                                    t.codec
-                                        .as_deref()
-                                        .map(|s| s.to_ascii_lowercase())
-                                        .as_deref(),
-                                    Some("mjpeg" | "png" | "jpeg" | "jpg")
-                                )
-                        });
-
                         let force_audio_view = std::env::var("MUVRIX_AUDIO_PLAYBACK_MODE").is_ok()
                             || std::env::var("MUVRIX_SHOW_SPECTRUM").is_ok();
 
-                        if !has_video || force_audio_view {
+                        if force_audio_view || !self.has_video_track() {
                             self.render_audio_player_viewport(ui, rect);
                         }
                     }
@@ -2264,7 +2255,7 @@ impl MuvrixApp {
                     .and_then(|f| f.to_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| "MUVRIX Player".to_string());
-                let (vw, vh) = self.controller.video_pixel_size();
+                let (vw, vh) = self.slow_metrics.snapshot().video_size;
                 let info = if vw > 1 && vh > 1 {
                     format!("{vw}×{vh}")
                 } else {
@@ -3008,6 +2999,10 @@ impl MuvrixApp {
         if let Some(probe) = &self.diagnostics {
             probe.set_enabled(true);
         }
+        // Keep the low-rate probes fresh while the overlay is being looked at:
+        // the sampler runs off-thread, so asking it for a sample cannot stall a
+        // frame, and the numbers on screen stay current.
+        self.slow_metrics.request_refresh();
         let snap = self
             .diagnostics
             .as_ref()
@@ -3108,7 +3103,18 @@ impl MuvrixApp {
                                     row(ui, "HDR", snap.hdr.clone());
                                     row(ui, "Source FPS", fmt_opt(snap.container_fps, ""));
                                     row(ui, "Estimated FPS", fmt_opt(snap.estimated_fps, ""));
-                                    row(ui, "Display FPS", fmt_opt(snap.display_fps, ""));
+                                    // libmpv cannot report display-fps through the
+                                    // embedded render API (no VO owns a display). The
+                                    // windowing system does report the panel rate, so
+                                    // show that and name its source.
+                                    row(
+                                        ui,
+                                        "Display FPS",
+                                        match self.display_refresh_hz {
+                                            Some(hz) => format!("{hz:.3} (panel)"),
+                                            None => "unavailable (no monitor rate)".into(),
+                                        },
+                                    );
                                     row(ui, "Video output", snap.current_vo.clone());
                                     row(
                                         ui,
@@ -3169,6 +3175,35 @@ impl MuvrixApp {
                                     row(ui, "Device", snap.audio_device.clone());
                                     row(ui, "Audio delay", fmt_opt(snap.audio_delay, " s"));
                                     row(ui, "Subtitle delay", fmt_opt(snap.sub_delay, " s"));
+
+                                    header(ui, "RENDER THREAD");
+                                    row(
+                                        ui,
+                                        "HUD build",
+                                        match self.hud_build_us {
+                                            Some(us) => format!("{:.2} ms", us as f64 / 1000.0),
+                                            None => "—".into(),
+                                        },
+                                    );
+                                    row(
+                                        ui,
+                                        "UI paint",
+                                        match self.ui_paint_us {
+                                            Some(us) => format!("{:.2} ms", us as f64 / 1000.0),
+                                            None => "—".into(),
+                                        },
+                                    );
+                                    row(ui, "GPU utilisation", "not measured (no intel_gpu_top)".into());
+                                    row(
+                                        ui,
+                                        "Decode engine util",
+                                        "not measured (no intel_gpu_top)".into(),
+                                    );
+                                    row(
+                                        ui,
+                                        "Audio xruns",
+                                        "not exposed by libmpv (see pw-top ERR)".into(),
+                                    );
 
                                     header(ui, "DELIVERY & SYSTEM");
                                     row(ui, "Demuxer cache", fmt_opt(snap.cache_duration, " s"));

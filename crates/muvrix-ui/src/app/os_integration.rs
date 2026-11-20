@@ -588,6 +588,25 @@ impl MuvrixApp {
         self.add_bookmark_at(time_pos, label, note);
     }
 
+    /// Records the panel refresh rate reported by the windowing system.
+    ///
+    /// Called once by the runner when it first sees a monitor. `None` means the
+    /// monitor did not report a rate, which is displayed as unavailable rather
+    /// than as zero.
+    pub fn set_display_refresh_hz(&mut self, hz: Option<f64>) {
+        self.display_refresh_hz = hz;
+    }
+
+    /// Panel refresh rate, once the windowing system has reported one.
+    pub fn display_refresh_hz(&self) -> Option<f64> {
+        self.display_refresh_hz
+    }
+
+    /// Records the measured duration of the UI tessellation+paint pass.
+    pub fn set_ui_paint_us(&mut self, us: u64) {
+        self.ui_paint_us = Some(us);
+    }
+
     /// A/V timing properties, sampled by the runner's telemetry.
     ///
     /// `avsync` is the engine's own A/V difference in seconds; `display_fps` is

@@ -70,9 +70,10 @@ pub use stream::{
     SftpSeekableStream, SmbSeekableStream, StreamErrorKind, StreamRegistry, StreamRetryPolicy,
     StreamTelemetry,
 };
+pub use subsystems::video::{CropPreset, ScalingMode, ScreenshotMode};
 pub use subsystems::{
-    AudioDeviceChangeEvent, AudioRecoveryStatus, AudioSubsystem, DecoderFallbackReason,
-    DecoderWatchdog, TrackSubsystem, VideoSubsystem, WatchdogStatus,
+    spectrum_telemetry_for, AudioDeviceChangeEvent, AudioRecoveryStatus, AudioSubsystem,
+    DecoderFallbackReason, DecoderWatchdog, TrackSubsystem, VideoSubsystem, WatchdogStatus,
 };
 pub use thumbnail::MpvThumbnailExtractor;
 pub use track::{

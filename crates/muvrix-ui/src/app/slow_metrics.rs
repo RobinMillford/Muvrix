@@ -1,105 +1,190 @@
-//! Adaptive, cached mpv probes for the paint path.
+//! Off-thread engine probes for the paint path.
 //!
 //! `mpv_get_property` blocks until the engine core services the request. Under
-//! 4K HEVC decode pressure the core can defer a reply by tens to hundreds of
-//! milliseconds, and anything this app reads per paint (spectrum probe, drop
-//! counters, diagnostics) stalls the whole presentation loop with it. The
-//! measured cost was ~150 ms per presented frame, which serialized decode,
-//! render, composite, swap and the wp_presentation acknowledgement into a
-//! ~5 FPS pipeline.
+//! 4K HEVC decode pressure the core can defer a reply by tens of milliseconds,
+//! and every such read performed by the paint thread is time the compositor
+//! does not get a buffer — so Mutter never presents, frame callbacks stall, and
+//! the engine drops frames to keep audio sync. The measured cost of the
+//! previous per-paint probes was ~21–28 ms per read at the 4K HEVC profile this
+//! machine plays (see `docs/verification/`).
 //!
-//! This module keeps exactly one instance of each expensive probe, refreshed
-//! on a bounded, adaptive interval:
+//! The probes therefore run on a dedicated worker thread, exactly like
+//! [`crate::app::diagnostics::DiagnosticsProbe`]. The paint path only ever
+//! reads a snapshot from shared memory, so no engine round trip can delay a
+//! frame. Values are at most one sampling interval stale, which is invisible
+//! for a drop counter, an FPS estimate or a spectrum bar.
 //!
-//! * a refresh that takes <= [`FAST_LIMIT`] resets the cadence to the base
-//!   interval;
-//! * a refresh slower than that doubles the interval (up to [`MAX_INTERVAL`]),
-//!   so a sick engine costs 2 Hz of probes, not 10 Hz.
-//!
-//! All probes are safe to skip: the visualizer and diagnostics show slightly
-//! stale values rather than block a frame.
+//! Sampling pauses when there is nothing to sample: the worker sleeps at a low
+//! rate until playback starts, and the visualizer probe only runs while the
+//! visualizer is actually on screen.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use muvrix_player::{PlaybackController, SpectrumTelemetry};
+use muvrix_player::MpvHandle;
+use muvrix_player::SpectrumTelemetry;
 
-const BASE_INTERVAL: Duration = Duration::from_millis(100);
-const MAX_INTERVAL: Duration = Duration::from_secs(2);
-/// A refresh that completes within this budget means the core is healthy and
-/// the base cadence can be restored immediately.
-const FAST_LIMIT: Duration = Duration::from_millis(20);
+/// Sampling cadence while playing.
+const ACTIVE_INTERVAL: Duration = Duration::from_millis(100);
+/// Cadence while not playing; also the latency to notice playback started.
+const IDLE_INTERVAL: Duration = Duration::from_millis(250);
+/// Sleep granularity so the worker notices a stop request promptly.
+const SLEEP_SLICE: Duration = Duration::from_millis(25);
 
-/// Cached probes read at a low rate. Defaults keep the UI fully functional
-/// before the first refresh (spectrum reports "not playing").
+/// One immutable sample of the low-rate scalar probes plus the spectrum.
 #[derive(Debug, Clone)]
-pub(crate) struct SlowMetrics {
+pub(crate) struct ProbeSnapshot {
     pub(crate) spectrum: SpectrumTelemetry,
-    spectrum_interval: Duration,
-    spectrum_updated: Option<Instant>,
-
     pub(crate) demuxer_cache_time: f64,
     pub(crate) estimated_vf_fps: Option<f64>,
     pub(crate) frame_drops: i64,
     pub(crate) container_fps: Option<f64>,
-    status_interval: Duration,
-    status_updated: Option<Instant>,
+    /// Decoded frame size. The HUD title needs it every frame, and
+    /// `video-pixel-size` used to be two blocking reads on the paint thread.
+    pub(crate) video_size: (i64, i64),
+    /// Raw `video-aspect-override` (`"no"` when unset). The deck's label is
+    /// derived from this; reading it per frame was a blocking engine call.
+    pub(crate) aspect_override: String,
 }
 
-impl Default for SlowMetrics {
+impl Default for ProbeSnapshot {
     fn default() -> Self {
         Self {
             spectrum: SpectrumTelemetry::default(),
-            spectrum_interval: BASE_INTERVAL,
-            spectrum_updated: None,
             demuxer_cache_time: 0.0,
             estimated_vf_fps: None,
             frame_drops: 0,
             container_fps: None,
-            status_interval: BASE_INTERVAL,
-            status_updated: None,
+            video_size: (0, 0),
+            aspect_override: "no".to_string(),
         }
+    }
+}
+
+/// Background sampler for the probes the player view and visualizer need.
+pub(crate) struct SlowMetrics {
+    shared: Arc<Mutex<ProbeSnapshot>>,
+    /// Set while audio is playing; gates the seven-read spectrum probe.
+    spectrum_enabled: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    /// Bumped by the paint path when it wants a fresh sample immediately
+    /// (e.g. the statistics overlay just opened).
+    refresh_request: Arc<AtomicU64>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Default for SlowMetrics {
+    fn default() -> Self {
+        Self::new(None)
     }
 }
 
 impl SlowMetrics {
-    /// Refreshes the spectrum probe when due. Only meaningful while playing
-    /// with the visualizer enabled; the caller decides.
-    pub(crate) fn refresh_spectrum(&mut self, controller: &PlaybackController, now: Instant) {
-        if !due(self.spectrum_updated, self.spectrum_interval, now) {
-            return;
+    /// Starts the sampler. Without a handle it stays idle and serves defaults,
+    /// which keeps tests and headless construction working unchanged.
+    pub(crate) fn new(handle: Option<Arc<MpvHandle>>) -> Self {
+        let shared = Arc::new(Mutex::new(ProbeSnapshot::default()));
+        let spectrum_enabled = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let refresh_request = Arc::new(AtomicU64::new(0));
+
+        let worker = handle.and_then(|handle| {
+            let shared = Arc::clone(&shared);
+            let spectrum_enabled = Arc::clone(&spectrum_enabled);
+            let stop = Arc::clone(&stop);
+            let refresh_request = Arc::clone(&refresh_request);
+            std::thread::Builder::new()
+                .name("muvrix-probes".to_string())
+                .spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let playing = !handle
+                            .get_property::<bool>("pause")
+                            .unwrap_or(true)
+                            && !handle.get_property::<bool>("idle-active").unwrap_or(true);
+
+                        let mut sample = ProbeSnapshot {
+                            demuxer_cache_time: handle
+                                .get_property::<f64>("demuxer-cache-time")
+                                .unwrap_or(0.0),
+                            estimated_vf_fps: handle.get_property::<f64>("estimated-vf-fps").ok(),
+                            frame_drops: handle.get_property::<i64>("frame-drop-count").unwrap_or(0),
+                            container_fps: handle.get_property::<f64>("container-fps").ok(),
+                            video_size: (
+                                handle.get_property::<i64>("width").unwrap_or(0),
+                                handle.get_property::<i64>("height").unwrap_or(0),
+                            ),
+                            aspect_override: handle
+                                .get_property_string("video-aspect-override")
+                                .unwrap_or_else(|_| "no".to_string()),
+                            spectrum: SpectrumTelemetry::default(),
+                        };
+
+                        if spectrum_enabled.load(Ordering::Relaxed) {
+                            let paused = handle.get_property::<bool>("pause").unwrap_or(false);
+                            sample.spectrum =
+                                muvrix_player::spectrum_telemetry_for(&handle, playing, paused);
+                        }
+
+                        if let Ok(mut lock) = shared.lock() {
+                            *lock = sample;
+                        }
+
+                        // Consume one refresh request per completed sample.
+                        let pending = refresh_request.load(Ordering::Relaxed);
+                        if pending > 0 {
+                            refresh_request.store(pending - 1, Ordering::Relaxed);
+                        }
+
+                        let interval = if playing {
+                            ACTIVE_INTERVAL
+                        } else {
+                            IDLE_INTERVAL
+                        };
+                        let deadline = Instant::now() + interval;
+                        while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+                            std::thread::sleep(SLEEP_SLICE);
+                        }
+                    }
+                })
+                .ok()
+        });
+
+        Self {
+            shared,
+            spectrum_enabled,
+            stop,
+            refresh_request,
+            worker,
         }
-        let started = Instant::now();
-        self.spectrum = controller.spectrum_telemetry();
-        self.spectrum_interval = adapt(self.spectrum_interval, started.elapsed());
-        self.spectrum_updated = Some(now);
     }
 
-    /// Refreshes the low-rate scalar probes (~2 Hz worth of round trips).
-    pub(crate) fn refresh_status(&mut self, controller: &PlaybackController, now: Instant) {
-        if !due(self.status_updated, self.status_interval, now) {
-            return;
-        }
-        let started = Instant::now();
-        self.demuxer_cache_time = controller.demuxer_cache_time();
-        self.estimated_vf_fps = controller.estimated_vf_fps();
-        self.frame_drops = controller.frame_drop_count();
-        self.container_fps = controller.container_fps();
-        self.status_interval = adapt(self.status_interval, started.elapsed());
-        self.status_updated = Some(now);
+    /// Enables or pauses the spectrum probe. Only the visualizer needs it, so it
+    /// is off unless the visualizer is on screen and enabled.
+    pub(crate) fn set_spectrum_enabled(&self, on: bool) {
+        self.spectrum_enabled.store(on, Ordering::Relaxed);
+    }
+
+    /// Requests an immediate sample on the next worker pass.
+    pub(crate) fn request_refresh(&self) {
+        self.refresh_request.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Latest published sample. Cheap: it never touches the engine.
+    pub(crate) fn snapshot(&self) -> ProbeSnapshot {
+        self.shared
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default()
     }
 }
 
-fn due(updated: Option<Instant>, interval: Duration, now: Instant) -> bool {
-    updated
-        .map(|t| now.saturating_duration_since(t) >= interval)
-        .unwrap_or(true)
-}
-
-fn adapt(current: Duration, took: Duration) -> Duration {
-    if took <= FAST_LIMIT {
-        BASE_INTERVAL
-    } else {
-        (current * 2).min(MAX_INTERVAL)
+impl Drop for SlowMetrics {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -108,28 +193,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slow_probes_double_the_interval_and_cap() {
-        let mut i = BASE_INTERVAL;
-        i = adapt(i, Duration::from_millis(50));
-        assert_eq!(i, BASE_INTERVAL * 2);
-        i = adapt(i, Duration::from_millis(50));
-        assert_eq!(i, BASE_INTERVAL * 4);
-        i = adapt(i, Duration::from_millis(50));
-        i = adapt(i, Duration::from_millis(50));
-        i = adapt(i, Duration::from_millis(50));
-        i = adapt(i, Duration::from_millis(50));
-        i = adapt(i, Duration::from_millis(50));
-        assert_eq!(i, MAX_INTERVAL);
-        // A fast refresh restores the base cadence immediately.
-        i = adapt(i, Duration::from_millis(1));
-        assert_eq!(i, BASE_INTERVAL);
+    fn probe_without_a_handle_serves_defaults() {
+        let metrics = SlowMetrics::default();
+        let sample = metrics.snapshot();
+        assert_eq!(sample.frame_drops, 0);
+        assert!(!sample.spectrum.is_playing);
     }
 
     #[test]
-    fn never_refreshed_is_due() {
-        let now = Instant::now();
-        assert!(due(None, BASE_INTERVAL, now));
-        assert!(!due(Some(now), BASE_INTERVAL, now));
-        assert!(due(Some(now - BASE_INTERVAL), BASE_INTERVAL, now));
+    fn spectrum_gate_starts_closed() {
+        let metrics = SlowMetrics::default();
+        assert!(!metrics.spectrum_enabled.load(Ordering::Relaxed));
+        metrics.set_spectrum_enabled(true);
+        assert!(metrics.spectrum_enabled.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn refresh_requests_are_counted_not_dropped() {
+        let metrics = SlowMetrics::default();
+        metrics.request_refresh();
+        metrics.request_refresh();
+        assert_eq!(metrics.refresh_request.load(Ordering::Relaxed), 2);
     }
 }
