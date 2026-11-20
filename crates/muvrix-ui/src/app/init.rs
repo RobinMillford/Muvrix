@@ -82,7 +82,22 @@ impl MuvrixApp {
         // fact, and gives a fallback an actual reason instead of a guess.
         let vaapi = muvrix_player::vaapi::prepare(&gpu_renderer);
 
-        // 2. Initialize libmpv handle with required options
+        // 2. Reject an unsupported libmpv before any engine state is created.
+        // The render context, options and playback pipeline all assume the
+        // client API floor; failing here produces a readable diagnostic instead
+        // of an obscure failure deeper in initialisation.
+        let api = muvrix_player::version::ApiVersion::current();
+        api.validate_gl_prerequisites().map_err(|e| {
+            log::error!(
+                "libmpv runtime incompatible: detected client API {} (raw {}), required >= 2.0",
+                api,
+                api.raw
+            );
+            e.to_string()
+        })?;
+        log::info!("libmpv runtime: client API {api}");
+
+        // 3. Initialize libmpv handle with required options
         let mpv = Arc::new(MpvHandle::new()?);
         let stream_bridge = Arc::new(MpvStreamBridge::new());
         let _ = stream_bridge.attach_to_handle(&mpv);
@@ -159,7 +174,7 @@ impl MuvrixApp {
         }
         mpv.initialize()?;
 
-        // 3. Initialize libmpv OpenGL render context
+        // 4. Initialize libmpv OpenGL render context
         let get_proc_address = get_proc_address.ok_or("GL get_proc_address required for libmpv")?;
         let mpv_render_ctx = unsafe {
             MpvRenderContext::new_gl_with_display(
@@ -190,7 +205,7 @@ impl MuvrixApp {
             deferred_composite: output.is_native_shell(),
         };
 
-        // 4. Create RenderEngine with off-screen FBO and quad compositor
+        // 5. Create RenderEngine with off-screen FBO and quad compositor
         let mut render_engine = unsafe {
             RenderEngine::new_with_options(&gl, mpv_render_ctx, 1280, 720, engine_options)
                 .map_err(|e| format!("Failed to create RenderEngine: {e}"))?
@@ -203,7 +218,7 @@ impl MuvrixApp {
         let frame_signal = Arc::new(std::sync::atomic::AtomicBool::new(false));
         render_engine.set_frame_signal(frame_signal.clone());
 
-        // 5. Connect mpv update callback to request eframe repaints.
+        // 6. Connect mpv update callback to request eframe repaints.
         //    The callback runs on an engine thread: it must only signal a
         //    repaint, never render or call libmpv APIs.
         let egui_ctx = egui_ctx.clone();
