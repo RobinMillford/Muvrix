@@ -1,0 +1,106 @@
+# Maintainer: Muvrix Desktop Team <dev@muvrix.org>
+#
+# Arch packaging for MUVRIX.
+#
+# Arch is the one distribution family where a system libmpv is *close* to
+# usable, so the choice deserves an explicit justification rather than a
+# default.
+#
+# MUVRIX requires libmpv client API 2.6 (mpv 0.42) for the rendering paths it
+# uses. Arch tracks mpv closely and currently ships a new enough version, so a
+# system-managed package is viable and is what this PKGBUILD does: no private
+# runtime, no bundled ffmpeg, and `-C relocation=none` coordination is
+# unnecessary. The runtime API check added to `app/init.rs` enforces the floor
+# at startup, so an Arch user who has pinned an older mpv gets a clear error
+# rather than a crash.
+#
+# The trade-off, stated plainly: this package follows the system mpv, so a
+# libmpv regression in a rolling update reaches MUVRIX users before it reaches
+# anyone else. That is the Arch convention (build against the distribution) and
+# is preferable here to shipping a second ~200 MB media stack. Debian/Ubuntu and
+# Fedora get the private runtime because their archives do *not* ship 0.42.
+#
+# Verified status: source audited and compile-checked. NOT installed or
+# playback-tested on a real Arch system in this repository's CI.
+
+pkgname=muvrix
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Native Linux desktop media player powered by libmpv"
+arch=('x86_64' 'aarch64')
+url="https://github.com/RobinMillford/Muvrix"
+license=('GPL-3.0-or-later')
+depends=(
+    'gcc-libs'
+    'glibc'
+    'egl-wayland'
+    'libglvnd'
+    'libxkbcommon'
+    'wayland'
+    'dbus'
+    'openssl'
+    'libva'
+    'mpv'          # provides libmpv.so.2 with client API >= 2.6
+)
+makedepends=('rust' 'cargo' 'pkgconf' 'meson' 'ninja')
+optdepends=(
+    'pipewire: modern audio server'
+    'pulseaudio: alternative audio server'
+    'libva-intel-driver: VA-API decode on older Intel GPUs'
+    'intel-media-driver: VA-API decode on Intel Gen9+'
+    'libva-mesa-driver: VA-API decode on AMD'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')   # replace with the release tarball digest before publishing
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    # Release tarballs already carry a Cargo.lock; do not let cargo re-resolve.
+    cargo fetch --locked --target "$CARCH-unknown-linux-gnu" \
+        --manifest-path Cargo.toml
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    # Build against the distribution's libmpv. No vendored runtime: see the
+    # header comment for why Arch differs from the Debian/Fedora packages.
+    export RUSTFLAGS="${RUSTFLAGS:-} -C strip=symbols"
+    cargo build --release --locked --frozen \
+        -p muvrix-ui --bin muvrix-ui
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    cargo test --release --locked -p muvrix-player --lib
+    # The runtime playback test needs a fixture; generate it so the check is
+    # meaningful rather than silently skipping on a missing file.
+    mkdir -p docs/tests/fixtures
+    ffmpeg -hide_banner -loglevel error -y \
+        -f lavfi -i "testsrc=size=640x360:rate=30:duration=3" \
+        -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=3" \
+        -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+        -c:a aac -b:a 64k -shortest \
+        docs/tests/fixtures/test_video.mp4
+    cargo test --release --locked -p muvrix-player --test playback_test \
+        -- --test-threads=1
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+
+    install -Dm755 target/release/muvrix-ui "$pkgdir/usr/bin/muvrix"
+    install -Dm644 packaging/appimage/muvrix.desktop \
+        "$pkgdir/usr/share/applications/org.muvrix.Muvrix.desktop"
+    install -Dm644 packaging/metainfo/org.muvrix.Muvrix.metainfo.xml \
+        "$pkgdir/usr/share/metainfo/org.muvrix.Muvrix.metainfo.xml"
+
+    install -Dm644 assets/branding/muvrix-logo.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/org.muvrix.Muvrix.svg"
+
+    for size in 16 24 32 48 64 128 256 512; do
+        local icon="assets/branding/icons/muvrix-${size}x${size}.png"
+        [ -f "$icon" ] || continue
+        install -Dm644 "$icon" \
+            "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/org.muvrix.Muvrix.png"
+    done
+}

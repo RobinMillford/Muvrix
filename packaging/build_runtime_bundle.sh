@@ -11,7 +11,7 @@
 #
 #   libmpv 0.42.0        (mpv, -Dlibmpv=true)
 #   libplacebo 7.387.0   (built from source; Ubuntu's 6.338 is too old)
-#   ffmpeg 6.1           (Ubuntu 24.04 system libraries, bundled privately)
+#   ffmpeg 6.1           (built from the pinned release tarball)
 #   + the remaining transitive closure
 #
 # The payload is shipped under /opt/muvrix/lib (deb/rpm), /app/lib/muvrix
@@ -44,6 +44,15 @@ PLACEBO_VERSION="7.387.0"
 PLACEBO_COMMIT="275f7dea27924cdd34ab2e6c20e448b6bc4fab65"
 PLACEBO_REPO="https://github.com/haasn/libplacebo.git"
 
+# FFmpeg is built from source as well. libplacebo 7.387 requires libavcodec
+# >= 60.31.102, and Debian 12 (the glibc 2.36 baseline) ships 59.x. Using the
+# distribution's libraries would force either a newer baseline or a
+# down-revision libplacebo; building the pinned release keeps both the glibc
+# floor and the media stack version where they are declared to be.
+FFMPEG_VERSION="6.1"
+FFMPEG_URL="https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz"
+FFMPEG_SHA256="488c76e57dd9b3bee901f71d5c95eaf1db4a5a31fe46a28654e837144207c270"
+
 if [ "${1:-}" = "--force" ]; then
     rm -rf "$OUT_DIR"
 fi
@@ -68,19 +77,35 @@ fi
 
 # Libraries that must come from the host/runtime. Anything matching is not
 # bundled: glibc and the loader, OpenSSL, D-Bus, and the graphics driver stack.
-DENYLIST_PATTERNS='^(ld-linux.*|libc|libm|libmvec|libresolv|libpthread|librt|libdl|libutil|libnsl|libgcc_s|libz|libssl|libcrypto|libdbus-1|libEGL|libGL|libGLX|libGLdispatch|libOpenGL|libxkbcommon.*|libdrm|libgbm|libvulkan|libva|libva-drm|libva-x11|libva-wayland|libsystemd|libudev|libcap|libselinux|liblzma|libzstd|libgcrypt|libgpg-error|libnettle|libhogweed|libgnutls|libidn2|libunistring|libtasn1|libp11-kit|libffi|libexpat|libelf|libmount|libblkid|libuuid|libattr|libacl)\.so'
+#
+# The X11, audio-server and desktop-integration families are here for two
+# reasons, both of which are correctness rather than tidiness:
+#
+# 1. They are negotiated with a host service that is already running — the X
+#    server over its socket, PipeWire/PulseAudio over their protocol, the
+#    session bus. A private copy pins a protocol client that may not match the
+#    daemon the user actually has, and the private copy wins silently because
+#    the launcher prepends the bundle to LD_LIBRARY_PATH.
+# 2. They carry the newest glibc requirements of anything in the closure
+#    (libX11, libasound and libSDL2 were pulling GLIBC_2.38 in), so bundling
+#    them raised the floor of the entire package above the binary's own.
+#
+# libva is excluded for the same driver-boundary reason and is listed separately
+# because the VA-API driver stack is host-owned.
+DENYLIST_PATTERNS='^(ld-linux.*|libc|libm|libmvec|libresolv|libpthread|librt|libdl|libutil|libnsl|libgcc_s|libz|libssl|libcrypto|libdbus-1|libEGL|libGL|libGLX|libGLdispatch|libOpenGL|libxkbcommon.*|libdrm|libgbm|libvulkan|libva|libva-drm|libva-x11|libva-wayland|libsystemd|libudev|libcap|libselinux|liblzma|libzstd|libgcrypt|libgpg-error|libnettle|libhogweed|libgnutls|libidn2|libunistring|libtasn1|libp11-kit|libffi|libexpat|libelf|libmount|libblkid|libuuid|libattr|libacl|libX11.*|libxcb.*|libXau|libXdmcp|libXext|libXfixes|libXi|libXrandr|libXrender|libXcursor|libXScrnSaver|libXcomposite|libXdamage|libXinerama|libXtst|libasound|libpulse.*|libpipewire.*|libSDL2.*|libapparmor|libselinux)\.so'
 
 podman run --rm -v "$REPO_ROOT:/workspace:z" -w /workspace \
     -e MPV_VERSION="$MPV_VERSION" -e MPV_URL="$MPV_URL" -e MPV_SHA256="$MPV_SHA256" \
     -e PLACEBO_VERSION="$PLACEBO_VERSION" -e PLACEBO_COMMIT="$PLACEBO_COMMIT" \
     -e PLACEBO_REPO="$PLACEBO_REPO" -e DENYLIST_PATTERNS="$DENYLIST_PATTERNS" \
     -e WAYLAND_VERSION="$WAYLAND_VERSION" -e WAYLAND_URL="$WAYLAND_URL" -e WAYLAND_SHA256="$WAYLAND_SHA256" \
+    -e FFMPEG_VERSION="$FFMPEG_VERSION" -e FFMPEG_URL="$FFMPEG_URL" -e FFMPEG_SHA256="$FFMPEG_SHA256" \
     "$BUILD_IMAGE" bash -c '
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 PREFIX=/opt/muvrix
 
-echo "[*] Building inside the pinned Ubuntu 24.04 runtime builder image" >&2
+echo "[*] Building inside the pinned Debian 12 (glibc 2.36) runtime builder image" >&2
 
 fetch() {
     url="$1"; sha="$2"; dest="$3"
@@ -92,9 +117,12 @@ cd /tmp
 echo "[*] Fetching pinned sources" >&2
 fetch "$MPV_URL" "$MPV_SHA256" mpv.tar.gz
 fetch "$WAYLAND_URL" "$WAYLAND_SHA256" wayland.tar.xz
+fetch "$FFMPEG_URL" "$FFMPEG_SHA256" ffmpeg.tar.xz
 tar xzf mpv.tar.gz
 tar xJf wayland.tar.xz
+tar xJf ffmpeg.tar.xz
 MPV_SRC="mpv-${MPV_VERSION}"
+FFMPEG_SRC="ffmpeg-${FFMPEG_VERSION}"
 
 echo "[*] Building libwayland ${WAYLAND_VERSION} (mpv needs wayland-client >= 1.23)" >&2
 cd "/tmp/wayland-${WAYLAND_VERSION}"
@@ -105,6 +133,20 @@ ninja -C build install
 export PATH="$PREFIX/bin:$PATH"
 export PKG_CONFIG_PATH="$PREFIX/lib/x86_64-linux-gnu/pkgconfig:$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 export LD_LIBRARY_PATH="$PREFIX/lib/x86_64-linux-gnu:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
+
+# FFmpeg first: libplacebo and mpv both link it. Built as shared libraries so
+# the payload stays a normal private-runtime tree rather than a static blob.
+echo "[*] Building ffmpeg ${FFMPEG_VERSION}" >&2
+cd "/tmp/$FFMPEG_SRC"
+./configure --prefix="$PREFIX" --enable-shared --disable-static \
+    --disable-doc --disable-debug --enable-gpl --enable-version3 \
+    --enable-libass --enable-libvorbis --enable-libopus \
+    --disable-programs >/tmp/ffmpeg-configure.log 2>&1
+make -j"$(nproc)" >/tmp/ffmpeg-build.log 2>&1
+make install >/tmp/ffmpeg-install.log 2>&1
+export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+export LD_LIBRARY_PATH="$PREFIX/lib:$PREFIX/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+pkg-config --modversion libavcodec
 
 # libplacebo vendors glad/SPIRV as git submodules, so the release tarball
 # cannot build its OpenGL backend. Clone the pinned commit with submodules and
@@ -224,17 +266,13 @@ for name in sorted(os.listdir(lib)):
         entry["symlink_to"] = os.readlink(path)
     files.append(entry)
 
-def dpkg_version(pkg):
-    return subprocess.run(["dpkg-query", "-W", "-f=${Version}", pkg],
-                          capture_output=True, text=True).stdout.strip()
-
 manifest = {
     "schema": "muvrix-runtime-bundle/2",
-    "baseline_glibc": "2.39 (Ubuntu 24.04)",
+    "baseline_glibc": "2.36 (Debian 12)",
     "libmpv": {"version": "0.42.0", "built_from": "mpv v0.42.0 source", "client_api": "2.6"},
     "libplacebo": {"version": "7.387.0", "built_from": "libplacebo v7.387.0 source"},
     "libwayland": {"version": "1.23.1", "built_from": "wayland 1.23.1 source (mpv requires wayland-client >= 1.23)"},
-    "ffmpeg": {"version": dpkg_version("libavcodec-dev"), "source": "Ubuntu 24.04 archive"},
+    "ffmpeg": {"version": os.environ.get("FFMPEG_VERSION", "6.1"), "source": "ffmpeg.org release tarball"},
     "bundled_libraries": len(files),
     "excluded": "glibc/loader, OpenSSL, D-Bus, EGL/GL/DRM/Vulkan drivers, VA-API client library",
     "files": files,

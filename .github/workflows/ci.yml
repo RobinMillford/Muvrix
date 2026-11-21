@@ -197,7 +197,41 @@ jobs:
         run: cargo test --workspace --all-targets
 
   # =========================================================================
-  # 3. macOS Apple Silicon Job (Native Host Runner)
+  # 3. glibc portability gate
+  # =========================================================================
+  # Builds on the oldest baseline we claim and asserts no object in the tree
+  # needs a newer glibc. This is the check that stops a new dependency from
+  # silently raising the floor and breaking older distributions.
+  linux-glibc-floor:
+    name: Linux (glibc floor, Debian 12 baseline)
+    runs-on: ubuntu-latest
+    container:
+      image: debian:12
+    steps:
+      - name: Install prerequisites
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            build-essential pkg-config curl ca-certificates git \
+            libmpv-dev libegl1-mesa-dev libgl1-mesa-dev libwayland-dev \
+            libxkbcommon-dev libx11-dev libdbus-1-dev libssl-dev \
+            libasound2-dev libvulkan-dev binutils
+
+      - name: Install Rust stable
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - uses: actions/checkout@v4
+
+      - name: Build against the baseline
+        run: cargo build --release -p muvrix-ui
+
+      - name: Assert glibc floor (2.36)
+        run: ./scripts/ci/check-glibc-floor.sh 2.36 target/release/muvrix-ui
+
+  # =========================================================================
+  # 4. macOS Apple Silicon Job (Native Host Runner)
   # =========================================================================
   macos-apple-silicon:
     name: macOS (Apple Silicon ARM64 - macos-15)
