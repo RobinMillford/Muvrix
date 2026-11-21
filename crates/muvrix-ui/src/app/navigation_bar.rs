@@ -234,6 +234,7 @@ impl MuvrixApp {
                     let is_player = self.current_view == AppView::Player;
                     let player_extra_w = if is_player { 68.0 } else { 0.0 };
                     let dev_w = if is_wide { 95.0 } else { 60.0 };
+                    let profile_w = if is_wide { 118.0 } else { 76.0 };
                     let help_w = if is_wide { 110.0 } else { 34.0 };
                     let badge_w = if has_media_meta {
                         if is_wide { 240.0 } else { 90.0 }
@@ -244,7 +245,7 @@ impl MuvrixApp {
                     let total_right_w = if is_narrow {
                         0.0
                     } else {
-                        player_extra_w + dev_w + help_w + badge_w + right_padding
+                        player_extra_w + dev_w + profile_w + help_w + badge_w + right_padding
                     };
 
                     let remaining_w = ui.available_width();
@@ -305,7 +306,20 @@ impl MuvrixApp {
                             .as_ref()
                             .map(|p| p.name.as_str())
                             .unwrap_or("Default");
-                        let prof_label = format!("👤 {active_name} ▾");
+                        // The active profile name can be long (e.g. "Muvrix
+                        // Default"). Keep the descriptive label on wide
+                        // windows; on compact ones shorten it so the combo
+                        // never clips, and expose the full name as a tooltip.
+                        let short_name: String = if active_name.chars().count() > 8 {
+                            format!("{}…", active_name.chars().take(7).collect::<String>())
+                        } else {
+                            active_name.to_string()
+                        };
+                        let prof_label = if is_wide {
+                            format!("👤 {active_name} ▾")
+                        } else {
+                            format!("👤 {short_name} ▾")
+                        };
                         let prof_rich = RichText::new(prof_label)
                             .strong()
                             .color(BrandPalette::ELECTRIC_LIME);
@@ -317,6 +331,7 @@ impl MuvrixApp {
                             ui.memory_mut(|mem| mem.open_popup(popup_id));
                         }
 
+                        let profile_tip = format!("Playback profile: {active_name}");
                         egui::ComboBox::from_id_salt(combo_salt)
                             .selected_text(prof_rich)
                             .show_ui(ui, |ui| {
@@ -351,7 +366,9 @@ impl MuvrixApp {
                                     self.current_view = AppView::Settings;
                                     self.settings_tab = crate::views::SettingsTab::Profiles;
                                 }
-                            });
+                            })
+                            .response
+                            .on_hover_text(profile_tip);
 
                         ui.separator();
 

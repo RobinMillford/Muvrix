@@ -1042,6 +1042,19 @@ impl MuvrixApp {
                     .collect::<Vec<_>>()
             }),
             test_interact_next: 0,
+            test_keys: std::env::var("MUVRIX_TEST_KEYS").ok().map(|raw| {
+                raw.split(',')
+                    .filter_map(|entry| {
+                        let (secs, combo) = entry.split_once(':')?;
+                        Some((
+                            secs.trim().parse::<f64>().ok()?,
+                            crate::app::shortcuts::KeyCombination::parse_str(combo.trim())?,
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+            }),
+            test_keys_next: 0,
+            test_keys_pending: None,
             capture: crate::app::capture::CaptureState::from_env(),
             is_cinema_mode: false,
             overlay_alpha: 1.0,
@@ -1053,6 +1066,7 @@ impl MuvrixApp {
             sync_panel_open: false,
             osd_notice: None,
             skip_seconds: 10.0,
+            pre_mute_volume: None,
             always_on_top: false,
             player_view_menu_open: false,
             shortcut_search: String::new(),
@@ -1060,6 +1074,8 @@ impl MuvrixApp {
             shortcut_category: None,
             pending_shortcut_conflict: None,
             shortcut_status: None,
+            last_shortcut_view: None,
+            confirm_shortcut_reset: false,
 
             // Phase E4: Adaptive Player HUD, Three-Tier Collapsible Decks & Overflow
             player_secondary_deck_expanded: std::env::var("MUVRIX_OPEN_PLAYER_DECK").is_ok(),

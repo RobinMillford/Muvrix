@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use muvrix_core::database::{DatabaseManager, PlaybackProfile};
 use muvrix_ui::app::actions::PlayerAction;
-use muvrix_ui::app::shortcuts::{KeyBindingMap, KeyCombination};
+use muvrix_ui::app::shortcuts::{KeyBindingMap, KeyCombination, ShortcutProfile, ShortcutTuning};
 use muvrix_ui::theme::CustomTheme;
 
 #[test]
@@ -320,6 +320,21 @@ fn test_actual_keyboard_event_dispatch_with_modifiers() {
         });
     });
 
+    // Release O first: egui derives the `repeat` flag from its own held-key
+    // set, so a second press without an intervening release is an auto-repeat
+    // and is (correctly) ignored by the shortcut router.
+    let release_o = egui::RawInput {
+        events: vec![egui::Event::Key {
+            key: egui::Key::O,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+        ..Default::default()
+    };
+    let _ = ctx.run(release_o, |_| {});
+
     let raw_ctrl_o = egui::RawInput {
         modifiers: egui::Modifiers::COMMAND,
         events: vec![egui::Event::Key {
@@ -396,4 +411,441 @@ fn test_profile_persistence_and_failure_recovery() {
         active_count, 1,
         "Exactly one active profile must exist after failed activation"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Shortcut routing: defaults, repeat semantics, tuning and disable
+// ---------------------------------------------------------------------------
+
+/// Runs a single frame carrying `events` and hands the resulting input state to
+/// `inspect`, so bindings are exercised exactly the way the live router sees
+/// them (including modifier flags and auto-repeat).
+fn frame_with_events(events: Vec<egui::Event>, mut inspect: impl FnMut(&egui::InputState)) {
+    let ctx = egui::Context::default();
+    let raw = egui::RawInput {
+        events,
+        ..Default::default()
+    };
+    let _ = ctx.run(raw, |ctx| {
+        ctx.input(|input| inspect(input));
+    });
+}
+
+/// Runs `events` twice on one context so the second frame sees them as an
+/// auto-repeat, exactly as a held key does. egui recomputes the `repeat` flag
+/// from its held-key set, so a single frame can never be a repeat.
+fn repeat_frame_with_events(events: Vec<egui::Event>, mut inspect: impl FnMut(&egui::InputState)) {
+    let ctx = egui::Context::default();
+    let _ = ctx.run(
+        egui::RawInput {
+            events: events.clone(),
+            ..Default::default()
+        },
+        |_| {},
+    );
+    let _ = ctx.run(
+        egui::RawInput {
+            events,
+            ..Default::default()
+        },
+        |ctx| {
+            ctx.input(|input| inspect(input));
+        },
+    );
+}
+
+fn key_event(key: egui::Key, modifiers: egui::Modifiers, repeat: bool) -> egui::Event {
+    egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat,
+        modifiers,
+    }
+}
+
+#[test]
+fn test_default_profile_exposes_plain_volume_and_seek() {
+    let map = KeyBindingMap::default();
+    let none = egui::Modifiers::default();
+
+    // Bare arrows seek: the combination every VLC user tries first.
+    frame_with_events(vec![key_event(egui::Key::ArrowRight, none, false)], |i| {
+        assert!(
+            map.matches(PlayerAction::SeekForwardShort, i),
+            "bare Right must seek forward"
+        );
+        assert!(!map.matches(PlayerAction::SeekBackwardShort, i));
+    });
+    frame_with_events(vec![key_event(egui::Key::ArrowLeft, none, false)], |i| {
+        assert!(
+            map.matches(PlayerAction::SeekBackwardShort, i),
+            "bare Left must seek back"
+        );
+    });
+
+    // VLC's volume keys are Ctrl+Up/Down. Bare Up/Down must stay free here:
+    // claiming them made Up move the volume in the mpv-compatible profile too.
+    frame_with_events(
+        vec![key_event(egui::Key::ArrowUp, egui::Modifiers::CTRL, false)],
+        |i| {
+            assert!(
+                map.matches(PlayerAction::VolumeUp, i),
+                "Ctrl+Up must raise the volume"
+            );
+        },
+    );
+    frame_with_events(
+        vec![key_event(
+            egui::Key::ArrowDown,
+            egui::Modifiers::CTRL,
+            false,
+        )],
+        |i| {
+            assert!(
+                map.matches(PlayerAction::VolumeDown, i),
+                "Ctrl+Down must lower the volume"
+            );
+        },
+    );
+    frame_with_events(vec![key_event(egui::Key::ArrowUp, none, false)], |i| {
+        assert!(
+            !map.matches(PlayerAction::VolumeUp, i),
+            "bare Up must not touch the volume in the VLC profile"
+        );
+    });
+    frame_with_events(vec![key_event(egui::Key::ArrowDown, none, false)], |i| {
+        assert!(
+            !map.matches(PlayerAction::VolumeDown, i),
+            "bare Down must not touch the volume in the VLC profile"
+        );
+    });
+
+    // VLC's `T` reports the position.
+    frame_with_events(vec![key_event(egui::Key::T, none, false)], |i| {
+        assert!(
+            map.matches(PlayerAction::ShowPlaybackPosition, i),
+            "T must report the playback position"
+        );
+    });
+
+    // The 10-second and 60-second rungs of the ladder stay reachable.
+    frame_with_events(
+        vec![key_event(
+            egui::Key::ArrowRight,
+            egui::Modifiers::ALT,
+            false,
+        )],
+        |i| {
+            assert!(
+                map.matches(PlayerAction::SeekForwardMedium, i),
+                "Alt+Right must use the medium (10s) step"
+            );
+        },
+    );
+    frame_with_events(
+        vec![key_event(
+            egui::Key::ArrowLeft,
+            egui::Modifiers::COMMAND,
+            false,
+        )],
+        |i| {
+            assert!(
+                map.matches(PlayerAction::SeekBackwardLong, i),
+                "Ctrl+Left must use the large (60s) step"
+            );
+        },
+    );
+    frame_with_events(
+        vec![key_event(
+            egui::Key::ArrowLeft,
+            egui::Modifiers::SHIFT,
+            false,
+        )],
+        |i| {
+            assert!(
+                map.matches(PlayerAction::SeekBackwardVeryShort, i),
+                "Shift+Left must use the very short step"
+            );
+        },
+    );
+
+    // VLC's own volume chord is kept as the alternate.
+    frame_with_events(
+        vec![key_event(
+            egui::Key::ArrowUp,
+            egui::Modifiers::COMMAND,
+            false,
+        )],
+        |i| {
+            assert!(
+                map.matches(PlayerAction::VolumeUp, i),
+                "Ctrl+Up must still raise the volume"
+            );
+        },
+    );
+}
+
+#[test]
+fn test_key_repeat_only_drives_continuous_actions() {
+    let map = KeyBindingMap::default();
+
+    // Holding Space must not rapid-toggle play/pause.
+    repeat_frame_with_events(
+        vec![key_event(
+            egui::Key::Space,
+            egui::Modifiers::default(),
+            false,
+        )],
+        |i| {
+            assert!(
+                !map.matches(PlayerAction::PlayPause, i),
+                "an auto-repeat press must not re-trigger play/pause"
+            );
+        },
+    );
+
+    // Holding a seek key must keep seeking.
+    repeat_frame_with_events(
+        vec![key_event(
+            egui::Key::ArrowRight,
+            egui::Modifiers::default(),
+            false,
+        )],
+        |i| {
+            assert!(
+                map.matches(PlayerAction::SeekForwardShort, i),
+                "an auto-repeat press must keep seeking"
+            );
+        },
+    );
+
+    // Volume likewise repeats, but fullscreen does not.
+    repeat_frame_with_events(
+        vec![key_event(egui::Key::ArrowUp, egui::Modifiers::CTRL, false)],
+        |i| {
+            assert!(map.matches(PlayerAction::VolumeUp, i));
+        },
+    );
+    repeat_frame_with_events(
+        vec![key_event(egui::Key::F, egui::Modifiers::default(), false)],
+        |i| {
+            assert!(
+                !map.matches(PlayerAction::ToggleFullscreen, i),
+                "an auto-repeat press must not thrash fullscreen"
+            );
+        },
+    );
+}
+
+#[test]
+fn test_disabled_action_ignores_its_binding() {
+    let mut map = KeyBindingMap::default();
+    assert!(map.is_enabled(PlayerAction::PlayPause));
+
+    map.set_enabled(PlayerAction::PlayPause, false);
+    frame_with_events(
+        vec![key_event(
+            egui::Key::Space,
+            egui::Modifiers::default(),
+            false,
+        )],
+        |i| {
+            assert!(
+                !map.matches(PlayerAction::PlayPause, i),
+                "a disabled action must not fire"
+            );
+            assert!(
+                !map.pressed_actions(PlayerAction::ALL, i)
+                    .contains(&PlayerAction::PlayPause),
+                "a disabled action must not appear in the dispatched set"
+            );
+        },
+    );
+
+    // Re-enabling restores the binding without needing to rebind it.
+    map.set_enabled(PlayerAction::PlayPause, true);
+    frame_with_events(
+        vec![key_event(
+            egui::Key::Space,
+            egui::Modifiers::default(),
+            false,
+        )],
+        |i| {
+            assert!(map.matches(PlayerAction::PlayPause, i));
+        },
+    );
+}
+
+#[test]
+fn test_shortcut_tuning_persists_and_is_clamped() {
+    let mut map = KeyBindingMap::default();
+    assert_eq!(map.tuning.seek_small_secs, 5.0);
+    assert_eq!(map.tuning.seek_medium_secs, 10.0);
+    assert_eq!(map.tuning.volume_step, 5.0);
+
+    map.tuning.seek_small_secs = 7.5;
+    map.tuning.volume_step = 2.5;
+    map.tuning.speed_step = 0.5;
+    map.tuning.subtitle_delay_step_ms = 100.0;
+
+    let json = map.to_json().expect("Serialization failed");
+    let restored = KeyBindingMap::from_json(&json).expect("Deserialization failed");
+    assert_eq!(restored, map);
+    assert_eq!(restored.tuning.seek_small_secs, 7.5);
+    assert_eq!(restored.tuning.volume_step, 2.5);
+    assert_eq!(restored.tuning.subtitle_delay_step_ms, 100.0);
+
+    let clamped = ShortcutTuning {
+        seek_small_secs: -5.0,
+        volume_step: 0.0,
+        speed_step: 0.0,
+        ..ShortcutTuning::default()
+    }
+    .sanitized();
+    assert!(clamped.seek_small_secs >= 0.5);
+    assert!(clamped.volume_step >= 0.5);
+    assert!(clamped.speed_step >= 0.05);
+}
+
+#[test]
+fn test_every_profile_ships_without_conflicts() {
+    for profile in ShortcutProfile::ALL {
+        let map = KeyBindingMap::for_profile(*profile);
+        let conflicts = map.find_conflicts();
+        assert!(
+            conflicts.is_empty(),
+            "{profile:?} ships with {} conflict(s): {:?}",
+            conflicts.len(),
+            conflicts
+                .iter()
+                .map(|c| (c.combination.display_string(), c.action_a, c.action_b))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    let labels: Vec<&str> = ShortcutProfile::ALL.iter().map(|p| p.label()).collect();
+    assert!(labels.contains(&"MUVRIX Default (VLC)"));
+    assert!(labels.contains(&"mpv-inspired"));
+    assert!(labels.contains(&"Custom"));
+}
+
+#[test]
+fn test_action_catalog_is_internally_consistent() {
+    use std::collections::BTreeSet;
+    let mut seen = BTreeSet::new();
+    for &action in PlayerAction::ALL {
+        assert!(
+            seen.insert(action),
+            "{action:?} is listed twice in PlayerAction::ALL"
+        );
+        assert!(!action.display_name().is_empty());
+    }
+    // Every action must be reachable from the editor, i.e. carry a category.
+    for &action in PlayerAction::ALL {
+        let _ = action.category();
+    }
+}
+
+/// The mpv profile must reproduce upstream's own bindings, not a plausible
+/// approximation. Every pair asserted here is copied from mpv's shipped
+/// `etc/input.conf` (`UP seek 60`, `Shift+UP seek 5 exact`, `PGUP add chapter 1`,
+/// `s screenshot`, `S screenshot video`, `r/R add sub-pos`, `G/F sub-scale`).
+#[test]
+fn test_advanced_profile_matches_upstream_mpv_bindings() {
+    let map = KeyBindingMap::for_profile(ShortcutProfile::Advanced);
+    let none = egui::Modifiers::default();
+    let shift = egui::Modifiers::SHIFT;
+    let ctrl = egui::Modifiers::CTRL;
+
+    frame_with_events(vec![key_event(egui::Key::ArrowUp, none, false)], |i| {
+        assert!(
+            map.matches(PlayerAction::SeekForwardLong, i),
+            "mpv: UP is a 60-second seek, not a volume key"
+        );
+        assert!(
+            !map.matches(PlayerAction::VolumeUp, i),
+            "the mpv profile must not steal UP for volume"
+        );
+    });
+    frame_with_events(vec![key_event(egui::Key::ArrowDown, none, false)], |i| {
+        assert!(map.matches(PlayerAction::SeekBackwardLong, i));
+    });
+    frame_with_events(vec![key_event(egui::Key::ArrowUp, shift, false)], |i| {
+        assert!(
+            map.matches(PlayerAction::SeekForwardShort, i),
+            "Shift+UP is mpv's exact 5-second seek"
+        );
+    });
+    frame_with_events(vec![key_event(egui::Key::ArrowUp, ctrl, false)], |i| {
+        assert!(
+            map.matches(PlayerAction::VolumeUpSmall, i),
+            "Ctrl+UP stays available for volume in the mpv profile"
+        );
+    });
+
+    // Chapter and 10-minute directions follow `add chapter 1` / `seek 600`.
+    frame_with_events(vec![key_event(egui::Key::PageUp, none, false)], |i| {
+        assert!(map.matches(PlayerAction::NextChapter, i));
+    });
+    frame_with_events(vec![key_event(egui::Key::PageDown, none, false)], |i| {
+        assert!(map.matches(PlayerAction::PreviousChapter, i));
+    });
+    frame_with_events(vec![key_event(egui::Key::PageUp, shift, false)], |i| {
+        assert!(map.matches(PlayerAction::SeekForwardTenMinutes, i));
+    });
+    frame_with_events(vec![key_event(egui::Key::PageDown, shift, false)], |i| {
+        assert!(map.matches(PlayerAction::SeekBackwardTenMinutes, i));
+    });
+
+    // Screenshots: lowercase s keeps subtitles, uppercase S drops them.
+    frame_with_events(vec![key_event(egui::Key::S, none, false)], |i| {
+        assert!(map.matches(PlayerAction::Screenshot, i));
+    });
+    frame_with_events(vec![key_event(egui::Key::S, shift, false)], |i| {
+        assert!(map.matches(PlayerAction::ScreenshotWithoutSubtitles, i));
+    });
+
+    // Subtitle position and size.
+    frame_with_events(vec![key_event(egui::Key::R, none, false)], |i| {
+        assert!(map.matches(PlayerAction::SubtitleMoveUp, i));
+    });
+    frame_with_events(vec![key_event(egui::Key::R, shift, false)], |i| {
+        assert!(map.matches(PlayerAction::SubtitleMoveDown, i));
+    });
+    frame_with_events(vec![key_event(egui::Key::G, none, false)], |i| {
+        assert!(map.matches(PlayerAction::SubtitleFontIncrease, i));
+    });
+    frame_with_events(vec![key_event(egui::Key::F, shift, false)], |i| {
+        assert!(
+            map.matches(PlayerAction::SubtitleFontDecrease, i),
+            "uppercase F shrinks the subtitle font"
+        );
+    });
+    frame_with_events(vec![key_event(egui::Key::F, none, false)], |i| {
+        assert!(
+            map.matches(PlayerAction::ToggleFullscreen, i),
+            "lowercase f is still fullscreen"
+        );
+    });
+}
+
+/// The hybrid profile must keep VLC's volume keys and mpv's 60-second seek on
+/// the same arrows, which only works because Classic leaves Up/Down free.
+#[test]
+fn test_hybrid_profile_keeps_both_vlc_and_mpv_semantics() {
+    let map = KeyBindingMap::for_profile(ShortcutProfile::Hybrid);
+    let none = egui::Modifiers::default();
+    let ctrl = egui::Modifiers::CTRL;
+
+    frame_with_events(vec![key_event(egui::Key::ArrowUp, none, false)], |i| {
+        assert!(map.matches(PlayerAction::SeekForwardLong, i));
+        assert!(!map.matches(PlayerAction::VolumeUp, i));
+    });
+    frame_with_events(vec![key_event(egui::Key::ArrowUp, ctrl, false)], |i| {
+        assert!(map.matches(PlayerAction::VolumeUp, i));
+    });
+    frame_with_events(vec![key_event(egui::Key::ArrowRight, none, false)], |i| {
+        assert!(map.matches(PlayerAction::SeekForwardShort, i));
+    });
 }

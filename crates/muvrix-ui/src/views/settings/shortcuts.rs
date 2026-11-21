@@ -89,15 +89,12 @@ impl MuvrixApp {
                         }
                     }
                     if ui
-                        .button("Reset all")
+                        .button("Reset all…")
                         .on_hover_text("Restore every binding in this profile to its defaults")
                         .clicked()
                     {
-                        self.keybindings.reset_to_defaults();
-                        let _ = self.keybindings.save_to_disk();
-                        self.pending_shortcut_conflict = None;
-                        self.shortcut_status =
-                            Some(("All shortcuts reset to defaults".to_string(), true));
+                        // Destructive and not undoable, so it asks first.
+                        self.confirm_shortcut_reset = true;
                     }
                 });
 
@@ -126,6 +123,114 @@ impl MuvrixApp {
                 Color32::from_rgb(255, 120, 110)
             }));
         }
+
+        ui.add_space(8.0);
+
+        // ------------------------------------------------------------------
+        // Adjustment magnitudes
+        // ------------------------------------------------------------------
+        // These are the numbers the seek, volume, speed and delay actions
+        // actually use, so a change here is visible on the very next key press.
+        egui::CollapsingHeader::new("Adjustment steps")
+            .default_open(false)
+            .show(ui, |ui| {
+                let mut tuning = self.keybindings.tuning;
+                let before = tuning;
+                egui::Grid::new("shortcut_tuning_grid")
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        let row = |ui: &mut egui::Ui,
+                                   label: &str,
+                                   value: &mut f64,
+                                   range: std::ops::RangeInclusive<f64>,
+                                   speed: f64,
+                                   suffix: &str| {
+                            ui.label(
+                                RichText::new(label)
+                                    .size(11.5)
+                                    .color(BrandPalette::SECONDARY_TEXT),
+                            );
+                            ui.add(
+                                egui::DragValue::new(value)
+                                    .speed(speed)
+                                    .range(range)
+                                    .suffix(suffix),
+                            );
+                            ui.end_row();
+                        };
+                        row(
+                            ui,
+                            "Small seek step",
+                            &mut tuning.seek_small_secs,
+                            0.5..=600.0,
+                            0.5,
+                            " s",
+                        );
+                        row(
+                            ui,
+                            "Medium seek step",
+                            &mut tuning.seek_medium_secs,
+                            0.5..=1800.0,
+                            0.5,
+                            " s",
+                        );
+                        row(
+                            ui,
+                            "Large seek step",
+                            &mut tuning.seek_large_secs,
+                            1.0..=3600.0,
+                            1.0,
+                            " s",
+                        );
+                        row(
+                            ui,
+                            "Volume step",
+                            &mut tuning.volume_step,
+                            0.5..=25.0,
+                            0.5,
+                            " %",
+                        );
+                        row(
+                            ui,
+                            "Playback speed step",
+                            &mut tuning.speed_step,
+                            0.05..=1.0,
+                            0.05,
+                            " ×",
+                        );
+                        row(
+                            ui,
+                            "Audio delay step",
+                            &mut tuning.audio_delay_step_ms,
+                            1.0..=1000.0,
+                            5.0,
+                            " ms",
+                        );
+                        row(
+                            ui,
+                            "Subtitle delay step",
+                            &mut tuning.subtitle_delay_step_ms,
+                            1.0..=1000.0,
+                            5.0,
+                            " ms",
+                        );
+                    });
+                if tuning != before {
+                    self.keybindings.tuning = tuning.sanitized();
+                    if let Err(e) = self.keybindings.save_to_disk() {
+                        self.shortcut_status = Some((e.to_string(), false));
+                    }
+                }
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new(
+                        "Used by the seek, volume, speed and subtitle/audio delay shortcuts.",
+                    )
+                    .size(10.5)
+                    .color(BrandPalette::MUTED_TEXT),
+                );
+            });
 
         ui.add_space(8.0);
 
@@ -195,6 +300,30 @@ impl MuvrixApp {
                     self.shortcut_category = if selected { None } else { Some(*category) };
                 }
             }
+            if let Some(category) = self.shortcut_category {
+                ui.add_space(6.0);
+                if ui
+                    .small_button(format!("Reset {}", category.label()))
+                    .on_hover_text("Restore every action in this category to its default")
+                    .clicked()
+                {
+                    let mut restored = 0usize;
+                    for &action in PlayerAction::ALL
+                        .iter()
+                        .filter(|a| a.category() == category)
+                    {
+                        self.keybindings.reset_action(action);
+                        self.keybindings.set_enabled(action, true);
+                        restored += 1;
+                    }
+                    let _ = self.keybindings.save_to_disk();
+                    self.pending_shortcut_conflict = None;
+                    self.shortcut_status = Some((
+                        format!("{restored} {} shortcuts restored", category.label()),
+                        true,
+                    ));
+                }
+            }
         });
 
         ui.add_space(8.0);
@@ -231,6 +360,7 @@ impl MuvrixApp {
         let row_count = rows.len();
         let mut requested_record: Option<PlayerAction> = None;
         let mut requested_reset: Option<PlayerAction> = None;
+        let mut requested_toggle: Option<(PlayerAction, bool)> = None;
 
         egui::Frame::NONE
             .fill(BrandPalette::SLATE_SURFACE)
@@ -254,25 +384,48 @@ impl MuvrixApp {
                         ui.end_row();
 
                         for action in rows {
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    RichText::new(action.display_name())
-                                        .size(12.0)
-                                        .color(BrandPalette::PRIMARY_TEXT),
-                                );
-                                ui.horizontal(|ui| {
+                            ui.horizontal(|ui| {
+                                let mut enabled = self.keybindings.is_enabled(action);
+                                if ui
+                                    .checkbox(&mut enabled, "")
+                                    .on_hover_text(
+                                        "Disable this shortcut without losing its key assignment",
+                                    )
+                                    .changed()
+                                {
+                                    requested_toggle = Some((action, enabled));
+                                }
+                                ui.vertical(|ui| {
                                     ui.label(
-                                        RichText::new(action.category().label())
-                                            .size(9.5)
-                                            .color(BrandPalette::MUTED_TEXT),
+                                        RichText::new(action.display_name()).size(12.0).color(
+                                            if enabled {
+                                                BrandPalette::PRIMARY_TEXT
+                                            } else {
+                                                BrandPalette::MUTED_TEXT
+                                            },
+                                        ),
                                     );
-                                    if self.keybindings.is_custom(action) {
+                                    ui.horizontal(|ui| {
                                         ui.label(
-                                            RichText::new("• custom")
+                                            RichText::new(action.category().label())
                                                 .size(9.5)
-                                                .color(BrandPalette::ELECTRIC_LIME),
+                                                .color(BrandPalette::MUTED_TEXT),
                                         );
-                                    }
+                                        if self.keybindings.is_custom(action) {
+                                            ui.label(
+                                                RichText::new("• custom")
+                                                    .size(9.5)
+                                                    .color(BrandPalette::ELECTRIC_LIME),
+                                            );
+                                        }
+                                        if !enabled {
+                                            ui.label(
+                                                RichText::new("• off")
+                                                    .size(9.5)
+                                                    .color(BrandPalette::MUTED_TEXT),
+                                            );
+                                        }
+                                    });
                                 });
                             });
 
@@ -355,8 +508,21 @@ impl MuvrixApp {
             };
             self.pending_shortcut_conflict = None;
         }
+        if let Some((action, enabled)) = requested_toggle {
+            self.keybindings.set_enabled(action, enabled);
+            let _ = self.keybindings.save_to_disk();
+            self.shortcut_status = Some((
+                format!(
+                    "“{}” {}",
+                    action.display_name(),
+                    if enabled { "enabled" } else { "disabled" }
+                ),
+                true,
+            ));
+        }
         if let Some(action) = requested_reset {
             self.keybindings.reset_action(action);
+            self.keybindings.set_enabled(action, true);
             let _ = self.keybindings.save_to_disk();
             self.shortcut_status = Some((
                 format!("“{}” restored to default", action.display_name()),
@@ -375,6 +541,49 @@ impl MuvrixApp {
         );
 
         self.render_shortcut_conflict_dialog(ui.ctx());
+        self.render_shortcut_reset_confirm(ui.ctx());
+    }
+
+    /// Two-step confirmation for the destructive "reset every shortcut" path.
+    fn render_shortcut_reset_confirm(&mut self, ctx: &egui::Context) {
+        if !self.confirm_shortcut_reset {
+            return;
+        }
+        let mut confirmed = false;
+        let mut cancelled = false;
+        egui::Window::new("Reset all shortcuts?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "Every binding in this profile returns to its default and all \
+                         disabled shortcuts are re-enabled. Custom bindings will be lost.",
+                    )
+                    .size(12.0)
+                    .color(BrandPalette::SECONDARY_TEXT),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Reset everything").clicked() {
+                        confirmed = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancelled = true;
+                    }
+                });
+            });
+
+        if confirmed {
+            self.keybindings.reset_to_defaults();
+            let _ = self.keybindings.save_to_disk();
+            self.pending_shortcut_conflict = None;
+            self.confirm_shortcut_reset = false;
+            self.shortcut_status = Some(("All shortcuts reset to defaults".to_string(), true));
+        } else if cancelled {
+            self.confirm_shortcut_reset = false;
+        }
     }
 
     fn render_shortcut_conflict_dialog(&mut self, ctx: &egui::Context) {

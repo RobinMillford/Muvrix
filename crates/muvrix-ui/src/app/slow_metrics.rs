@@ -98,9 +98,7 @@ impl SlowMetrics {
                 .name("muvrix-probes".to_string())
                 .spawn(move || {
                     while !stop.load(Ordering::Relaxed) {
-                        let playing = !handle
-                            .get_property::<bool>("pause")
-                            .unwrap_or(true)
+                        let playing = !handle.get_property::<bool>("pause").unwrap_or(true)
                             && !handle.get_property::<bool>("idle-active").unwrap_or(true);
 
                         let mut sample = ProbeSnapshot {
@@ -108,7 +106,9 @@ impl SlowMetrics {
                                 .get_property::<f64>("demuxer-cache-time")
                                 .unwrap_or(0.0),
                             estimated_vf_fps: handle.get_property::<f64>("estimated-vf-fps").ok(),
-                            frame_drops: handle.get_property::<i64>("frame-drop-count").unwrap_or(0),
+                            frame_drops: handle
+                                .get_property::<i64>("frame-drop-count")
+                                .unwrap_or(0),
                             container_fps: handle.get_property::<f64>("container-fps").ok(),
                             video_size: (
                                 handle.get_property::<i64>("width").unwrap_or(0),
@@ -172,10 +172,7 @@ impl SlowMetrics {
 
     /// Latest published sample. Cheap: it never touches the engine.
     pub(crate) fn snapshot(&self) -> ProbeSnapshot {
-        self.shared
-            .lock()
-            .map(|s| s.clone())
-            .unwrap_or_default()
+        self.shared.lock().map(|s| s.clone()).unwrap_or_default()
     }
 }
 

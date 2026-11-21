@@ -195,7 +195,6 @@ impl WakeSignal {
     }
 
     fn request_deadline_from(&self, at: Instant, source: &'static str) {
-
         use std::sync::atomic::Ordering::Relaxed;
         self.deadlines_set.fetch_add(1, Relaxed);
         let mut replaced = false;

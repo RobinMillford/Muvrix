@@ -2977,11 +2977,18 @@ impl MuvrixApp {
                     .corner_radius(8.0_f32)
                     .inner_margin(egui::Margin::symmetric(16, 8))
                     .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(text)
-                                .size(13.0)
-                                .strong()
-                                .color(BrandPalette::PRIMARY_TEXT.gamma_multiply(alpha)),
+                        // Keep the OSD on a single line. The Area auto-sizes
+                        // from its previous frame, so a longer message (e.g.
+                        // a seek with timestamps) would otherwise wrap into a
+                        // tall, unreadable column.
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(text)
+                                    .size(13.0)
+                                    .strong()
+                                    .color(BrandPalette::PRIMARY_TEXT.gamma_multiply(alpha)),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Extend),
                         );
                     });
             });
@@ -3193,7 +3200,11 @@ impl MuvrixApp {
                                             None => "—".into(),
                                         },
                                     );
-                                    row(ui, "GPU utilisation", "not measured (no intel_gpu_top)".into());
+                                    row(
+                                        ui,
+                                        "GPU utilisation",
+                                        "not measured (no intel_gpu_top)".into(),
+                                    );
                                     row(
                                         ui,
                                         "Decode engine util",

@@ -11,12 +11,12 @@
 //! Every profile is editable, and edits are stored per profile so switching
 //! profiles and restarting the app both preserve customisations.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Instant;
 
 use eframe::egui::{self, RichText};
-use muvrix_player::PlaybackState;
+use muvrix_player::{PlaybackState, TrackType};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::app::actions::{PlayerAction, ShortcutCategory};
@@ -30,15 +30,17 @@ use crate::views::AppView;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ShortcutProfile {
-    /// VLC-compatible defaults. Shipped as the default profile.
+    /// MUVRIX defaults, built from the VLC key map. Shipped as the default.
     #[default]
     Classic,
-    /// mpv-compatible defaults for advanced playback and video control.
+    /// mpv-inspired defaults for advanced playback and video control.
     Advanced,
     /// VLC defaults first, mpv-only actions on alternative combinations.
     Hybrid,
     /// The original MUVRIX bindings.
     Legacy,
+    /// A blank slate: starts from the MUVRIX defaults and keeps every edit.
+    Custom,
 }
 
 impl ShortcutProfile {
@@ -47,14 +49,16 @@ impl ShortcutProfile {
         ShortcutProfile::Advanced,
         ShortcutProfile::Hybrid,
         ShortcutProfile::Legacy,
+        ShortcutProfile::Custom,
     ];
 
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Classic => "MUVRIX Classic (VLC)",
-            Self::Advanced => "MUVRIX Advanced (mpv)",
-            Self::Hybrid => "MUVRIX Hybrid",
+            Self::Classic => "MUVRIX Default (VLC)",
+            Self::Advanced => "mpv-inspired",
+            Self::Hybrid => "MUVRIX Hybrid (VLC + mpv)",
             Self::Legacy => "Legacy MUVRIX",
+            Self::Custom => "Custom",
         }
     }
 
@@ -64,6 +68,7 @@ impl ShortcutProfile {
             Self::Advanced => "Advanced",
             Self::Hybrid => "Hybrid",
             Self::Legacy => "Legacy",
+            Self::Custom => "Custom",
         }
     }
 
@@ -79,6 +84,7 @@ impl ShortcutProfile {
                 "VLC bindings take priority; mpv-only actions move to alternative combinations."
             }
             Self::Legacy => "The original MUVRIX bindings, preserved for existing users.",
+            Self::Custom => "Your own table. Starts from the MUVRIX defaults and keeps every edit.",
         }
     }
 
@@ -86,6 +92,7 @@ impl ShortcutProfile {
         match self {
             Self::Classic | Self::Hybrid | Self::Legacy => "VLC",
             Self::Advanced => "mpv",
+            Self::Custom => "Custom",
         }
     }
 }
@@ -157,30 +164,57 @@ impl KeyCombination {
     }
 
     /// Evaluates if this combination matches the active egui input state.
+    ///
+    /// Only fresh (non-repeat) presses match. Discrete actions such as
+    /// play/pause must never fire twice because a key was held down; use
+    /// [`Self::matches_with_repeat`] for continuous actions like seeking.
     pub fn matches(&self, input: &egui::InputState) -> bool {
-        if !input.key_pressed(self.key) {
-            return false;
-        }
+        self.matches_with_repeat(input, false)
+    }
 
+    /// Evaluates this combination, optionally accepting auto-repeat presses.
+    ///
+    /// Modifiers are taken from the key event itself rather than from the
+    /// frame's aggregate [`egui::InputState::modifiers`]. The aggregate is the
+    /// state at the *end* of the frame, so a fast press-then-release of a
+    /// modifier inside one frame made `Ctrl+Arrow` miss its own press.
+    pub fn matches_with_repeat(&self, input: &egui::InputState, allow_repeat: bool) -> bool {
+        input.events.iter().any(|event| {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                repeat,
+                modifiers,
+                ..
+            } = event
+            else {
+                return false;
+            };
+            *key == self.key && (allow_repeat || !*repeat) && self.modifiers_match(*modifiers)
+        })
+    }
+
+    /// True when the modifier flags of a key event satisfy this combination.
+    pub fn modifiers_match(&self, modifiers: egui::Modifiers) -> bool {
         let ctrl_match = if self.ctrl {
-            input.modifiers.command || input.modifiers.ctrl
+            modifiers.command || modifiers.ctrl
         } else {
-            !input.modifiers.command && !input.modifiers.ctrl
+            !modifiers.command && !modifiers.ctrl
         };
 
         let alt_match = if self.alt {
-            input.modifiers.alt
+            modifiers.alt
         } else {
-            !input.modifiers.alt
+            !modifiers.alt
         };
 
         // Keys that only exist as shifted symbols on a US layout report
         // `shift = true` from the platform layer. Binding them without an
         // explicit Shift must still match.
         let shift_match = if self.shift {
-            input.modifiers.shift
+            modifiers.shift
         } else {
-            !input.modifiers.shift || shift_is_implicit(self.key)
+            !modifiers.shift || shift_is_implicit(self.key)
         };
 
         ctrl_match && alt_match && shift_match
@@ -541,29 +575,40 @@ fn classic_bindings() -> BindingSet {
     b.add_alt(A::SpeedIncrease, combo(K::CloseBracket));
     b.add_alt(A::SpeedDecrease, combo(K::OpenBracket));
 
-    // Seeking (VLC granularity ladder)
+    // Seeking: the VLC granularity ladder, anchored on the bare arrows.
+    //
+    // Bare Left/Right is the combination every VLC user reaches for first, and
+    // leaving it unbound (as it was) is why "5-second seeking does not work".
+    // The magnitudes are user-tunable, so the ladder is described by step
+    // class rather than by a literal duration.
+    b.add(A::SeekBackwardShort, combo(K::ArrowLeft));
+    b.add(A::SeekForwardShort, combo(K::ArrowRight));
     b.add(A::SeekBackwardVeryShort, combo(K::ArrowLeft).with_shift());
     b.add(A::SeekForwardVeryShort, combo(K::ArrowRight).with_shift());
-    b.add(A::SeekBackwardShort, combo(K::ArrowLeft).with_alt());
-    b.add(A::SeekForwardShort, combo(K::ArrowRight).with_alt());
-    b.add(A::SeekBackwardMedium, combo(K::ArrowLeft).with_ctrl());
-    b.add(A::SeekForwardMedium, combo(K::ArrowRight).with_ctrl());
-    b.add(
-        A::SeekBackwardLong,
-        combo(K::ArrowLeft).with_ctrl().with_alt(),
-    );
-    b.add(
-        A::SeekForwardLong,
-        combo(K::ArrowRight).with_ctrl().with_alt(),
-    );
+    b.add(A::SeekBackwardMedium, combo(K::ArrowLeft).with_alt());
+    b.add(A::SeekForwardMedium, combo(K::ArrowRight).with_alt());
+    b.add(A::SeekBackwardLong, combo(K::ArrowLeft).with_ctrl());
+    b.add(A::SeekForwardLong, combo(K::ArrowRight).with_ctrl());
     b.add(A::SeekBackwardTenMinutes, combo(K::PageUp).with_shift());
     b.add(A::SeekForwardTenMinutes, combo(K::PageDown).with_shift());
     b.add(A::SeekToBeginning, combo(K::Home));
 
-    // Volume
+    // Volume: VLC's own Ctrl+Up/Down, with a coarse rung on Ctrl+Shift.
+    //
+    // Bare Up/Down is deliberately left unbound here. VLC does not bind it, and
+    // claiming it silently shadowed mpv's 60-second seek: in a profile that is
+    // described as mpv-inspired, Up moved the volume instead of the
+    // timeline. Each profile now keeps its own semantics.
     b.add(A::VolumeUp, combo(K::ArrowUp).with_ctrl());
     b.add(A::VolumeDown, combo(K::ArrowDown).with_ctrl());
+    b.add(A::VolumeUpLarge, combo(K::ArrowUp).with_ctrl().with_shift());
+    b.add(
+        A::VolumeDownLarge,
+        combo(K::ArrowDown).with_ctrl().with_shift(),
+    );
     b.add(A::ToggleMute, combo(K::M));
+    b.add(A::Unmute, combo(K::M).with_ctrl());
+    b.add(A::RestoreVolume, combo(K::M).with_alt());
 
     // Audio
     b.add(A::CycleAudioTrack, combo(K::B));
@@ -604,6 +649,8 @@ fn classic_bindings() -> BindingSet {
     b.add(A::ToggleControls, combo(K::I));
     b.add(A::ToggleStatistics, combo(K::I).with_ctrl());
     b.add(A::ExportDiagnostics, combo(K::I).with_ctrl().with_shift());
+    // VLC's `T`: print the position, do not change it.
+    b.add(A::ShowPlaybackPosition, combo(K::T));
     b.add(A::ToggleAlwaysOnTop, combo(K::T).with_ctrl());
     b.add(A::ToggleMiniPlayer, combo(K::P).with_alt());
     b.add(A::TogglePlaylistDrawer, combo(K::L).with_ctrl());
@@ -641,14 +688,26 @@ fn advanced_bindings() -> BindingSet {
     b.add(A::SeekForwardLong, combo(K::ArrowUp));
     b.add(A::SeekBackwardVeryShort, combo(K::ArrowLeft).with_shift());
     b.add(A::SeekForwardVeryShort, combo(K::ArrowRight).with_shift());
-    b.add(A::SeekBackwardTenMinutes, combo(K::PageUp).with_shift());
-    b.add(A::SeekForwardTenMinutes, combo(K::PageDown).with_shift());
+    // Upstream: `Shift+UP/DOWN no-osd seek ±5 exact`. The same 5-second rung as
+    // the bare arrows, but exact, so it is an alternate of the same action.
+    b.add_alt(A::SeekForwardShort, combo(K::ArrowUp).with_shift());
+    b.add_alt(A::SeekBackwardShort, combo(K::ArrowDown).with_shift());
+    // Upstream: `Shift+PGUP seek 600`, `Shift+PGDWN seek -600`.
+    b.add(A::SeekForwardTenMinutes, combo(K::PageUp).with_shift());
+    b.add(A::SeekBackwardTenMinutes, combo(K::PageDown).with_shift());
     b.add(A::SeekToBeginning, combo(K::Home));
+    b.add(A::ShowPlaybackPosition, combo(K::O));
+    b.add_alt(A::ShowPlaybackPosition, combo(K::P).with_shift());
 
-    // Volume (mpv 9/0, with slash-star style alternatives)
+    // Volume (mpv 9/0, with slash as the mpv-style alternate). Ctrl+Up/Down
+    // is added as a second, familiar route because mpv reserves the bare
+    // arrows for 60-second seeking; without it the volume keys look broken to
+    // anyone who did not memorise mpv's number keys.
     b.add(A::VolumeDown, combo(K::Num9));
     b.add(A::VolumeUp, combo(K::Num0));
     b.add_alt(A::VolumeDown, combo(K::Slash));
+    b.add(A::VolumeUpSmall, combo(K::ArrowUp).with_ctrl());
+    b.add(A::VolumeDownSmall, combo(K::ArrowDown).with_ctrl());
     b.add(A::ToggleMute, combo(K::M));
 
     // Audio
@@ -663,6 +722,15 @@ fn advanced_bindings() -> BindingSet {
     b.add(A::CycleSecondarySubtitle, combo(K::V).with_alt());
     b.add(A::SubtitleDelayIncrease, combo(K::Z));
     b.add(A::SubtitleDelayDecrease, combo(K::Z).with_shift());
+    // Upstream: `r add sub-pos -1` (up), `R add sub-pos +1` (down).
+    b.add(A::SubtitleMoveUp, combo(K::R));
+    b.add(A::SubtitleMoveDown, combo(K::R).with_shift());
+    // Upstream: `G add sub-scale 0.1` (larger), `F add sub-scale -0.1`
+    // (smaller). Uppercase F is the shift-modified form; lowercase f is
+    // fullscreen, so the two never collide.
+    b.add(A::SubtitleFontIncrease, combo(K::G));
+    b.add(A::SubtitleFontDecrease, combo(K::F).with_shift());
+    b.add(A::SubtitleFontReset, combo(K::G).with_ctrl());
 
     // Video
     b.add(A::CycleAspectRatio, combo(K::A));
@@ -675,15 +743,16 @@ fn advanced_bindings() -> BindingSet {
     b.add(A::PanDown, combo(K::ArrowDown).with_alt());
     b.add(A::ZoomIn, combo(K::Plus).with_alt());
     b.add(A::ZoomOut, combo(K::Minus).with_alt());
-    b.add(A::ResetZoom, combo(K::Backspace).with_alt());
+    b.add(A::ResetVideoTransform, combo(K::Backspace).with_alt());
     b.add(A::ToggleHardwareDecoding, combo(K::H).with_ctrl());
     b.add(A::Screenshot, combo(K::S));
     b.add(A::ScreenshotWithoutSubtitles, combo(K::S).with_shift());
 
     // Playlist / chapters
     b.add(A::NextMedia, combo(K::Enter));
-    b.add(A::NextChapter, combo(K::PageDown));
-    b.add(A::PreviousChapter, combo(K::PageUp));
+    // Upstream: `PGUP add chapter 1` advances, `PGDWN add chapter -1` goes back.
+    b.add(A::NextChapter, combo(K::PageUp));
+    b.add(A::PreviousChapter, combo(K::PageDown));
     b.add(A::TogglePlaylistDrawer, combo(K::F8));
 
     // Navigation / window
@@ -721,7 +790,7 @@ fn hybrid_bindings() -> BindingSet {
     b.try_add(A::ToggleHardwareDecoding, combo(K::H).with_ctrl());
     b.try_add(A::ZoomIn, combo(K::Plus).with_alt());
     b.try_add(A::ZoomOut, combo(K::Minus).with_alt());
-    b.try_add(A::ResetZoom, combo(K::Backspace).with_alt());
+    b.try_add(A::ResetVideoTransform, combo(K::Backspace).with_alt());
     b.try_add(A::PanLeft, combo(K::ArrowLeft).with_alt());
     b.try_add(A::PanRight, combo(K::ArrowRight).with_alt());
     b.try_add(A::PanUp, combo(K::ArrowUp).with_alt());
@@ -730,8 +799,13 @@ fn hybrid_bindings() -> BindingSet {
     b.try_add(A::ToggleCinema, combo(K::Enter).with_shift());
     b.try_add(A::ExportDiagnostics, combo(K::I).with_ctrl().with_shift());
     b.try_add(A::ToggleControls, combo(K::Delete));
-    b.try_add(A::NextChapter, combo(K::PageDown));
-    b.try_add(A::PreviousChapter, combo(K::PageUp));
+    b.try_add(A::SeekForwardShort, combo(K::ArrowUp).with_shift());
+    b.try_add(A::SeekBackwardShort, combo(K::ArrowDown).with_shift());
+    b.try_add(A::NextChapter, combo(K::PageUp));
+    b.try_add(A::PreviousChapter, combo(K::PageDown));
+    b.try_add(A::ShowPlaybackPosition, combo(K::O));
+    b.try_add(A::SubtitleMoveUp, combo(K::R));
+    b.try_add(A::SubtitleMoveDown, combo(K::R).with_shift());
     b.try_add(A::TogglePlaylistDrawer, combo(K::F8));
     b.add_alt(A::NextMedia, combo(K::Enter));
     b.add_alt(A::VolumeDown, combo(K::Num9));
@@ -786,6 +860,9 @@ fn defaults_for(profile: ShortcutProfile) -> BindingTables {
         ShortcutProfile::Advanced => advanced_bindings(),
         ShortcutProfile::Hybrid => hybrid_bindings(),
         ShortcutProfile::Legacy => legacy_bindings(),
+        // A custom table starts from the shipped defaults; every edit is then
+        // recorded as an override for this profile only.
+        ShortcutProfile::Custom => classic_bindings(),
     };
     (set.primary, set.alternate)
 }
@@ -794,9 +871,65 @@ fn defaults_for(profile: ShortcutProfile) -> BindingTables {
 // Registry
 // ---------------------------------------------------------------------------
 
+/// User-tunable magnitudes used by the continuous shortcut actions.
+///
+/// These live next to the bindings so that one JSON document captures both
+/// halves of the keyboard configuration, and so that changing a value takes
+/// effect on the very next key press.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ShortcutTuning {
+    /// Distance moved by the "small" seek actions, in seconds.
+    pub seek_small_secs: f64,
+    /// Distance moved by the "medium" seek actions, in seconds.
+    pub seek_medium_secs: f64,
+    /// Distance moved by the "large" seek actions, in seconds.
+    pub seek_large_secs: f64,
+    /// Percentage points added or removed by the volume actions.
+    pub volume_step: f64,
+    /// Playback-rate change applied by the speed actions.
+    pub speed_step: f64,
+    /// Milliseconds added or removed by the audio-delay actions.
+    pub audio_delay_step_ms: f64,
+    /// Milliseconds added or removed by the subtitle-delay actions.
+    pub subtitle_delay_step_ms: f64,
+}
+
+impl Default for ShortcutTuning {
+    fn default() -> Self {
+        Self {
+            seek_small_secs: 5.0,
+            seek_medium_secs: 10.0,
+            seek_large_secs: 60.0,
+            volume_step: 5.0,
+            speed_step: 0.25,
+            audio_delay_step_ms: 50.0,
+            subtitle_delay_step_ms: 50.0,
+        }
+    }
+}
+
+impl ShortcutTuning {
+    /// Clamps every value to a range the engine can actually honour.
+    ///
+    /// A zero or negative volume step would make the volume keys do nothing,
+    /// and an unbounded seek could jump past the end of the file, so both are
+    /// clamped here rather than at each call site.
+    pub fn sanitized(self) -> Self {
+        Self {
+            seek_small_secs: self.seek_small_secs.clamp(0.5, 600.0),
+            seek_medium_secs: self.seek_medium_secs.clamp(0.5, 1800.0),
+            seek_large_secs: self.seek_large_secs.clamp(1.0, 3600.0),
+            volume_step: self.volume_step.clamp(0.5, 25.0),
+            speed_step: self.speed_step.clamp(0.05, 1.0),
+            audio_delay_step_ms: self.audio_delay_step_ms.clamp(1.0, 1000.0),
+            subtitle_delay_step_ms: self.subtitle_delay_step_ms.clamp(1.0, 1000.0),
+        }
+    }
+}
+
 /// Configurable keybinding registry with profiles, conflict detection,
 /// per-profile overrides, JSON persistence and import/export.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KeyBindingMap {
     #[serde(default)]
     pub profile: ShortcutProfile,
@@ -806,6 +939,12 @@ pub struct KeyBindingMap {
     /// Per-profile user edits layered over the profile defaults.
     #[serde(default)]
     pub overrides: BTreeMap<ShortcutProfile, BTreeMap<PlayerAction, KeyCombination>>,
+    /// Actions the user switched off without deleting their assignment.
+    #[serde(default)]
+    pub disabled: BTreeSet<PlayerAction>,
+    /// Magnitudes used by seeking, volume, speed and delay actions.
+    #[serde(default)]
+    pub tuning: ShortcutTuning,
 }
 
 impl Default for KeyBindingMap {
@@ -822,6 +961,8 @@ impl KeyBindingMap {
             bindings,
             alternates,
             overrides: BTreeMap::new(),
+            disabled: BTreeSet::new(),
+            tuning: ShortcutTuning::default(),
         }
     }
 
@@ -848,18 +989,34 @@ impl KeyBindingMap {
     }
 
     /// Checks whether an action's bound combination was triggered this frame.
+    ///
+    /// Disabled actions never match, and continuous actions (seeking, volume,
+    /// zoom, delays, speed) accept auto-repeat while discrete ones do not.
     pub fn matches(&self, action: PlayerAction, input: &egui::InputState) -> bool {
+        self.triggered_combo(action, input).is_some()
+    }
+
+    /// Returns the combination that fired for `action` this frame, if any.
+    pub fn triggered_combo(
+        &self,
+        action: PlayerAction,
+        input: &egui::InputState,
+    ) -> Option<KeyCombination> {
+        if self.disabled.contains(&action) {
+            return None;
+        }
+        let allow_repeat = action.allows_key_repeat();
         if let Some(combo) = self.bindings.get(&action) {
-            if combo.matches(input) {
-                return true;
+            if combo.matches_with_repeat(input, allow_repeat) {
+                return Some(*combo);
             }
         }
         if let Some(alt) = self.alternates.get(&action) {
-            if alt.matches(input) {
-                return true;
+            if alt.matches_with_repeat(input, allow_repeat) {
+                return Some(*alt);
             }
         }
-        false
+        None
     }
 
     /// Resolves every action triggered this frame, de-duplicating by
@@ -870,26 +1027,32 @@ impl KeyBindingMap {
         input: &egui::InputState,
     ) -> Vec<PlayerAction> {
         let mut fired: Vec<PlayerAction> = Vec::new();
+        let mut seen: Vec<KeyCombination> = Vec::new();
         for &action in actions {
-            if !self.matches(action, input) {
+            let Some(combo) = self.triggered_combo(action, input) else {
+                continue;
+            };
+            if seen.contains(&combo) {
                 continue;
             }
-            let combo = if self.bindings.get(&action).is_some_and(|c| c.matches(input)) {
-                self.bindings.get(&action).copied()
-            } else {
-                self.alternates.get(&action).copied()
-            };
-            if let Some(combo) = combo {
-                let duplicate = fired.iter().any(|other| {
-                    self.bindings.get(other).copied() == Some(combo)
-                        || self.alternates.get(other).copied() == Some(combo)
-                });
-                if !duplicate {
-                    fired.push(action);
-                }
-            }
+            seen.push(combo);
+            fired.push(action);
         }
         fired
+    }
+
+    /// True when the user switched this action off in the shortcut manager.
+    pub fn is_enabled(&self, action: PlayerAction) -> bool {
+        !self.disabled.contains(&action)
+    }
+
+    /// Enables or disables an action without touching its assignment.
+    pub fn set_enabled(&mut self, action: PlayerAction, enabled: bool) {
+        if enabled {
+            self.disabled.remove(&action);
+        } else {
+            self.disabled.insert(action);
+        }
     }
 
     pub fn get(&self, action: PlayerAction) -> Option<&KeyCombination> {
@@ -1104,10 +1267,6 @@ impl MuvrixApp {
     /// registry is skipped entirely, so typing in a search box or file field
     /// is never intercepted.
     pub(crate) fn handle_keyboard_inputs(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() {
-            return;
-        }
-
         // Shortcut recording mode owns the keyboard until a key or Esc arrives.
         if let Some(target_action) = self.recording_shortcut {
             let mut captured = None;
@@ -1166,6 +1325,19 @@ impl MuvrixApp {
             }
         }
 
+        // Text entry always wins, but only while a text widget really owns the
+        // keyboard. `Context::wants_keyboard_input` is `focused().is_some()`:
+        // it is true for *any* focused widget, and egui keeps that focus when
+        // the user clicks a non-focusable widget or leaves the view that owned
+        // the focused field. Relying on it naively is what made every shortcut
+        // stop responding for the rest of the session after one click in a
+        // search box. Stale focus is dropped first, so the check below only
+        // suppresses shortcuts while the user is genuinely typing.
+        self.release_stale_keyboard_focus(ctx);
+        if self.text_entry_owns_keyboard(ctx) {
+            return;
+        }
+
         let actions = self
             .keybindings
             .pressed_actions(PlayerAction::ALL, &ctx.input(|i| i.clone()));
@@ -1173,6 +1345,178 @@ impl MuvrixApp {
         for action in actions {
             self.execute_player_action(action, ctx);
         }
+    }
+
+    /// Test-only: injects scheduled key presses as genuine `egui::Event::Key`
+    /// events, then reports what the engine actually did.
+    ///
+    /// This exists because "the binding appears in Settings" is not evidence
+    /// that a key works. Presses go through the same router, the same action
+    /// layer and the same libmpv controller calls as a physical key, so a log
+    /// line that says `CHANGED` is end-to-end proof for the pipeline.
+    ///
+    /// Inert unless `MUVRIX_TEST_KEYS` is set, e.g.
+    /// `MUVRIX_TEST_KEYS="2:Space,4:ArrowRight,6:Up,8:Shift+Up"`.
+    pub(crate) fn drive_key_script(&mut self, ctx: &egui::Context) {
+        if let Some((spec, before)) = self.test_keys_pending.take() {
+            let after = self.key_state_probe();
+            log::warn!(
+                "TEST-ONLY key '{spec}' {} — before[{before}] after[{after}]",
+                if before == after {
+                    "UNCHANGED"
+                } else {
+                    "CHANGED"
+                }
+            );
+        }
+
+        let Some(script) = self.test_keys.clone() else {
+            return;
+        };
+        let elapsed = self.session_start.elapsed().as_secs_f64();
+        while self.test_keys_next < script.len() {
+            let (due, combo) = script[self.test_keys_next];
+            if elapsed < due {
+                break;
+            }
+            let before = self.key_state_probe();
+            let modifiers = egui::Modifiers {
+                ctrl: combo.ctrl,
+                alt: combo.alt,
+                shift: combo.shift,
+                mac_cmd: false,
+                command: combo.ctrl,
+            };
+            ctx.input_mut(|input| {
+                input.events.push(egui::Event::Key {
+                    key: combo.key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                });
+                input.events.push(egui::Event::Key {
+                    key: combo.key,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers,
+                });
+            });
+            log::warn!("TEST-ONLY key inject: {}", combo.display_string());
+            self.test_keys_pending = Some((combo.display_string(), before));
+            self.test_keys_next += 1;
+            ctx.request_repaint();
+        }
+    }
+
+    /// Compact snapshot of the engine state a shortcut is supposed to change.
+    ///
+    /// Every value is read back from libmpv through the controller, so a
+    /// shortcut that only updates a local variable would show up as UNCHANGED
+    /// here rather than passing silently.
+    fn key_state_probe(&self) -> String {
+        let (pan_x, pan_y) = self.controller.video_pan();
+        let styling = self.controller.subtitle_styling();
+        let audio = self
+            .controller
+            .selected_track(TrackType::Audio)
+            .map(|track| track.id);
+        let subtitle = self
+            .controller
+            .selected_track(TrackType::Subtitle)
+            .map(|track| track.id);
+        let audio_count = self.controller.tracks_by_type(TrackType::Audio).len();
+        let subtitle_count = self.controller.tracks_by_type(TrackType::Subtitle).len();
+        let chapter = self.controller.current_chapter();
+        let chapter_count = self.controller.chapter_count();
+        format!(
+            "{:?} vol={:.0} muted={} pos={:.3} speed={:.2} aspect={} zoom={:.2} pan=({pan_x:.2},{pan_y:.2}) crop={} scale={:?} sub_delay={:.2} sub_vis={} font={} sub_pos={} audio_delay={:?} overlay={} fullscreen={} audio={audio:?}/{audio_count} sub={subtitle:?}/{subtitle_count} chapter={chapter:?}/{chapter_count} deint={} deband={} sp={:.2} ontop={} help={} dur={:.1} file={:?} ab={:?} osd={:?}",
+            self.controller.state(),
+            self.controller.volume(),
+            self.controller.is_muted(),
+            self.controller.time_pos(),
+            self.controller.speed(),
+            self.controller.aspect_override(),
+            self.controller.video_zoom(),
+            self.controller.video_crop(),
+            self.controller.scaling_mode(),
+            self.controller.sub_delay(),
+            self.controller.sub_visibility(),
+            styling.font_size,
+            styling.pos,
+            self.controller.audio_delay(),
+            self.ui_overlay_visible,
+            self.is_fullscreen,
+            self.controller.deinterlace(),
+            self.controller.deband_enabled(),
+            self.controller.speed(),
+            self.always_on_top,
+            self.show_shortcuts,
+            self.controller.duration(),
+            self.controller
+                .current_file()
+                .and_then(|f| std::path::Path::new(f).file_name())
+                .and_then(|n| n.to_str()),
+            self.controller.ab_loop_state(),
+            self.osd_notice
+                .as_ref()
+                .map(|(text, _)| text.as_str()),
+        )
+    }
+
+    /// Drops keyboard focus that egui left behind on a widget the user is no
+    /// longer interacting with.
+    ///
+    /// Two cases matter for shortcut reliability: a click that lands outside
+    /// the focused widget, and a focus that belongs to a view which is no
+    /// longer on screen. In both the focused widget can never surrender the
+    /// focus itself, so the shortcut router would stay disabled forever.
+    fn release_stale_keyboard_focus(&mut self, ctx: &egui::Context) {
+        let view_changed = self
+            .last_shortcut_view
+            .is_some_and(|previous| previous != self.current_view);
+        self.last_shortcut_view = Some(self.current_view);
+
+        let Some(focused) = ctx.memory(|memory| memory.focused()) else {
+            return;
+        };
+        if view_changed {
+            ctx.memory_mut(|memory| memory.stop_text_input());
+            return;
+        }
+
+        let press = ctx.input(|i| {
+            if i.pointer.any_pressed() {
+                i.pointer.interact_pos()
+            } else {
+                None
+            }
+        });
+        let Some(press) = press else {
+            return;
+        };
+
+        // Keep focus when the press was inside the focused widget (clicking
+        // into a text field must keep working). A widget that is not drawn
+        // this frame has no response at all, which means the focus is stale.
+        let inside = ctx
+            .read_response(focused)
+            .is_some_and(|response| response.rect.expand(2.0).contains(press));
+        if !inside {
+            ctx.memory_mut(|memory| memory.stop_text_input());
+        }
+    }
+
+    /// True when a text-entry surface currently owns the keyboard.
+    fn text_entry_owns_keyboard(&self, ctx: &egui::Context) -> bool {
+        // The URL prompt is opened from a shortcut and does not necessarily
+        // have focus on its very first frame, so it is guarded explicitly.
+        // Every other text surface is covered by the focus check below.
+        if self.player_empty_url_input_open {
+            return true;
+        }
+        ctx.wants_keyboard_input()
     }
 
     fn dismiss_transient_ui(&mut self) -> bool {

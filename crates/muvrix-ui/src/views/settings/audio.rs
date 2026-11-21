@@ -1086,6 +1086,32 @@ impl MuvrixApp {
                     self.controller.volume_boost_max()
                 ));
             });
+            // The 130% default only applies to fresh configurations; a saved
+            // 100% ceiling keeps existing users at 100 and makes Volume Up a
+            // no-op at full level. Offer the upgrade explicitly instead of
+            // rewriting the stored preference behind their back.
+            if self.equalizer_settings.volume_boost < 130.0 {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(
+                            "Volume is capped at this ceiling: above 100% the engine adds software gain. \
+                             Raise it to 130% for headroom (mpv's default maximum).",
+                        )
+                        .size(11.5)
+                        .color(Color32::from_gray(160)),
+                    );
+                    if ui
+                        .button("Use 130% ceiling")
+                        .on_hover_text("Sets the software-gain ceiling to 130% and saves it")
+                        .clicked()
+                    {
+                        self.equalizer_settings.volume_boost = 130.0;
+                        let _ = self.controller.set_volume_boost(130.0);
+                        let _ = self.controller.set_volume(self.controller.volume());
+                        self.save_media_settings();
+                    }
+                });
+            }
 
             ui.add_space(6.0);
 

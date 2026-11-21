@@ -304,9 +304,17 @@ fn test_controller_stop_and_reload() {
 
 #[test]
 fn test_controller_end_of_file() {
-    let path = find_media_path("tests/fixtures/test_video.mp4");
-    let mut controller = create_test_controller();
-
+    let path = find_media_path("tests/fixtures/test_video.mp4"); // `untimed=yes` decodes without a display clock. With plain realtime
+                                                                 // playback and `vo=null` the last frames can stall for seconds when the
+                                                                 // other libmpv instances in this binary compete for the CPU, which made
+                                                                 // the end-of-file wait fail at random.
+    let handle = MpvHandle::new().expect("Failed to create MpvHandle");
+    handle.set_option_string("vo", "null").unwrap();
+    handle.set_option_string("ao", "null").unwrap();
+    handle.set_option_string("idle", "yes").unwrap();
+    handle.set_option_string("untimed", "yes").unwrap();
+    handle.initialize().expect("Failed to initialize MpvHandle");
+    let mut controller = PlaybackController::new(Arc::new(handle)).expect("controller");
     controller
         .load_file(path.to_str().unwrap())
         .expect("Failed to load file");
@@ -316,11 +324,16 @@ fn test_controller_end_of_file() {
         Duration::from_secs(5)
     ));
 
-    // Seek right before EOF (~2.8s in a 3s file)
-    let dur = controller.duration();
-    controller
-        .seek(dur - 0.2, SeekMode::Absolute)
-        .expect("Failed to seek");
+    // Let the 3s fixture play through to its natural end. An earlier version
+    // seeked to `duration - 0.2` first, but mpv silently swallows end-of-file
+    // when the core lands on the last frame *during* a seek, so that variant
+    // failed at random with the state stuck on Playing at the final frame.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while controller.duration() <= 0.0 && Instant::now() < deadline {
+        controller.poll_events();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(controller.duration() > 0.0, "duration never became known");
 
     // Wait for EOF
     let reached_eof = wait_for_state(
@@ -330,8 +343,10 @@ fn test_controller_end_of_file() {
     );
     assert!(
         reached_eof,
-        "Did not transition to Ended: {:?}",
-        controller.state()
+        "Did not transition to Ended: {:?} (pos={}, dur={})",
+        controller.state(),
+        controller.time_pos(),
+        controller.duration()
     );
 }
 
@@ -604,11 +619,15 @@ fn test_controller_volume_and_speed_adjustments() {
         .expect("adjust_volume +15 succeeds");
     assert_eq!(controller.volume(), 95.0);
 
-    // Clamping at ceiling 100.0
+    // Clamping at the default ceiling (mpv's `volume-max`, 130%).
     controller
         .adjust_volume(20.0)
         .expect("adjust_volume +20 succeeds");
-    assert_eq!(controller.volume(), 100.0);
+    assert_eq!(controller.volume(), 115.0);
+    controller
+        .adjust_volume(100.0)
+        .expect("adjust_volume beyond the ceiling succeeds");
+    assert_eq!(controller.volume(), 130.0);
 
     // Clamping at floor 0.0
     controller
@@ -646,7 +665,9 @@ fn test_controller_volume_and_speed_adjustments() {
 #[test]
 fn test_controller_volume_boost_up_to_150_percent() {
     let mut controller = create_test_controller();
-    assert_eq!(controller.volume_boost_max(), 100.0);
+    // The default ceiling is mpv's own `volume-max` (130%), so the volume keys
+    // have somewhere to go from 100%.
+    assert_eq!(controller.volume_boost_max(), 130.0);
 
     // Enable 150% volume boost
     controller

@@ -13,6 +13,23 @@ use crate::config_editor::{self, ConfigEditorFile};
 use crate::os_integration::MediaAction;
 use crate::views::AppView;
 
+/// Extensions libmpv can attach with `sub-add`.
+pub(crate) const SUBTITLE_EXTENSIONS: &[&str] = &[
+    "srt", "ass", "ssa", "vtt", "sub", "idx", "mks", "sup", "smi", "sbv", "scc",
+];
+
+/// True when `path` looks like a subtitle file rather than playable media.
+pub(crate) fn is_subtitle_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            SUBTITLE_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(ext))
+        })
+}
+
 impl MuvrixApp {
     /// Loads a video file or URL into the playback controller, resolving relative paths,
     /// home directories (~), and candidate fixtures.
@@ -178,14 +195,20 @@ impl MuvrixApp {
     pub fn add_subtitle_dialog(&mut self) {
         if let Some(file) = rfd::FileDialog::new()
             .set_title("Add Subtitle Track")
-            .add_filter(
-                "Subtitle Files",
-                &["srt", "ass", "ssa", "vtt", "sub", "idx"],
-            )
+            .add_filter("Subtitle Files", SUBTITLE_EXTENSIONS)
             .pick_file()
         {
             let path_str = file.display().to_string();
-            let _ = self.controller.add_subtitle_file(&path_str, true);
+            match self.controller.add_subtitle_file(&path_str, true) {
+                Ok(()) => {
+                    self.push_osd("Subtitle loaded");
+                    self.status_message = format!("Subtitle track added: {path_str}");
+                }
+                Err(e) => {
+                    self.push_osd(format!("Subtitle failed: {e}"));
+                    self.status_message = format!("Failed to add subtitle {path_str}: {e}");
+                }
+            }
         }
     }
 
@@ -224,6 +247,10 @@ impl MuvrixApp {
             }
             Err(e) => self.status_message = format!("A-B loop: {e}"),
         }
+        // Every other playback adjustment reports through the OSD; A-B loop
+        // used to land only in the status bar, so the key looked dead.
+        let notice = self.status_message.clone();
+        self.push_osd(notice);
     }
 
     pub fn cycle_repeat_mode(&mut self) {

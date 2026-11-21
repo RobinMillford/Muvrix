@@ -413,6 +413,15 @@ pub struct MuvrixApp {
     pub(crate) test_interact: Option<Vec<(f64, String)>>,
     /// Next entry of [`Self::test_interact`] to execute.
     pub(crate) test_interact_next: usize,
+    /// Test-only keyboard schedule `(due_secs, combination)`; inert unless
+    /// `MUVRIX_TEST_KEYS` is set. Presses are injected as real
+    /// `egui::Event::Key` events so the entire shortcut pipeline runs.
+    pub(crate) test_keys: Option<Vec<(f64, crate::app::shortcuts::KeyCombination)>>,
+    /// Next entry of [`Self::test_keys`] to inject.
+    pub(crate) test_keys_next: usize,
+    /// Key just injected, with the engine state captured before it, so the
+    /// next frame can report what actually changed.
+    pub(crate) test_keys_pending: Option<(String, String)>,
     /// Screenshot harness state (inert unless `MUVRIX_CAPTURE_DIR` is set).
     pub(crate) capture: crate::app::capture::CaptureState,
     /// Cinema / video-only immersive mode (video, HUD and nothing else).
@@ -436,6 +445,8 @@ pub struct MuvrixApp {
     pub(crate) osd_notice: Option<(String, Instant)>,
     /// Configurable skip duration for the transport rewind/forward buttons.
     pub(crate) skip_seconds: f64,
+    /// Volume in effect before the last mute, for "restore volume".
+    pub(crate) pre_mute_volume: Option<f64>,
     /// Mirrors the requested always-on-top window level.
     pub(crate) always_on_top: bool,
     /// Aspect/crop/zoom popover visibility in the player toolbar.
@@ -446,6 +457,11 @@ pub struct MuvrixApp {
     pub(crate) shortcut_category: Option<crate::app::actions::ShortcutCategory>,
     pub(crate) pending_shortcut_conflict: Option<crate::app::shortcuts::PendingShortcutConflict>,
     pub(crate) shortcut_status: Option<(String, bool)>,
+    /// View seen by the shortcut router on the previous frame; a change means
+    /// any keyboard focus left on the old view has to be released.
+    pub(crate) last_shortcut_view: Option<crate::views::AppView>,
+    /// Confirmation gate for "reset every shortcut".
+    pub(crate) confirm_shortcut_reset: bool,
 
     // Phase E4: Adaptive Player HUD, Three-Tier Collapsible Decks & Overflow
     pub(crate) player_secondary_deck_expanded: bool,

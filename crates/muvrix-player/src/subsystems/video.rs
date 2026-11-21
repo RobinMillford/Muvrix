@@ -635,7 +635,8 @@ impl VideoSubsystem {
     /// engine read to perform.
     pub fn on_frame_drop_count_changed(&self, count: i64) {
         self.observed_drop_count.store(count, Ordering::Release);
-        self.observed_drop_count_known.store(true, Ordering::Release);
+        self.observed_drop_count_known
+            .store(true, Ordering::Release);
     }
 
     /// Last observed drop count, or `None` until the engine has reported one.
@@ -1042,7 +1043,8 @@ impl VideoSubsystem {
         self.watchdog.reset_for_new_media();
         // A new file has its own counter; the previous file's value must not be
         // mistaken for this one's until the engine reports again.
-        self.observed_drop_count_known.store(false, Ordering::Release);
+        self.observed_drop_count_known
+            .store(false, Ordering::Release);
         if let Ok(w) = handle.get_property::<i64>("width") {
             self.video_width = w;
         }

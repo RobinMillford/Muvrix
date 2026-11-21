@@ -154,6 +154,11 @@ pub struct PlaybackController {
     duration: f64,
     is_paused: bool,
     is_buffering: bool,
+    /// True once the current item has reached end-of-file. mpv with
+    /// `idle=yes` emits the idle unload right after the EOF event, and that
+    /// unload used to overwrite [`PlaybackState::Ended`] with `Idle`; the
+    /// sticky flag keeps the finished state observable.
+    eof_ended: bool,
 
     // Specialized domain subsystems
     audio: AudioSubsystem,
@@ -252,6 +257,7 @@ impl PlaybackController {
         let mut controller = Self {
             handle,
             state: PlaybackState::Idle,
+            eof_ended: false,
             current_file: None,
             last_error: None,
             time_pos: 0.0,
@@ -1266,6 +1272,7 @@ impl PlaybackController {
 
     pub fn load_file(&mut self, path: &str) -> Result<(), MpvError> {
         self.state = PlaybackState::Loading;
+        self.eof_ended = false;
         self.current_file = Some(path.to_string());
         self.last_error = None;
         self.time_pos = 0.0;
@@ -1336,7 +1343,8 @@ impl PlaybackController {
     pub fn play(&mut self) -> Result<(), MpvError> {
         self.handle.play()?;
         self.is_paused = false;
-        if self.state == PlaybackState::Paused {
+        if self.state == PlaybackState::Paused || self.state == PlaybackState::Ended {
+            self.eof_ended = false;
             self.state = PlaybackState::Playing;
         }
         Ok(())
@@ -1361,6 +1369,7 @@ impl PlaybackController {
 
     pub fn stop(&mut self) -> Result<(), MpvError> {
         self.handle.stop()?;
+        self.eof_ended = false;
         self.state = PlaybackState::Idle;
         self.time_pos = 0.0;
         self.duration = 0.0;
@@ -1372,6 +1381,17 @@ impl PlaybackController {
     }
 
     pub fn seek(&mut self, target_seconds: f64, mode: SeekMode) -> Result<(), MpvError> {
+        // An explicit seek is the user reviving a finished item, so the
+        // sticky end-of-file latch is cleared here rather than from raw mpv
+        // events (mpv also replays `seek` events of its own at end-of-file).
+        if self.state == PlaybackState::Ended {
+            self.eof_ended = false;
+            self.state = if self.is_paused {
+                PlaybackState::Paused
+            } else {
+                PlaybackState::Playing
+            };
+        }
         self.handle.seek(target_seconds, mode)
     }
 
@@ -1466,6 +1486,7 @@ impl PlaybackController {
             Event::EndFile { reason, error, .. } => match reason {
                 EndFileReason::Eof => {
                     self.state = PlaybackState::Ended;
+                    self.eof_ended = true;
                 }
                 EndFileReason::Error => {
                     let attempted = self.current_file.as_deref().unwrap_or("<unknown>");
@@ -1491,8 +1512,10 @@ impl PlaybackController {
                     );
                     self.set_error(msg);
                 }
+                // The unload that follows EOF also arrives as `Stop`; keep
+                // the finished state instead of reporting a bare Idle.
                 EndFileReason::Stop | EndFileReason::Quit
-                    if self.state != PlaybackState::Loading =>
+                    if self.state != PlaybackState::Loading && !self.eof_ended =>
                 {
                     self.state = PlaybackState::Idle;
                     self.time_pos = 0.0;
@@ -1512,13 +1535,11 @@ impl PlaybackController {
                 if let Ok(pos) = self.handle.get_property::<f64>("time-pos") {
                     self.time_pos = pos;
                 }
-                if self.state == PlaybackState::Ended {
-                    self.state = if self.is_paused {
-                        PlaybackState::Paused
-                    } else {
-                        PlaybackState::Playing
-                    };
-                }
+                // Deliberately no state change here: mpv replays
+                // `seek`/`playback-restart` while it settles at end-of-file,
+                // which used to flip Ended back to Playing (and then hid the
+                // end of the file entirely). `seek()`/`play()` revive a
+                // finished item from the caller side.
             }
             Event::Shutdown => {
                 self.state = PlaybackState::Idle;
@@ -1684,6 +1705,7 @@ impl PlaybackController {
                 if let Some(eof) = eof {
                     if eof && self.state != PlaybackState::Idle {
                         self.state = PlaybackState::Ended;
+                        self.eof_ended = true;
                     }
                 }
             }

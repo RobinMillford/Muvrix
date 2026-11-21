@@ -12,10 +12,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 use muvrix_player::{
-    AbLoopState, CropPreset, RepeatMode, ScalingMode, ScreenshotMode, SeekMode, TrackType,
+    AbLoopState, CropPreset, PlaybackState, RepeatMode, ScalingMode, ScreenshotMode, SeekMode,
+    TrackType,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::app::formatting::format_timestamp;
 use crate::app::MuvrixApp;
 use crate::views::AppView;
 
@@ -97,6 +99,17 @@ pub enum PlayerAction {
     SpeedReset,
     SpeedHalf,
     SpeedDouble,
+    SpeedSetQuarter,
+    SpeedSetHalf,
+    SpeedSetThreeQuarter,
+    SpeedSetNormal,
+    SpeedSetOneAndQuarter,
+    SpeedSetOneAndHalf,
+    SpeedSetOneAndThreeQuarter,
+    SpeedSetDouble,
+    SpeedSetTwoAndHalf,
+    SpeedSetTriple,
+    SpeedSetQuadruple,
 
     // Seeking
     SeekForwardShort,
@@ -110,11 +123,21 @@ pub enum PlayerAction {
     SeekForwardTenMinutes,
     SeekBackwardTenMinutes,
     SeekToBeginning,
+    SeekToEnd,
+    StopAndRewind,
 
     // Volume
     VolumeUp,
     VolumeDown,
+    VolumeUpSmall,
+    VolumeDownSmall,
+    VolumeUpLarge,
+    VolumeDownLarge,
+    VolumeSetFull,
+    VolumeSetHalf,
     ToggleMute,
+    Unmute,
+    RestoreVolume,
 
     // Audio
     CycleAudioTrack,
@@ -131,6 +154,11 @@ pub enum PlayerAction {
     SubtitleDelayIncrease,
     SubtitleDelayDecrease,
     SubtitleDelayReset,
+    SubtitleFontIncrease,
+    SubtitleFontDecrease,
+    SubtitleFontReset,
+    SubtitleMoveUp,
+    SubtitleMoveDown,
     AddSubtitleFile,
 
     // Video
@@ -144,6 +172,11 @@ pub enum PlayerAction {
     ZoomIn,
     ZoomOut,
     ResetZoom,
+    /// Upstream mpv's `Alt+BS`: drop the zoom *and* the pan offset.
+    ResetVideoTransform,
+    ZoomFit,
+    ZoomFill,
+    ZoomOriginal,
     PanLeft,
     PanRight,
     PanUp,
@@ -173,6 +206,9 @@ pub enum PlayerAction {
     ToggleBrowserView,
     ToggleControls,
     ToggleStatistics,
+    /// Prints the current position and duration as an on-screen message —
+    /// VLC's `T`.
+    ShowPlaybackPosition,
     OpenFile,
 
     // Advanced
@@ -198,6 +234,17 @@ impl PlayerAction {
         PlayerAction::SpeedReset,
         PlayerAction::SpeedHalf,
         PlayerAction::SpeedDouble,
+        PlayerAction::SpeedSetQuarter,
+        PlayerAction::SpeedSetHalf,
+        PlayerAction::SpeedSetThreeQuarter,
+        PlayerAction::SpeedSetNormal,
+        PlayerAction::SpeedSetOneAndQuarter,
+        PlayerAction::SpeedSetOneAndHalf,
+        PlayerAction::SpeedSetOneAndThreeQuarter,
+        PlayerAction::SpeedSetDouble,
+        PlayerAction::SpeedSetTwoAndHalf,
+        PlayerAction::SpeedSetTriple,
+        PlayerAction::SpeedSetQuadruple,
         PlayerAction::SeekForwardShort,
         PlayerAction::SeekBackwardShort,
         PlayerAction::SeekForwardVeryShort,
@@ -209,9 +256,19 @@ impl PlayerAction {
         PlayerAction::SeekForwardTenMinutes,
         PlayerAction::SeekBackwardTenMinutes,
         PlayerAction::SeekToBeginning,
+        PlayerAction::SeekToEnd,
+        PlayerAction::StopAndRewind,
         PlayerAction::VolumeUp,
         PlayerAction::VolumeDown,
+        PlayerAction::VolumeUpSmall,
+        PlayerAction::VolumeDownSmall,
+        PlayerAction::VolumeUpLarge,
+        PlayerAction::VolumeDownLarge,
+        PlayerAction::VolumeSetFull,
+        PlayerAction::VolumeSetHalf,
         PlayerAction::ToggleMute,
+        PlayerAction::Unmute,
+        PlayerAction::RestoreVolume,
         PlayerAction::CycleAudioTrack,
         PlayerAction::CycleAudioDevice,
         PlayerAction::AudioDelayIncrease,
@@ -224,6 +281,11 @@ impl PlayerAction {
         PlayerAction::SubtitleDelayIncrease,
         PlayerAction::SubtitleDelayDecrease,
         PlayerAction::SubtitleDelayReset,
+        PlayerAction::SubtitleFontIncrease,
+        PlayerAction::SubtitleFontDecrease,
+        PlayerAction::SubtitleFontReset,
+        PlayerAction::SubtitleMoveUp,
+        PlayerAction::SubtitleMoveDown,
         PlayerAction::AddSubtitleFile,
         PlayerAction::CycleAspectRatio,
         PlayerAction::AspectRatioAuto,
@@ -235,6 +297,10 @@ impl PlayerAction {
         PlayerAction::ZoomIn,
         PlayerAction::ZoomOut,
         PlayerAction::ResetZoom,
+        PlayerAction::ResetVideoTransform,
+        PlayerAction::ZoomFit,
+        PlayerAction::ZoomFill,
+        PlayerAction::ZoomOriginal,
         PlayerAction::PanLeft,
         PlayerAction::PanRight,
         PlayerAction::PanUp,
@@ -259,12 +325,59 @@ impl PlayerAction {
         PlayerAction::ToggleBrowserView,
         PlayerAction::ToggleControls,
         PlayerAction::ToggleStatistics,
+        PlayerAction::ShowPlaybackPosition,
         PlayerAction::ExportDiagnostics,
         PlayerAction::OpenFile,
         PlayerAction::ShowShortcutHelp,
         PlayerAction::ReloadMedia,
         PlayerAction::ResetVideoAdjustments,
     ];
+
+    /// Whether holding the bound key down should keep firing this action.
+    ///
+    /// Continuous actions (seeking, volume, zoom, panning, delays, speed
+    /// nudges, subtitle size/placement) must repeat so that a held key
+    /// behaves like a jog wheel. Everything else is discrete: holding Space
+    /// must not rapid-toggle play/pause, and holding F must not thrash
+    /// fullscreen. Auto-repeat presses are filtered out for those.
+    pub fn allows_key_repeat(&self) -> bool {
+        use PlayerAction as A;
+        matches!(
+            self,
+            A::SeekForwardShort
+                | A::SeekBackwardShort
+                | A::SeekForwardVeryShort
+                | A::SeekBackwardVeryShort
+                | A::SeekForwardMedium
+                | A::SeekBackwardMedium
+                | A::SeekForwardLong
+                | A::SeekBackwardLong
+                | A::SeekForwardTenMinutes
+                | A::SeekBackwardTenMinutes
+                | A::VolumeUp
+                | A::VolumeUpSmall
+                | A::VolumeUpLarge
+                | A::VolumeDown
+                | A::VolumeDownSmall
+                | A::VolumeDownLarge
+                | A::ZoomIn
+                | A::ZoomOut
+                | A::PanLeft
+                | A::PanRight
+                | A::PanUp
+                | A::PanDown
+                | A::AudioDelayIncrease
+                | A::AudioDelayDecrease
+                | A::SubtitleDelayIncrease
+                | A::SubtitleDelayDecrease
+                | A::SubtitleFontIncrease
+                | A::SubtitleFontDecrease
+                | A::SubtitleMoveUp
+                | A::SubtitleMoveDown
+                | A::SpeedIncrease
+                | A::SpeedDecrease
+        )
+    }
 
     pub fn category(&self) -> ShortcutCategory {
         use PlayerAction as A;
@@ -283,7 +396,19 @@ impl PlayerAction {
             | A::SpeedDecrease
             | A::SpeedReset
             | A::SpeedHalf
-            | A::SpeedDouble => ShortcutCategory::Playback,
+            | A::SpeedDouble
+            | A::StopAndRewind
+            | A::SpeedSetQuarter
+            | A::SpeedSetHalf
+            | A::SpeedSetThreeQuarter
+            | A::SpeedSetNormal
+            | A::SpeedSetOneAndQuarter
+            | A::SpeedSetOneAndHalf
+            | A::SpeedSetOneAndThreeQuarter
+            | A::SpeedSetDouble
+            | A::SpeedSetTwoAndHalf
+            | A::SpeedSetTriple
+            | A::SpeedSetQuadruple => ShortcutCategory::Playback,
 
             A::SeekForwardShort
             | A::SeekBackwardShort
@@ -295,9 +420,20 @@ impl PlayerAction {
             | A::SeekBackwardLong
             | A::SeekForwardTenMinutes
             | A::SeekBackwardTenMinutes
-            | A::SeekToBeginning => ShortcutCategory::Seeking,
+            | A::SeekToBeginning
+            | A::SeekToEnd => ShortcutCategory::Seeking,
 
-            A::VolumeUp | A::VolumeDown | A::ToggleMute => ShortcutCategory::Volume,
+            A::VolumeUp
+            | A::VolumeDown
+            | A::VolumeUpSmall
+            | A::VolumeDownSmall
+            | A::VolumeUpLarge
+            | A::VolumeDownLarge
+            | A::VolumeSetFull
+            | A::VolumeSetHalf
+            | A::ToggleMute
+            | A::Unmute
+            | A::RestoreVolume => ShortcutCategory::Volume,
 
             A::CycleAudioTrack
             | A::CycleAudioDevice
@@ -312,6 +448,11 @@ impl PlayerAction {
             | A::SubtitleDelayIncrease
             | A::SubtitleDelayDecrease
             | A::SubtitleDelayReset
+            | A::SubtitleFontIncrease
+            | A::SubtitleFontDecrease
+            | A::SubtitleFontReset
+            | A::SubtitleMoveUp
+            | A::SubtitleMoveDown
             | A::AddSubtitleFile => ShortcutCategory::Subtitles,
 
             A::CycleAspectRatio
@@ -324,6 +465,10 @@ impl PlayerAction {
             | A::ZoomIn
             | A::ZoomOut
             | A::ResetZoom
+            | A::ResetVideoTransform
+            | A::ZoomFit
+            | A::ZoomFill
+            | A::ZoomOriginal
             | A::PanLeft
             | A::PanRight
             | A::PanUp
@@ -353,6 +498,7 @@ impl PlayerAction {
 
             A::ToggleControls
             | A::ToggleStatistics
+            | A::ShowPlaybackPosition
             | A::ExportDiagnostics
             | A::ReloadMedia
             | A::ResetVideoAdjustments => ShortcutCategory::Advanced,
@@ -377,20 +523,44 @@ impl PlayerAction {
             A::SpeedReset => "Reset Playback Speed",
             A::SpeedHalf => "Halve Playback Speed",
             A::SpeedDouble => "Double Playback Speed",
-            A::SeekForwardShort => "Seek Forward 5s",
-            A::SeekBackwardShort => "Seek Back 5s",
-            A::SeekForwardVeryShort => "Seek Forward 1s",
-            A::SeekBackwardVeryShort => "Seek Back 1s",
-            A::SeekForwardMedium => "Seek Forward 10s",
-            A::SeekBackwardMedium => "Seek Back 10s",
-            A::SeekForwardLong => "Seek Forward 60s",
-            A::SeekBackwardLong => "Seek Back 60s",
+            A::StopAndRewind => "Stop and Rewind",
+            A::SpeedSetQuarter => "Speed: 0.25×",
+            A::SpeedSetHalf => "Speed: 0.5×",
+            A::SpeedSetThreeQuarter => "Speed: 0.75×",
+            A::SpeedSetNormal => "Speed: 1.0×",
+            A::SpeedSetOneAndQuarter => "Speed: 1.25×",
+            A::SpeedSetOneAndHalf => "Speed: 1.5×",
+            A::SpeedSetOneAndThreeQuarter => "Speed: 1.75×",
+            A::SpeedSetDouble => "Speed: 2.0×",
+            A::SpeedSetTwoAndHalf => "Speed: 2.5×",
+            A::SpeedSetTriple => "Speed: 3.0×",
+            A::SpeedSetQuadruple => "Speed: 4.0×",
+            // The magnitudes are user-configurable, so the labels describe the
+            // step class rather than hardcoding a duration that the tuning
+            // panel can change.
+            A::SeekForwardShort => "Seek Forward (Small Step)",
+            A::SeekBackwardShort => "Seek Back (Small Step)",
+            A::SeekForwardVeryShort => "Seek Forward (Very Short)",
+            A::SeekBackwardVeryShort => "Seek Back (Very Short)",
+            A::SeekForwardMedium => "Seek Forward (Medium Step)",
+            A::SeekBackwardMedium => "Seek Back (Medium Step)",
+            A::SeekForwardLong => "Seek Forward (Large Step)",
+            A::SeekBackwardLong => "Seek Back (Large Step)",
             A::SeekForwardTenMinutes => "Seek Forward 10 min",
             A::SeekBackwardTenMinutes => "Seek Back 10 min",
             A::SeekToBeginning => "Seek to Beginning",
+            A::SeekToEnd => "Seek to End",
             A::VolumeUp => "Volume Up",
             A::VolumeDown => "Volume Down",
+            A::VolumeUpSmall => "Volume Up (Fine)",
+            A::VolumeDownSmall => "Volume Down (Fine)",
+            A::VolumeUpLarge => "Volume Up (Coarse)",
+            A::VolumeDownLarge => "Volume Down (Coarse)",
+            A::VolumeSetFull => "Volume: 100%",
+            A::VolumeSetHalf => "Volume: 50%",
             A::ToggleMute => "Mute / Unmute",
+            A::Unmute => "Unmute",
+            A::RestoreVolume => "Restore Previous Volume",
             A::CycleAudioTrack => "Cycle Audio Track",
             A::CycleAudioDevice => "Cycle Audio Device",
             A::AudioDelayIncrease => "Audio Delay +",
@@ -403,6 +573,11 @@ impl PlayerAction {
             A::SubtitleDelayIncrease => "Subtitle Delay +",
             A::SubtitleDelayDecrease => "Subtitle Delay −",
             A::SubtitleDelayReset => "Reset Subtitle Delay",
+            A::SubtitleFontIncrease => "Subtitle Font Larger",
+            A::SubtitleFontDecrease => "Subtitle Font Smaller",
+            A::SubtitleFontReset => "Reset Subtitle Font Size",
+            A::SubtitleMoveUp => "Subtitles Move Up",
+            A::SubtitleMoveDown => "Subtitles Move Down",
             A::AddSubtitleFile => "Load Subtitle File",
             A::CycleAspectRatio => "Cycle Aspect Ratio",
             A::AspectRatioAuto => "Aspect Ratio: Auto",
@@ -414,6 +589,10 @@ impl PlayerAction {
             A::ZoomIn => "Zoom In",
             A::ZoomOut => "Zoom Out",
             A::ResetZoom => "Reset Zoom",
+            A::ResetVideoTransform => "Reset Zoom & Pan",
+            A::ZoomFit => "Zoom: Fit",
+            A::ZoomFill => "Zoom: Fill",
+            A::ZoomOriginal => "Zoom: Original Size",
             A::PanLeft => "Pan Left",
             A::PanRight => "Pan Right",
             A::PanUp => "Pan Up",
@@ -439,6 +618,7 @@ impl PlayerAction {
             A::ToggleBrowserView => "Toggle Media Browser",
             A::ToggleControls => "Toggle On-Screen Controls",
             A::ToggleStatistics => "Toggle Playback Statistics",
+            A::ShowPlaybackPosition => "Show Playback Position",
             A::OpenFile => "Open Media File",
             A::ShowShortcutHelp => "Keyboard Shortcut Help",
             A::ReloadMedia => "Reload Current Media",
@@ -460,6 +640,26 @@ impl MuvrixApp {
 
         match action {
             A::PlayPause => {
+                // Stopping unloads the item, so Play/Pause had nothing to act
+                // on and still reported "Paused". VLC restarts the current
+                // entry from Stop; re-open the remembered path instead.
+                if *self.controller.state() == PlaybackState::Idle {
+                    if self.path_input.trim().is_empty() {
+                        self.push_osd("Nothing to play");
+                    } else {
+                        let path = self.path_input.clone();
+                        self.load_file(&path);
+                    }
+                    return;
+                }
+                // A finished item is not paused: Play/Pause has to rewind it,
+                // otherwise Space at the end of the file did nothing at all.
+                if *self.controller.state() == PlaybackState::Ended {
+                    let _ = self.controller.seek(0.0, SeekMode::Absolute);
+                    let _ = self.controller.play();
+                    self.push_osd("▶ Replaying");
+                    return;
+                }
                 self.toggle_pause();
                 self.push_osd(if self.controller.is_paused() {
                     "⏸ Paused"
@@ -476,6 +676,11 @@ impl MuvrixApp {
                 self.push_osd("⏸ Paused");
             }
             A::Stop => {
+                // Keep the title so Play can restart it and Ctrl+R can reload
+                // it; `controller.stop()` clears its own `current_file`.
+                if let Some(file) = self.controller.current_file() {
+                    self.path_input = file.to_string();
+                }
                 let _ = self.controller.stop();
                 self.push_osd("■ Stopped");
             }
@@ -497,11 +702,13 @@ impl MuvrixApp {
                 let _ = self.controller.step_preset_backward(self.stepping_preset);
             }
             A::SpeedIncrease => {
-                let _ = self.controller.adjust_speed(0.25);
+                let step = self.shortcut_tuning().speed_step;
+                let _ = self.controller.adjust_speed(step);
                 self.push_osd(format!("Speed: {:.2}×", self.controller.speed()));
             }
             A::SpeedDecrease => {
-                let _ = self.controller.adjust_speed(-0.25);
+                let step = self.shortcut_tuning().speed_step;
+                let _ = self.controller.adjust_speed(-step);
                 self.push_osd(format!("Speed: {:.2}×", self.controller.speed()));
             }
             A::SpeedReset => {
@@ -520,31 +727,126 @@ impl MuvrixApp {
                     .set_speed((self.controller.speed() * 2.0).min(8.0));
                 self.push_osd(format!("Speed: {:.2}×", self.controller.speed()));
             }
+            A::StopAndRewind => {
+                let _ = self.controller.stop();
+                let _ = self.controller.seek(0.0, SeekMode::Absolute);
+                self.push_osd("■ Stopped");
+            }
+            A::SpeedSetQuarter
+            | A::SpeedSetHalf
+            | A::SpeedSetThreeQuarter
+            | A::SpeedSetNormal
+            | A::SpeedSetOneAndQuarter
+            | A::SpeedSetOneAndHalf
+            | A::SpeedSetOneAndThreeQuarter
+            | A::SpeedSetDouble
+            | A::SpeedSetTwoAndHalf
+            | A::SpeedSetTriple
+            | A::SpeedSetQuadruple => {
+                let rate = match action {
+                    A::SpeedSetQuarter => 0.25,
+                    A::SpeedSetHalf => 0.5,
+                    A::SpeedSetThreeQuarter => 0.75,
+                    A::SpeedSetOneAndQuarter => 1.25,
+                    A::SpeedSetOneAndHalf => 1.5,
+                    A::SpeedSetOneAndThreeQuarter => 1.75,
+                    A::SpeedSetDouble => 2.0,
+                    A::SpeedSetTwoAndHalf => 2.5,
+                    A::SpeedSetTriple => 3.0,
+                    A::SpeedSetQuadruple => 4.0,
+                    _ => 1.0,
+                };
+                match self.controller.set_speed(rate) {
+                    Ok(()) => self.push_osd(format!("Speed: {rate:.2}×")),
+                    Err(e) => self.push_osd(format!("Speed unavailable: {e}")),
+                }
+            }
 
-            A::SeekForwardShort => self.seek_with_osd(5.0),
-            A::SeekBackwardShort => self.seek_with_osd(-5.0),
+            A::SeekForwardShort => {
+                let step = self.shortcut_tuning().seek_small_secs;
+                self.seek_with_osd(step)
+            }
+            A::SeekBackwardShort => {
+                let step = self.shortcut_tuning().seek_small_secs;
+                self.seek_with_osd(-step)
+            }
             A::SeekForwardVeryShort => self.seek_with_osd(1.0),
             A::SeekBackwardVeryShort => self.seek_with_osd(-1.0),
-            A::SeekForwardMedium => self.seek_with_osd(10.0),
-            A::SeekBackwardMedium => self.seek_with_osd(-10.0),
-            A::SeekForwardLong => self.seek_with_osd(60.0),
-            A::SeekBackwardLong => self.seek_with_osd(-60.0),
+            A::SeekForwardMedium => {
+                let step = self.shortcut_tuning().seek_medium_secs;
+                self.seek_with_osd(step)
+            }
+            A::SeekBackwardMedium => {
+                let step = self.shortcut_tuning().seek_medium_secs;
+                self.seek_with_osd(-step)
+            }
+            A::SeekForwardLong => {
+                let step = self.shortcut_tuning().seek_large_secs;
+                self.seek_with_osd(step)
+            }
+            A::SeekBackwardLong => {
+                let step = self.shortcut_tuning().seek_large_secs;
+                self.seek_with_osd(-step)
+            }
             A::SeekForwardTenMinutes => self.seek_with_osd(600.0),
             A::SeekBackwardTenMinutes => self.seek_with_osd(-600.0),
             A::SeekToBeginning => {
                 let _ = self.controller.seek(0.0, SeekMode::Absolute);
                 self.push_osd("⏮ Beginning");
             }
+            A::SeekToEnd => {
+                let duration = self.controller.duration();
+                if duration > 0.0 {
+                    let _ = self
+                        .controller
+                        .seek((duration - 0.1).max(0.0), SeekMode::Absolute);
+                    self.push_osd("⏭ End");
+                }
+            }
 
             A::VolumeUp => {
-                let _ = self.controller.adjust_volume(5.0);
+                let step = self.shortcut_tuning().volume_step;
+                let _ = self.controller.adjust_volume(step);
                 self.push_osd(format!("Volume: {:.0}%", self.controller.volume()));
             }
             A::VolumeDown => {
-                let _ = self.controller.adjust_volume(-5.0);
+                let step = self.shortcut_tuning().volume_step;
+                let _ = self.controller.adjust_volume(-step);
                 self.push_osd(format!("Volume: {:.0}%", self.controller.volume()));
             }
+            A::VolumeUpSmall => {
+                let _ = self.controller.adjust_volume(1.0);
+                self.push_osd(format!("Volume: {:.0}%", self.controller.volume()));
+            }
+            A::VolumeDownSmall => {
+                let _ = self.controller.adjust_volume(-1.0);
+                self.push_osd(format!("Volume: {:.0}%", self.controller.volume()));
+            }
+            A::VolumeUpLarge => {
+                let _ = self.controller.adjust_volume(10.0);
+                self.push_osd(format!("Volume: {:.0}%", self.controller.volume()));
+            }
+            A::VolumeDownLarge => {
+                let _ = self.controller.adjust_volume(-10.0);
+                self.push_osd(format!("Volume: {:.0}%", self.controller.volume()));
+            }
+            A::VolumeSetFull => {
+                let _ = self.controller.set_volume(100.0);
+                self.push_osd("Volume: 100%");
+            }
+            A::VolumeSetHalf => {
+                let _ = self.controller.set_volume(50.0);
+                self.push_osd("Volume: 50%");
+            }
             A::ToggleMute => {
+                // Remember a usable level so "Restore Previous Volume" has
+                // something to return to after a mute.
+                if !self.controller.is_muted() {
+                    let current = self.controller.volume();
+                    if current > 0.0 {
+                        self.pre_mute_volume = Some(current);
+                    }
+                }
                 let _ = self.controller.toggle_mute();
                 self.push_osd(if self.controller.is_muted() {
                     "🔇 Muted"
@@ -552,15 +854,28 @@ impl MuvrixApp {
                     "🔊 Unmuted"
                 });
             }
+            A::Unmute => {
+                let _ = self.controller.set_mute(false);
+                self.push_osd("🔊 Unmuted");
+            }
+            A::RestoreVolume => {
+                if let Some(volume) = self.pre_mute_volume {
+                    let _ = self.controller.set_mute(false);
+                    let _ = self.controller.set_volume(volume);
+                    self.push_osd(format!("Volume: {volume:.0}%"));
+                } else {
+                    self.push_osd("No previous volume");
+                }
+            }
 
             A::CycleAudioTrack => self.cycle_audio_track(),
             A::CycleAudioDevice => self.cycle_audio_device(),
             A::AudioDelayIncrease => {
-                let step = self.sync_adjust_ms / 1000.0;
+                let step = self.shortcut_tuning().audio_delay_step_ms / 1000.0;
                 self.adjust_audio_delay(step)
             }
             A::AudioDelayDecrease => {
-                let step = self.sync_adjust_ms / 1000.0;
+                let step = self.shortcut_tuning().audio_delay_step_ms / 1000.0;
                 self.adjust_audio_delay(-step)
             }
             A::AudioDelayReset => {
@@ -581,24 +896,65 @@ impl MuvrixApp {
             }
             A::CycleSecondarySubtitle => self.cycle_secondary_subtitle(),
             A::SubtitleDelayIncrease => {
-                let step = self.sync_adjust_ms / 1000.0;
+                let step = self.shortcut_tuning().subtitle_delay_step_ms / 1000.0;
                 self.adjust_subtitle_delay(step)
             }
             A::SubtitleDelayDecrease => {
-                let step = self.sync_adjust_ms / 1000.0;
+                let step = self.shortcut_tuning().subtitle_delay_step_ms / 1000.0;
                 self.adjust_subtitle_delay(-step)
             }
             A::SubtitleDelayReset => {
                 let _ = self.controller.set_subtitle_delay(0.0);
                 self.push_osd("Subtitle delay: 0.00s");
             }
+            A::SubtitleFontIncrease
+            | A::SubtitleFontDecrease
+            | A::SubtitleFontReset
+            | A::SubtitleMoveUp
+            | A::SubtitleMoveDown => {
+                let mut styling = self.controller.subtitle_styling().clone();
+                match action {
+                    A::SubtitleFontReset => styling.font_size = 45,
+                    A::SubtitleFontIncrease => styling.font_size = (styling.font_size + 5).min(120),
+                    A::SubtitleFontDecrease => styling.font_size = (styling.font_size - 5).max(10),
+                    // `pos` runs 0 (top) .. 100 (bottom).
+                    A::SubtitleMoveUp => styling.pos = (styling.pos - 5).clamp(0, 100),
+                    A::SubtitleMoveDown => styling.pos = (styling.pos + 5).clamp(0, 100),
+                    _ => {}
+                }
+                match self.controller.set_subtitle_styling(styling) {
+                    Ok(()) => self.push_osd(match action {
+                        A::SubtitleMoveUp | A::SubtitleMoveDown => {
+                            format!(
+                                "Subtitle position: {}",
+                                self.controller.subtitle_styling().pos
+                            )
+                        }
+                        _ => format!(
+                            "Subtitle size: {}",
+                            self.controller.subtitle_styling().font_size
+                        ),
+                    }),
+                    Err(e) => self.push_osd(format!("Subtitle styling unavailable: {e}")),
+                }
+            }
             A::AddSubtitleFile => self.add_subtitle_dialog(),
 
             A::CycleAspectRatio => {
-                let current = normalize_aspect(&self.controller.aspect_override());
-                let idx = ASPECT_PRESETS
-                    .iter()
-                    .position(|(value, _)| *value == current)
+                // libmpv reports `video-aspect-override` as a float (`-1.000000`
+                // when unset, `1.777778` after `16:9`), never as the label we
+                // wrote. Comparing strings therefore always failed to find the
+                // current preset and re-applied the same one, so the key looked
+                // dead after the first press. Match by ratio instead.
+                let current = parse_aspect_ratio(&self.controller.aspect_override());
+                let idx = current
+                    .and_then(|ratio| {
+                        ASPECT_PRESETS.iter().position(|(value, _)| {
+                            parse_aspect_ratio(value)
+                                .map(|preset| (preset - ratio).abs() < 0.01)
+                                .unwrap_or(false)
+                        })
+                    })
                     .unwrap_or(0);
                 let (value, label) = ASPECT_PRESETS[(idx + 1) % ASPECT_PRESETS.len()];
                 self.apply_aspect(value);
@@ -628,6 +984,17 @@ impl MuvrixApp {
                 Ok(()) => self.push_osd("Crop: Default"),
                 Err(e) => self.push_osd(format!("Crop unavailable: {e}")),
             },
+            A::ZoomFit | A::ZoomFill | A::ZoomOriginal => {
+                let mode = match action {
+                    A::ZoomFill => ScalingMode::Fill,
+                    A::ZoomOriginal => ScalingMode::Original,
+                    _ => ScalingMode::Fit,
+                };
+                match self.controller.set_scaling_mode(mode) {
+                    Ok(()) => self.push_osd(format!("View: {}", mode.label())),
+                    Err(e) => self.push_osd(format!("View mode unavailable: {e}")),
+                }
+            }
             A::CycleScalingMode => {
                 let current = self.controller.scaling_mode();
                 let idx = ScalingMode::ALL
@@ -651,6 +1018,15 @@ impl MuvrixApp {
             A::ResetZoom => {
                 let _ = self.controller.set_video_zoom(0.0);
                 self.push_osd("Zoom: 0.0");
+            }
+            // mpv's `Alt+BS` resets video-zoom, video-pan-x and video-pan-y in
+            // one keystroke. ResetZoom alone leaves the picture off-centre,
+            // which looks like the key did nothing when the offset was the
+            // only transformation in play.
+            A::ResetVideoTransform => {
+                let _ = self.controller.set_video_zoom(0.0);
+                let _ = self.controller.reset_video_pan();
+                self.push_osd("View reset");
             }
             A::PanLeft => self.pan_video(-0.1, 0.0),
             A::PanRight => self.pan_video(0.1, 0.0),
@@ -763,6 +1139,16 @@ impl MuvrixApp {
                     probe.set_enabled(self.show_playback_stats);
                 }
             }
+            A::ShowPlaybackPosition => {
+                let pos = self.controller.time_pos();
+                let duration = self.controller.duration();
+                let text = if duration > 0.0 {
+                    format!("{} / {}", format_timestamp(pos), format_timestamp(duration))
+                } else {
+                    format_timestamp(pos)
+                };
+                self.push_osd(text);
+            }
             A::OpenFile => self.open_file_dialog(),
             A::ShowShortcutHelp => {
                 self.show_shortcuts = !self.show_shortcuts;
@@ -781,6 +1167,14 @@ impl MuvrixApp {
             RepeatMode::One => "One",
             RepeatMode::All => "All",
         }
+    }
+
+    /// Sanitized shortcut magnitudes currently in effect.
+    ///
+    /// Read on every dispatch so a change in the settings panel applies to the
+    /// next key press without restarting playback.
+    pub(crate) fn shortcut_tuning(&self) -> crate::app::shortcuts::ShortcutTuning {
+        self.keybindings.tuning.sanitized()
     }
 
     fn seek_with_osd(&mut self, delta: f64) {
@@ -979,9 +1373,14 @@ impl MuvrixApp {
     }
 
     fn reload_current_media(&mut self) {
-        let Some(path) = self.controller.current_file().map(|f| f.to_string()) else {
-            self.push_osd("Nothing to reload");
-            return;
+        let path = match self.controller.current_file() {
+            Some(file) => file.to_string(),
+            // After Stop the engine has no file but the title is still known.
+            None if !self.path_input.trim().is_empty() => self.path_input.clone(),
+            None => {
+                self.push_osd("Nothing to reload");
+                return;
+            }
         };
         let pos = self.controller.time_pos();
         let audio = self
@@ -1006,6 +1405,22 @@ impl MuvrixApp {
 /// aspect preset.
 pub fn normalize_aspect_public(value: &str) -> String {
     normalize_aspect(value)
+}
+
+/// Parses libmpv's aspect notation (`16:9`, `2.35:1`, `1.777778`, `-1.000000`)
+/// into a positive ratio. `None` means "no override", i.e. auto.
+fn parse_aspect_ratio(value: &str) -> Option<f64> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("no") || value.eq_ignore_ascii_case("auto") {
+        return None;
+    }
+    if let Some((num, den)) = value.split_once(':') {
+        let num: f64 = num.trim().parse().ok()?;
+        let den: f64 = den.trim().parse().ok()?;
+        return (num > 0.0 && den > 0.0).then_some(num / den);
+    }
+    let ratio: f64 = value.parse().ok()?;
+    (ratio > 0.0).then_some(ratio)
 }
 
 fn normalize_aspect(value: &str) -> String {

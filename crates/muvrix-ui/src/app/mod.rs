@@ -102,29 +102,51 @@ impl MuvrixApp {
         self.check_decoder_path();
         self.flush_telemetry();
         self.update_frame_timing();
+        self.drive_key_script(ctx);
         self.handle_keyboard_inputs(ctx);
         self.update_osd_autohide(ctx);
         self.sync_seeded_ab_loop();
         self.update_spectrum_visualizer(ctx);
 
-        // Handle drag and drop media files into the application
-        ctx.input(|i| {
-            if !i.raw.dropped_files.is_empty() {
-                for file in &i.raw.dropped_files {
-                    if let Some(ref path) = file.path {
-                        let path_str = path.to_string_lossy().to_string();
-                        if self.controller.playlist_count() == 0
-                            && *self.controller.state() == PlaybackState::Idle
-                        {
-                            self.load_file(&path_str);
-                        } else {
-                            let _ = self.controller.playlist_append(&path_str);
-                            self.status_message = format!("Appended to playlist: {path_str}");
+        // Handle drag and drop: media files load or queue, while subtitle
+        // files attach to the current playback instead of being queued as
+        // unplayable media. Paths are collected first so the input lock is
+        // released before any libmpv call.
+        let dropped: Vec<String> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.as_ref())
+                .map(|p| p.to_string_lossy().to_string())
+                .collect()
+        });
+        for path_str in dropped {
+            if crate::app::commands::is_subtitle_path(&path_str) {
+                if self.controller.current_file().is_some() {
+                    match self.controller.add_subtitle_file(&path_str, true) {
+                        Ok(()) => {
+                            self.push_osd("Subtitle loaded");
+                            self.status_message = format!("Subtitle track added: {path_str}");
+                        }
+                        Err(e) => {
+                            self.push_osd(format!("Subtitle failed: {e}"));
+                            self.status_message = format!("Failed to add subtitle {path_str}: {e}");
                         }
                     }
+                } else {
+                    self.status_message = "Load a video before adding a subtitle file".to_string();
                 }
+                continue;
             }
-        });
+            if self.controller.playlist_count() == 0
+                && *self.controller.state() == PlaybackState::Idle
+            {
+                self.load_file(&path_str);
+            } else {
+                let _ = self.controller.playlist_append(&path_str);
+                self.status_message = format!("Appended to playlist: {path_str}");
+            }
+        }
 
         // Optional automated window screenshot capture for verification
         if let Ok(capture_path) = std::env::var("MUVRIX_CAPTURE_WINDOW_PNG") {
@@ -295,7 +317,10 @@ impl MuvrixApp {
                 AppView::Lyrics => self.render_lyrics_view(ctx),
                 AppView::Recent => self.render_recent_view(ctx),
                 AppView::Settings => self.render_settings_view(ctx),
-                AppView::Player => unreachable!(),
+                // The mini-player deck (or a navigation action) can switch to
+                // the Player view while this frame is being built. Rendering
+                // it here avoids panicking on a legitimate view transition.
+                AppView::Player => self.render_player_view(ctx),
             }
         } else {
             self.render_player_view(ctx);

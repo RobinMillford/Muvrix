@@ -333,7 +333,10 @@ impl Default for EqualizerSettings {
             pitch_correction: true,
             audio_delay: 0.0,
             channel_layout: "auto".to_string(),
-            volume_boost: 100.0,
+            // mpv's own `volume-max` default. A 100% ceiling made "Volume Up"
+            // a silent no-op at the default level, which is indistinguishable
+            // from a broken shortcut.
+            volume_boost: 130.0,
             crossfeed_enabled: false,
             crossfeed_preset: Bs2bPreset::Default,
             ebu_r128: EbuR128Settings::default(),

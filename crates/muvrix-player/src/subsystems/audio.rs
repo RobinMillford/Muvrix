@@ -92,7 +92,10 @@ impl AudioSubsystem {
     pub fn new() -> Self {
         Self {
             volume: 100.0,
-            volume_boost_max: 100.0,
+            // mpv's own `volume-max` default. Keeping the ceiling at 100 made
+            // "Volume Up" a no-op at the default level, which is indistinguishable
+            // from a broken shortcut; mpv and VLC both allow headroom above 100.
+            volume_boost_max: 130.0,
             is_muted: false,
             speed: 1.0,
             audio_delay: 0.0,

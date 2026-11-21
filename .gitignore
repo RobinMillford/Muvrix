@@ -102,6 +102,9 @@ docs/audits/
 docs/engineering/
 docs/screenshots/
 docs/*.zip
+# GUI validation captures and per-phase QA reports (large binaries, regenerated
+# locally; the shipped documentation lives in the tracked docs/*.md files).
+docs/gui-validation/
 PHASE_*.md
 
 # Local phase fixture generator
