@@ -26,7 +26,7 @@ Verification vocabulary used throughout:
 | Fedora | RPM | Runtime-tested (development host) |
 | Ubuntu | DEB | Packaging present, not runtime-tested |
 | Debian | DEB | Packaging present, not runtime-tested |
-| Arch Linux | PKGBUILD/AUR | **Not implemented** |
+| Arch Linux | PKGBUILD | Present; compile-checked only, never installed or played |
 | Any glibc Linux | AppImage | Packaging present, not runtime-tested |
 | Any Flatpak host | Flatpak | Packaging present, not runtime-tested |
 
@@ -212,13 +212,63 @@ Decision rule:
 Never both at once for the same installation. The launcher implements the
 bundled-first, system-fallback order and is the only place that decision lives.
 
+## 10.5 Bundling boundary and the glibc floor
+
+Two rules decide what ships inside the package and what is taken from the host.
+Both were violated by the bundle as first built, and both are now enforced in
+`packaging/build_runtime_bundle.sh` via an explicit denylist.
+
+**Host-owned, never bundled:** the C library and loader, OpenSSL, D-Bus, the
+graphics driver stack (EGL/GL/DRM/Vulkan/VA-API), and - newly added - the X11,
+audio-server and desktop-integration families (`libX11*`, `libxcb*`, `libXau`,
+`libXdmcp`, `libXext`, `libXfixes`, `libXi`, `libXrandr`, `libXrender`,
+`libXcursor`, `libXScrnSaver`, `libXcomposite`, `libXdamage`, `libXinerama`,
+`libXtst`, `libasound`, `libpulse*`, `libpipewire*`, `libSDL2*`, `libapparmor`).
+
+The reason the last group matters is not tidiness. Each of those talks to a
+service that is already running on the host - the X server over its socket,
+PipeWire or PulseAudio over their protocol. A private copy pins a client that
+may not match the daemon the user actually has, and because the launcher
+prepends the bundle to `LD_LIBRARY_PATH` the private copy silently wins. That
+would surface as broken X11 or broken audio on a host the package claims to
+support.
+
+**Bundled:** libmpv, FFmpeg, libplacebo, libass and the rest of the media
+decode/convert closure - anything that does not negotiate with a host daemon.
+
+**The glibc floor.** The shipped binary required `GLIBC_2.39` for exactly two
+symbols: `pidfd_spawnp` and `pidfd_getpid`, which Rust's standard library uses
+for process spawning and which Ubuntu 24.04 added to glibc. Building the same
+source on Debian 12 produces a `2.36` floor with no source change.
+
+The bundle is therefore built on `debian:12`. That release was chosen by
+measurement, not preference:
+
+| Baseline | glibc | Viable | Why |
+|---|---|---|---|
+| Ubuntu 24.04 | 2.39 | yes | previous baseline; excludes Debian 12, Ubuntu 22.04 |
+| Debian 12 | 2.36 | **chosen** | has `libshaderc-dev`; libplacebo needs `-Dshaderc=enabled` |
+| Ubuntu 22.04 | 2.35 | no | no `libshaderc-dev` package at all |
+
+Meson is pinned to 1.4.2 from PyPI (Debian 12 ships 1.0.1; libplacebo requires
+>= 1.3.0) and FFmpeg 6.1 is built from the pinned release tarball (libplacebo
+7.387 needs `libavcodec >= 60.31.102`; Debian 12 has 59.x).
+
+Status: the baseline change is source-audited and the `2.36` build was verified
+in a container, but **no package has been regenerated from it yet** - the FFmpeg
+build was interrupted. The packages currently in `target/packages` still contain
+the 2.39 bundle. Treat 2.36 as the intended floor, not the shipped one, until
+the runtime is rebuilt and the packages regenerated.
+
+An AppImage is not independent of glibc: it inherits exactly this floor.
+
 ## 11. Packaging strategy
 
 | Format | libmpv source | Status |
 |---|---|---|
 | RPM | **bundled** under `/usr/lib/muvrix/lib` | Script present; `Requires` names host libs only |
 | DEB | **bundled** under `/usr/lib/muvrix/lib` | Script present; built and inspected (see below) |
-| Arch | system or bundled | **Not implemented** |
+| Arch | **system** libmpv (see §11) | `packaging/arch/PKGBUILD` present; compile-checked only |
 | AppImage | bundled under `usr/lib/muvrix/lib` | `AppRun` prepends it to `LD_LIBRARY_PATH` |
 | Flatpak | bundled, pinned sources | Manifest present; ships `runtime/lib` to `/app/lib/muvrix` |
 
@@ -258,7 +308,8 @@ becomes viable and should be added as a separate package flavour rather than by
 changing this one.
 
 Required host runtime beyond libmpv: a C library new enough for the private
-runtime (glibc ≥ 2.39 for the current bundle), EGL/OpenGL, D-Bus, OpenSSL, the
+runtime (glibc ≥ 2.36 after the Debian 12 rebuild; the shipped packages currently
+still contain a 2.39-built bundle until they are regenerated), EGL/OpenGL, D-Bus, OpenSSL, the
 Wayland/X11 client libraries and libva. Audio is delegated to libmpv's own
 outputs, so the host's PipeWire/PulseAudio/ALSA stack is used rather than linked
 directly.
@@ -284,6 +335,7 @@ Planned, with current status:
 | Job | Purpose | Status |
 |---|---|---|
 | `linux-ubuntu` | baseline compile + tests | Present |
+| `linux-glibc-floor` (debian:12) | assert no object needs glibc > 2.36 | **Added** |
 | `linux-fedora` (container) | Fedora/RPM variance | Present |
 | `packaging` | RPM/DEB/AppImage/Flatpak artifacts | Present |
 | clippy + fmt | hygiene | Present |
@@ -322,7 +374,8 @@ Ordered by risk, not by novelty. Items 1 and 2 are done.
    `libmpv.so.2` produces a MUVRIX message instead of a loader error.
 4. **X11 runtime verification** on a real X server, including fullscreen
    transition and presentation timing.
-5. **Arch packaging** (PKGBUILD), currently the only missing mainstream format.
+5. ~~**Arch packaging** (PKGBUILD).~~ **Added**, compile-checked only — still needs a
+   real install and playback test on Arch.
 6. **AMD and NVIDIA decoding verification** on real hardware, recording the
    observed `hwdec-current` for each.
 7. **High-bitrate 4K60 investigation**, as a separate scoped effort. Cause is
